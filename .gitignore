@@ -1,0 +1,5 @@
+/target/
+/.mcp.json
+*.log
+*.tmp
+.DS_Store
