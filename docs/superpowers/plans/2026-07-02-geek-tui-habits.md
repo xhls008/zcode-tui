@@ -66,7 +66,7 @@
 **Files:**
 - Git repository metadata only.
 
-- [ ] Confirm no token or secret strings are tracked.
-- [ ] Commit the changes.
-- [ ] Push `main` to `https://github.com/xhls008/zcode-tui`.
-- [ ] Verify public access with unauthenticated GitHub API or raw README fetch.
+- [x] Confirm no token or secret strings are tracked.
+- [x] Commit the changes.
+- [x] Push `main` to `https://github.com/xhls008/zcode-tui`.
+- [x] Verify public access with unauthenticated GitHub API or raw README fetch.
