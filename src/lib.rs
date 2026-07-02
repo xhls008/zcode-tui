@@ -23,8 +23,26 @@ pub struct AppConfig {
 pub enum InputAction {
     Prompt(String),
     Local(Vec<String>),
+    Shell(String),
     Quit,
     Empty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub command: &'static str,
+    pub summary: &'static str,
+    pub route: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderAction {
+    CommandPalette,
+    Help,
+    Editor,
+    ClearConversation,
+    ClearInput,
+    Quit,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,6 +160,13 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
     if trimmed.is_empty() {
         return Ok(InputAction::Empty);
     }
+    if let Some(command) = trimmed.strip_prefix('!') {
+        let command = command.trim();
+        if command.is_empty() {
+            return Ok(InputAction::Empty);
+        }
+        return Ok(InputAction::Shell(command.to_string()));
+    }
     if !trimmed.starts_with('/') {
         return Ok(InputAction::Prompt(trimmed.to_string()));
     }
@@ -155,7 +180,7 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
 
     match parts[0].as_str() {
         "exit" | "quit" => Ok(InputAction::Quit),
-        "help" | "clear" => Ok(InputAction::Local(parts)),
+        "help" | "clear" | "editor" => Ok(InputAction::Local(parts)),
         "skills" => {
             let mut local = parts;
             if local.len() == 1 {
@@ -171,6 +196,145 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
             Ok(InputAction::Prompt(trimmed.to_string()))
         }
         _ => Ok(InputAction::Prompt(trimmed.to_string())),
+    }
+}
+
+pub fn command_catalog() -> &'static [CommandSpec] {
+    &[
+        CommandSpec {
+            command: "/goal",
+            summary: "forward a goal to ZCode",
+            route: "zcode",
+        },
+        CommandSpec {
+            command: "/goal replace",
+            summary: "replace the current ZCode goal",
+            route: "zcode",
+        },
+        CommandSpec {
+            command: "/skill",
+            summary: "force a named ZCode skill for the prompt",
+            route: "zcode",
+        },
+        CommandSpec {
+            command: "/skills list",
+            summary: "list available ZCode skills",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/mcp list",
+            summary: "list local .mcp.json servers",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/mcp config",
+            summary: "print the active .mcp.json path",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/mcp add",
+            summary: "add or update an MCP server",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/mcp remove",
+            summary: "remove an MCP server",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/mcp status",
+            summary: "ask ZCode for runtime MCP status",
+            route: "zcode",
+        },
+        CommandSpec {
+            command: "/model",
+            summary: "forward model selection to ZCode",
+            route: "zcode",
+        },
+        CommandSpec {
+            command: "/mode",
+            summary: "forward mode selection to ZCode",
+            route: "zcode",
+        },
+        CommandSpec {
+            command: "/resume",
+            summary: "forward session resume to ZCode",
+            route: "zcode",
+        },
+        CommandSpec {
+            command: "/new",
+            summary: "forward new-session request to ZCode",
+            route: "zcode",
+        },
+        CommandSpec {
+            command: "/compact",
+            summary: "forward context compaction to ZCode",
+            route: "zcode",
+        },
+        CommandSpec {
+            command: "/editor",
+            summary: "edit the prompt in $VISUAL or $EDITOR",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/clear",
+            summary: "clear conversation scrollback",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/help",
+            summary: "toggle the help overlay",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/exit",
+            summary: "quit the fallback TUI",
+            route: "local",
+        },
+        CommandSpec {
+            command: "! <cmd>",
+            summary: "run a local shell command with sh -lc",
+            route: "shell",
+        },
+    ]
+}
+
+pub fn slash_suggestions(input: &str, limit: usize) -> Vec<CommandSpec> {
+    let prefix = input.trim();
+    if prefix.is_empty() || !prefix.starts_with('/') || limit == 0 {
+        return Vec::new();
+    }
+    command_catalog()
+        .iter()
+        .copied()
+        .filter(|item| item.command.starts_with(prefix))
+        .take(limit)
+        .collect()
+}
+
+pub fn command_palette_rows() -> Vec<String> {
+    command_catalog()
+        .iter()
+        .map(|item| {
+            format!(
+                "{:<18} {:<5} {}",
+                item.command,
+                format!("[{}]", item.route),
+                item.summary
+            )
+        })
+        .collect()
+}
+
+pub fn leader_action_for_key(key: char) -> Option<LeaderAction> {
+    match key.to_ascii_lowercase() {
+        'p' => Some(LeaderAction::CommandPalette),
+        'h' | '?' => Some(LeaderAction::Help),
+        'e' => Some(LeaderAction::Editor),
+        'x' => Some(LeaderAction::ClearConversation),
+        'u' => Some(LeaderAction::ClearInput),
+        'q' => Some(LeaderAction::Quit),
+        _ => None,
     }
 }
 
@@ -215,6 +379,10 @@ pub fn mcp_config_path(config: &AppConfig) -> Result<PathBuf> {
 pub fn run_prompt(zcode_bin: &str, config: &AppConfig, prompt: &str) -> Result<String> {
     let command = build_prompt_command(zcode_bin, config, prompt);
     run_command(&command)
+}
+
+pub fn run_shell_command(command: &str) -> Result<String> {
+    run_command(&["sh".to_string(), "-lc".to_string(), command.to_string()])
 }
 
 pub fn run_command(command: &[String]) -> Result<String> {
@@ -326,6 +494,7 @@ fn handle_mcp_command(command: &[String], config: &AppConfig) -> Result<String> 
 pub fn help_text() -> &'static str {
     r#"zcode-tui fallback commands:
   text                         send a prompt with zcode --prompt
+  ! <cmd>                      run a local shell command
   /goal <text>                 forward to ZCode goal handling
   /goal replace <text>         replace current goal through ZCode
   /skill <name> <task>         force a ZCode skill for a prompt
@@ -335,8 +504,16 @@ pub fn help_text() -> &'static str {
   /mcp add <name> <cmd> [args] add/update an MCP server in .mcp.json
   /mcp remove <name>           remove an MCP server from .mcp.json
   /mcp status                  forward to ZCode as /mcp status
+  /editor                      edit current prompt in $VISUAL or $EDITOR
   /clear                       clear this screen
   /exit                        quit
+
+keys:
+  Ctrl+P                       command palette
+  Ctrl+X then p/h/e/x/u/q      leader shortcuts
+  Tab                          complete slash command suggestions
+  Ctrl+G                       edit prompt externally
+  Ctrl+J                       insert newline
 "#
 }
 

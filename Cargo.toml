@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "A Rust fallback terminal UI for ZCode Linux builds without @zcode/tui."
-repository = "https://github.com/flybear/zcode-tui"
+repository = "https://github.com/xhls008/zcode-tui"
 
 [lib]
 name = "zcode_tui"

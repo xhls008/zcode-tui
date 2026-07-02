@@ -1,8 +1,9 @@
 use std::fs;
 
 use zcode_tui::{
-    build_prompt_command, classify_input, load_mcp_config, parse_cli_args, save_mcp_config,
-    strip_ansi, InputAction, McpServer,
+    build_prompt_command, classify_input, command_palette_rows, leader_action_for_key,
+    load_mcp_config, parse_cli_args, save_mcp_config, slash_suggestions, strip_ansi, InputAction,
+    LeaderAction, McpServer,
 };
 
 #[test]
@@ -85,6 +86,50 @@ fn classify_goal_and_skill_commands() {
         classify_input("/skills list").unwrap(),
         InputAction::Local(vec!["skills".into(), "list".into()])
     );
+}
+
+#[test]
+fn classify_bang_commands_as_local_shell() {
+    assert_eq!(
+        classify_input("! cargo test").unwrap(),
+        InputAction::Shell("cargo test".to_string())
+    );
+    assert_eq!(classify_input("!   ").unwrap(), InputAction::Empty);
+}
+
+#[test]
+fn slash_suggestions_filter_by_prefix() {
+    let suggestions = slash_suggestions("/mc", 5);
+
+    assert_eq!(suggestions[0].command, "/mcp list");
+    assert!(suggestions.iter().any(|item| item.command == "/mcp add"));
+    assert!(suggestions
+        .iter()
+        .all(|item| item.command.starts_with("/mc")));
+}
+
+#[test]
+fn command_palette_exposes_common_commands() {
+    let rows = command_palette_rows();
+
+    assert!(rows.iter().any(|row| row.contains("/goal")));
+    assert!(rows.iter().any(|row| row.contains("/skills list")));
+    assert!(rows.iter().any(|row| row.contains("! <cmd>")));
+}
+
+#[test]
+fn leader_keys_map_to_tui_actions() {
+    assert_eq!(
+        leader_action_for_key('p'),
+        Some(LeaderAction::CommandPalette)
+    );
+    assert_eq!(leader_action_for_key('h'), Some(LeaderAction::Help));
+    assert_eq!(leader_action_for_key('e'), Some(LeaderAction::Editor));
+    assert_eq!(
+        leader_action_for_key('x'),
+        Some(LeaderAction::ClearConversation)
+    );
+    assert_eq!(leader_action_for_key('z'), None);
 }
 
 #[test]

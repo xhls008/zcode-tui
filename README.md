@@ -12,12 +12,16 @@ This is not the official ZCode TUI. It is a practical terminal wrapper that talk
 
 - Rust binary, no Python runtime.
 - Ratatui + Crossterm interface with a proper multi-panel layout.
-- Entry screen carries the `智谱` brand mark with `@zcode`.
+- Geek-style terminal instrument panel with the `智谱 @zcode` mark.
 - Conversation panel, command/control panel, prompt box, and status bar.
+- Command palette via `Ctrl+P`.
+- OpenCode-style leader key via `Ctrl+X`, then `p/h/e/x/u/q`.
+- Slash command suggestions and completion via `Tab`.
 - Help modal via `/help`.
 - Input history with Up/Down.
 - Scrollback with PgUp/PgDn, Home, and End.
-- Common shortcuts: Ctrl+L clear, Ctrl+U clear input, Ctrl+Q quit.
+- Common shortcuts: Ctrl+G editor, Ctrl+J newline, Ctrl+L clear, Ctrl+U clear input, Ctrl+Q quit.
+- Local shell escape with `! <cmd>`.
 - Starts when `zcode tui` falls through because `@zcode/tui` is missing.
 - Sends normal text through `zcode --prompt`.
 - Supports `/goal ...` and `/goal replace ...` by forwarding them to ZCode.
@@ -61,6 +65,7 @@ Cannot find package '@zcode/tui'
 
 ```text
 text                         send a prompt with zcode --prompt
+! <cmd>                      run a local shell command
 /goal <text>                 forward to ZCode goal handling
 /goal replace <text>         replace current goal through ZCode
 /skill <name> <task>         force a ZCode skill for a prompt
@@ -70,9 +75,28 @@ text                         send a prompt with zcode --prompt
 /mcp add <name> <cmd> [args] add/update an MCP server in .mcp.json
 /mcp remove <name>           remove an MCP server from .mcp.json
 /mcp status                  forward to ZCode as /mcp status
+/editor                      edit current prompt in $VISUAL or $EDITOR
 /clear                       clear this screen
 /exit                        quit
 ```
+
+## Key Habits
+
+```text
+Ctrl+P                       command palette
+Ctrl+X then p                command palette
+Ctrl+X then h                help
+Ctrl+X then e                edit prompt externally
+Ctrl+X then x                clear conversation
+Ctrl+X then u                clear input
+Ctrl+X then q                quit
+Tab                          slash command completion/suggestions
+Ctrl+G                       edit prompt in $VISUAL or $EDITOR
+Ctrl+J                       insert newline
+?                            help when the input is empty
+```
+
+The design reference notes are stored in `docs/references/agent-tui-habits.md`, with official Claude Code and OpenCode page snapshots under `docs/references/raw/`.
 
 ## Limits
 
