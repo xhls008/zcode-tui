@@ -2,11 +2,9 @@
 
 ![ZCode 发布了，TUI 呢？](assets/zcode-no-tui-satire.png)
 
-> 下面这张旧图是第一版吐槽草图，新的主图放在上面。
->
-> ![ZCode Linux missing TUI roast](assets/zcode-tui-roast.png)
-
 看到 ZCode 发布了，兴冲冲下载 Linux beta，结果包里主打的是桌面版；直接运行 `zcode`，想要一个像 Codex、Claude Code、Kimi Code 那样能在终端里干活的 TUI，结果没有。CLI help 里写着 `tui`，真敲 `zcode tui` 又提示缺 `@zcode/tui`。这体验就像菜单上写着牛肉面，端上来一碗热水，还问你是不是已经闻到香味了。
+
+![菜单写着牛肉面，端上来一碗热水](assets/beef-noodle-hot-water-satire.png)
 
 Kimi 有 TUI，Codex 有 TUI，Claude Code 有 TUI。ZCode 都发布了，Linux 用户想在终端里直接开干，竟然还要自己补一层。那就补：这个项目是一个 **Rust 写的 ZCode 终端 TUI fallback**，专门兜住官方 Linux 包缺少 `@zcode/tui` 的尴尬空洞。
 
