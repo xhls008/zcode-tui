@@ -2,109 +2,115 @@
 
 ![ZCode Linux missing TUI roast](assets/zcode-tui-roast.png)
 
-ZCode Linux beta has a `tui` command in the CLI help, but the package shipped here does not include `@zcode/tui`. So `zcode tui` says the chair is there, then you sit down and hit the floor.
+看到 ZCode 发布了，兴冲冲下载 Linux beta，结果包里主打的是桌面版；直接运行 `zcode`，想要一个像 Codex、Claude Code、Kimi Code 那样能在终端里干活的 TUI，结果没有。CLI help 里写着 `tui`，真敲 `zcode tui` 又提示缺 `@zcode/tui`。这体验就像菜单上写着牛肉面，端上来一碗热水，还问你是不是已经闻到香味了。
 
-Kimi has a terminal UI. Codex has a terminal UI. ZCode claims to be serious about coding, then Linux users get a missing runtime package. This project is a Rust fallback layer for that gap. Is this still "国产大模型 top 1" energy? The README cannot decide, so it ships a workaround.
+Kimi 有 TUI，Codex 有 TUI，Claude Code 有 TUI。ZCode 都发布了，Linux 用户想在终端里直接开干，竟然还要自己补一层。那就补：这个项目是一个 **Rust 写的 ZCode 终端 TUI fallback**，专门兜住官方 Linux 包缺少 `@zcode/tui` 的尴尬空洞。
 
-This is not the official ZCode TUI. It is a practical terminal wrapper that talks to the official `zcode --prompt` path and handles the slash commands that are annoying to lose.
+这不是 ZCode 官方 TUI，也不伪装成官方实现。它是一个实用的终端壳：普通输入走官方 `zcode --prompt`，常用 slash 命令、MCP 配置、shell escape、命令面板和编辑器工作流在本地补齐。
 
-## Features
+## 功能
 
-- Rust binary, no Python runtime.
-- Ratatui + Crossterm interface with a proper multi-panel layout.
-- Geek-style terminal instrument panel with the `智谱 @zcode` mark.
-- Conversation panel, command/control panel, prompt box, and status bar.
-- Command palette via `Ctrl+P`.
-- OpenCode-style leader key via `Ctrl+X`, then `p/h/e/x/u/q`.
-- Slash command suggestions and completion via `Tab`.
-- Help modal via `/help`.
-- Input history with Up/Down.
-- Scrollback with PgUp/PgDn, Home, and End.
-- Common shortcuts: Ctrl+G editor, Ctrl+J newline, Ctrl+L clear, Ctrl+U clear input, Ctrl+Q quit.
-- Local shell escape with `! <cmd>`.
-- Starts when `zcode tui` falls through because `@zcode/tui` is missing.
-- Sends normal text through `zcode --prompt`.
-- Supports `/goal ...` and `/goal replace ...` by forwarding them to ZCode.
-- Supports `/skill <name> <task>` by forwarding it to ZCode.
-- Supports `/skills [list]` by calling `zcode skills list`.
-- Supports local MCP configuration:
+- Rust 编写，不依赖 Python 运行时。
+- Ratatui + Crossterm 多面板终端界面。
+- 极客风 terminal bus 顶栏，带 `智谱 @zcode` 标识。
+- Transcript、Control Matrix、Prompt、Status 四块主区域。
+- `Ctrl+P` 命令面板。
+- OpenCode 风格 leader key：`Ctrl+X` 后接 `p/h/e/x/u/q`。
+- `Tab` slash 命令建议和补全。
+- `/help` 或空输入下 `?` 打开帮助。
+- Up/Down 输入历史。
+- PgUp/PgDn、Home、End 滚动。
+- `Ctrl+G` 调 `$VISUAL` 或 `$EDITOR` 编辑长 prompt。
+- `Ctrl+J` 多行输入。
+- `! <cmd>` 本地 shell escape。
+- 官方 `zcode tui` 因缺 `@zcode/tui` 失败时，可自动 fallback 到这个 TUI。
+- 普通文本通过 `zcode --prompt` 发送给 ZCode。
+- `/goal ...`、`/goal replace ...` 转发给 ZCode。
+- `/skill <name> <task>` 转发给 ZCode。
+- `/skills [list]` 调 `zcode skills list`。
+- 本地 MCP 配置管理：
   - `/mcp list`
   - `/mcp config`
   - `/mcp add <name> <command> [args...]`
   - `/mcp remove <name>`
-- Forwards runtime MCP session commands like `/mcp status` to ZCode.
+- `/mcp status` 等运行态 MCP 命令继续转发给 ZCode。
 
-## Install
+## 安装
 
-Build the binary:
+构建 release 版本：
 
 ```bash
 cargo build --release
 ```
 
-Run it directly:
+直接运行：
 
 ```bash
 ./target/release/zcode-tui
 ```
 
-Or point the local ZCode wrapper at it:
+或者让本地 ZCode wrapper 指向它：
 
 ```bash
 export ZCODE_FALLBACK_TUI="$PWD/target/release/zcode-tui"
 zcode tui
 ```
 
-On this machine the wrapper at `~/.local/bin/zcode` is patched to try official TUI first, then fall back to this binary only when the Linux package reports:
+这台机器上的 `~/.local/bin/zcode` 已经打过补丁：先尝试官方 TUI；只有当 Linux 包报下面这个错误时，才 fallback 到本项目：
 
 ```text
 Cannot find package '@zcode/tui'
 ```
 
-## Commands
+## 命令
 
 ```text
-text                         send a prompt with zcode --prompt
-! <cmd>                      run a local shell command
-/goal <text>                 forward to ZCode goal handling
-/goal replace <text>         replace current goal through ZCode
-/skill <name> <task>         force a ZCode skill for a prompt
-/skills [list]               list ZCode skills through zcode skills list
-/mcp list                    list local .mcp.json servers
-/mcp config                  print local .mcp.json path
-/mcp add <name> <cmd> [args] add/update an MCP server in .mcp.json
-/mcp remove <name>           remove an MCP server from .mcp.json
-/mcp status                  forward to ZCode as /mcp status
-/editor                      edit current prompt in $VISUAL or $EDITOR
-/clear                       clear this screen
-/exit                        quit
+text                         通过 zcode --prompt 发送 prompt
+! <cmd>                      执行本地 shell 命令
+/goal <text>                 转发给 ZCode goal 处理
+/goal replace <text>         替换当前 ZCode goal
+/skill <name> <task>         强制使用某个 ZCode skill
+/skills [list]               通过 zcode skills list 列出 skills
+/mcp list                    列出本地 .mcp.json 里的 MCP server
+/mcp config                  打印本地 .mcp.json 路径
+/mcp add <name> <cmd> [args] 添加/更新 MCP server
+/mcp remove <name>           删除 MCP server
+/mcp status                  作为 /mcp status 转发给 ZCode
+/editor                      用 $VISUAL 或 $EDITOR 编辑当前输入
+/clear                       清屏
+/exit                        退出
 ```
 
-## Key Habits
+## 快捷键习惯
 
 ```text
-Ctrl+P                       command palette
-Ctrl+X then p                command palette
-Ctrl+X then h                help
-Ctrl+X then e                edit prompt externally
-Ctrl+X then x                clear conversation
-Ctrl+X then u                clear input
-Ctrl+X then q                quit
-Tab                          slash command completion/suggestions
-Ctrl+G                       edit prompt in $VISUAL or $EDITOR
-Ctrl+J                       insert newline
-?                            help when the input is empty
+Ctrl+P                       命令面板
+Ctrl+X then p                命令面板
+Ctrl+X then h                帮助
+Ctrl+X then e                外部编辑器
+Ctrl+X then x                清空会话
+Ctrl+X then u                清空输入
+Ctrl+X then q                退出
+Tab                          slash 命令补全/建议
+Ctrl+G                       用 $VISUAL 或 $EDITOR 编辑当前输入
+Ctrl+J                       插入换行
+?                            空输入时打开帮助
 ```
 
-The design reference notes are stored in `docs/references/agent-tui-habits.md`, with official Claude Code and OpenCode page snapshots under `docs/references/raw/`.
+## 参考
 
-## Limits
+Claude Code 和 OpenCode 的官方使用习惯参考已经下载到本地：
 
-This fallback does not recreate ZCode's missing `@zcode/tui` package. It does not provide the same internal live session model as the official TUI would. It is deliberately boring: read input, route slash commands, call official ZCode command-line paths, show output.
+- `docs/references/agent-tui-habits.md`
+- `docs/references/raw/`
 
-That boring layer is enough to stop Linux users from being blocked by a missing package.
+## 限制
 
-## Development
+这个 fallback 没有重建 ZCode 缺失的官方 `@zcode/tui` 包，也没有 ZCode 官方 TUI 可能拥有的内部实时会话模型。它做的是一件朴素但有用的事：读输入、分发 slash 命令、调用官方 CLI 路径、展示输出。
+
+朴素归朴素，至少不会让 Linux 用户看到 `tui` 两个字后只能对着桌面版发呆。
+
+## 开发
 
 ```bash
 cargo fmt
