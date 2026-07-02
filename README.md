@@ -11,6 +11,13 @@ This is not the official ZCode TUI. It is a practical terminal wrapper that talk
 ## Features
 
 - Rust binary, no Python runtime.
+- Ratatui + Crossterm interface with a proper multi-panel layout.
+- Entry screen carries the `智谱` brand mark with `@zcode`.
+- Conversation panel, command/control panel, prompt box, and status bar.
+- Help modal via `/help`.
+- Input history with Up/Down.
+- Scrollback with PgUp/PgDn, Home, and End.
+- Common shortcuts: Ctrl+L clear, Ctrl+U clear input, Ctrl+Q quit.
 - Starts when `zcode tui` falls through because `@zcode/tui` is missing.
 - Sends normal text through `zcode --prompt`.
 - Supports `/goal ...` and `/goal replace ...` by forwarding them to ZCode.

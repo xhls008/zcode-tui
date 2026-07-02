@@ -1,20 +1,25 @@
 use std::env;
-use std::io::{self, Write};
-use std::time::Duration;
+use std::io::{self, Stdout};
 
 use anyhow::{Context, Result};
-use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::style::{Attribute, Print, SetAttribute};
+use crossterm::execute;
 use crossterm::terminal::{
-    self, disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
-    LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::{execute, queue};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::{Frame, Terminal};
 use zcode_tui::{
     classify_input, handle_local_command, help_text, parse_cli_args, run_prompt, AppConfig,
     InputAction,
 };
+
+type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -31,19 +36,18 @@ fn main() -> Result<()> {
 fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
     let mut terminal = TerminalGuard::enter()?;
     let mut state = UiState::new(config, zcode_bin.to_string());
-    state.push_system("ZCode fallback TUI (Rust). Type /help for commands, /exit to quit.");
+    state.push_system("Rust fallback started. Type /help for commands, Ctrl+Q to quit.");
 
     let initial_prompts = state.config.initial_prompts.clone();
     for prompt in initial_prompts {
-        state.submit_prompt(&prompt)?;
+        state.submit_prompt(&prompt);
     }
 
     loop {
-        terminal.draw(&state)?;
-        if event::poll(Duration::from_millis(200))? {
-            match event::read()? {
-                Event::Key(key) if state.handle_key(key)? => break,
-                _ => {}
+        terminal.draw(&mut state)?;
+        if let Event::Key(key) = event::read()? {
+            if state.handle_key(key) {
+                break;
             }
         }
     }
@@ -51,6 +55,7 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
 struct UiState {
     config: AppConfig,
     zcode_bin: String,
@@ -58,6 +63,9 @@ struct UiState {
     input: String,
     history: Vec<String>,
     history_index: Option<usize>,
+    scroll: u16,
+    status: String,
+    show_help: bool,
 }
 
 impl UiState {
@@ -69,13 +77,25 @@ impl UiState {
             input: String::new(),
             history: Vec::new(),
             history_index: None,
+            scroll: 0,
+            status: "ready".to_string(),
+            show_help: false,
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.log.clear();
+                self.status = "cleared".to_string();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input.clear();
+                self.history_index = None;
+            }
             KeyCode::Char(ch) => {
                 self.input.push(ch);
                 self.history_index = None;
@@ -88,16 +108,32 @@ impl UiState {
                 let input = self.input.trim().to_string();
                 self.input.clear();
                 self.history_index = None;
-                if self.handle_submit(&input)? {
-                    return Ok(true);
+                if self.handle_submit(&input) {
+                    return true;
                 }
             }
-            KeyCode::Esc => return Ok(true),
+            KeyCode::Esc => {
+                if self.show_help {
+                    self.show_help = false;
+                } else {
+                    return true;
+                }
+            }
             KeyCode::Up => self.recall_history(-1),
             KeyCode::Down => self.recall_history(1),
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_add(6);
+                self.status = format!("scroll +{}", self.scroll);
+            }
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_sub(6);
+                self.status = format!("scroll +{}", self.scroll);
+            }
+            KeyCode::Home => self.scroll = u16::MAX / 2,
+            KeyCode::End => self.scroll = 0,
             _ => {}
         }
-        Ok(false)
+        false
     }
 
     fn recall_history(&mut self, direction: isize) {
@@ -117,119 +153,142 @@ impl UiState {
             .unwrap_or_default();
     }
 
-    fn handle_submit(&mut self, input: &str) -> Result<bool> {
+    fn handle_submit(&mut self, input: &str) -> bool {
         if input.is_empty() {
-            return Ok(false);
+            return false;
         }
+
         self.history.push(input.to_string());
         self.push_user(input);
+        self.scroll = 0;
 
-        match classify_input(input)? {
-            InputAction::Prompt(prompt) => self.submit_prompt(&prompt)?,
-            InputAction::Local(command) => {
-                let output = handle_local_command(&command, &self.config, &self.zcode_bin)?;
-                if output == "__CLEAR__" {
-                    self.log.clear();
-                } else {
-                    self.push_system(output.trim_end());
-                }
+        match classify_input(input) {
+            Ok(InputAction::Prompt(prompt)) => self.submit_prompt(&prompt),
+            Ok(InputAction::Local(command)) => self.handle_local(&command),
+            Ok(InputAction::Quit) => {
+                self.status = "bye".to_string();
+                return true;
             }
-            InputAction::Quit => {
-                self.push_system("bye");
-                return Ok(true);
-            }
-            InputAction::Empty => {}
-        }
-        Ok(false)
-    }
-
-    fn submit_prompt(&mut self, prompt: &str) -> Result<()> {
-        self.push_system("running zcode --prompt ...");
-        let result = run_prompt(&self.zcode_bin, &self.config, prompt);
-        match result {
-            Ok(output) if output.trim().is_empty() => self.push_assistant("(no output)"),
-            Ok(output) => self.push_assistant(output.trim_end()),
+            Ok(InputAction::Empty) => {}
             Err(error) => self.push_error(&format!("{error:#}")),
         }
-        Ok(())
+        false
+    }
+
+    fn handle_local(&mut self, command: &[String]) {
+        if command.first().map(String::as_str) == Some("help") {
+            self.show_help = !self.show_help;
+            self.status = "help toggled".to_string();
+            return;
+        }
+
+        match handle_local_command(command, &self.config, &self.zcode_bin) {
+            Ok(output) if output == "__CLEAR__" => {
+                self.log.clear();
+                self.status = "cleared".to_string();
+            }
+            Ok(output) => {
+                self.push_system(output.trim_end());
+                self.status = "ok".to_string();
+            }
+            Err(error) => self.push_error(&format!("{error:#}")),
+        }
+    }
+
+    fn submit_prompt(&mut self, prompt: &str) {
+        self.status = "running zcode --prompt ...".to_string();
+        self.push_system("running zcode --prompt ...");
+        match run_prompt(&self.zcode_bin, &self.config, prompt) {
+            Ok(output) if output.trim().is_empty() => {
+                self.push_assistant("(no output)");
+                self.status = "done".to_string();
+            }
+            Ok(output) => {
+                self.push_assistant(output.trim_end());
+                self.status = "done".to_string();
+            }
+            Err(error) => {
+                self.push_error(&format!("{error:#}"));
+                self.status = "error".to_string();
+            }
+        }
     }
 
     fn push_user(&mut self, text: &str) {
-        self.log.push(LogLine::new("you", text));
+        self.log.push(LogLine::new(LogKind::User, text));
     }
 
     fn push_assistant(&mut self, text: &str) {
-        self.log.push(LogLine::new("zcode", text));
+        self.log.push(LogLine::new(LogKind::Assistant, text));
     }
 
     fn push_system(&mut self, text: &str) {
-        self.log.push(LogLine::new("system", text));
+        self.log.push(LogLine::new(LogKind::System, text));
     }
 
     fn push_error(&mut self, text: &str) {
-        self.log.push(LogLine::new("error", text));
+        self.log.push(LogLine::new(LogKind::Error, text));
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum LogKind {
+    User,
+    Assistant,
+    System,
+    Error,
+}
+
+impl LogKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::User => "you",
+            Self::Assistant => "zcode",
+            Self::System => "system",
+            Self::Error => "error",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::User => Color::Cyan,
+            Self::Assistant => Color::Green,
+            Self::System => Color::Yellow,
+            Self::Error => Color::Red,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct LogLine {
-    prefix: String,
+    kind: LogKind,
     text: String,
 }
 
 impl LogLine {
-    fn new(prefix: &str, text: &str) -> Self {
+    fn new(kind: LogKind, text: &str) -> Self {
         Self {
-            prefix: prefix.to_string(),
+            kind,
             text: text.to_string(),
         }
     }
 }
 
-struct TerminalGuard;
+struct TerminalGuard {
+    terminal: Tui,
+}
 
 impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode().context("failed to enable raw mode")?;
         execute!(io::stdout(), EnterAlternateScreen, Hide)?;
-        Ok(Self)
+        let backend = CrosstermBackend::new(io::stdout());
+        let terminal = Terminal::new(backend)?;
+        Ok(Self { terminal })
     }
 
-    fn draw(&mut self, state: &UiState) -> Result<()> {
-        let mut stdout = io::stdout();
-        let (width, height) = terminal::size()?;
-        let usable_height = height.saturating_sub(4) as usize;
-        let rendered = render_lines(&state.log, width as usize);
-        let start = rendered.len().saturating_sub(usable_height);
-
-        queue!(
-            stdout,
-            MoveTo(0, 0),
-            Clear(ClearType::All),
-            SetAttribute(Attribute::Bold),
-            Print("zcode-tui fallback"),
-            SetAttribute(Attribute::Reset),
-            Print("  /help  /goal  /skill  /skills  /mcp  /exit\n")
-        )?;
-
-        for (row, line) in rendered[start..].iter().enumerate() {
-            queue!(
-                stdout,
-                MoveTo(0, (row + 2) as u16),
-                Print(truncate(line, width as usize))
-            )?;
-        }
-
-        let prompt_row = height.saturating_sub(1);
-        queue!(
-            stdout,
-            MoveTo(0, prompt_row),
-            Clear(ClearType::CurrentLine),
-            SetAttribute(Attribute::Bold),
-            Print("> "),
-            SetAttribute(Attribute::Reset),
-            Print(truncate(&state.input, width.saturating_sub(2) as usize))
-        )?;
-        stdout.flush()?;
+    fn draw(&mut self, state: &mut UiState) -> Result<()> {
+        self.terminal.draw(|frame| render(frame, state))?;
         Ok(())
     }
 }
@@ -237,61 +296,270 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        let _ = execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen);
     }
 }
 
-fn render_lines(log: &[LogLine], width: usize) -> Vec<String> {
-    let content_width = width.saturating_sub(2).max(20);
-    let mut lines = Vec::new();
+fn render(frame: &mut Frame<'_>, state: &mut UiState) {
+    let root = frame.area();
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Min(8),
+            Constraint::Length(4),
+            Constraint::Length(1),
+        ])
+        .split(root);
 
-    for entry in log {
-        let prefix = format!("[{}] ", entry.prefix);
-        for (index, raw_line) in entry.text.lines().enumerate() {
-            let line_prefix = if index == 0 {
-                prefix.clone()
-            } else {
-                " ".repeat(prefix.len())
-            };
-            wrap_line(
-                raw_line,
-                content_width.saturating_sub(line_prefix.len()),
-                &mut |chunk| {
-                    lines.push(format!("{line_prefix}{chunk}"));
-                },
-            );
-        }
-        if entry.text.is_empty() {
-            lines.push(prefix);
-        }
+    render_brand(frame, vertical[0], state);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(50), Constraint::Length(34)])
+        .split(vertical[1]);
+    render_conversation(frame, body[0], state);
+    render_sidebar(frame, body[1], state);
+    render_input(frame, vertical[2], state);
+    render_status(frame, vertical[3], state);
+
+    if state.show_help {
+        render_help_modal(frame, centered_rect(74, 70, root));
+    }
+}
+
+fn render_brand(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let title = vec![
+        Line::from(vec![
+            Span::styled(
+                "智谱",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled("@zcode", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(Span::styled(
+            "Rust fallback TUI for Linux builds without @zcode/tui",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "mode: {}  cwd: {}",
+                display_mode(&state.config),
+                display_cwd(&state.config)
+            ),
+            Style::default().fg(Color::Yellow),
+        )),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Line::from(" ZCode Linux TUI Patch ").cyan().bold());
+    frame.render_widget(
+        Paragraph::new(title)
+            .block(block)
+            .alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
+    let items = state
+        .log
+        .iter()
+        .flat_map(|entry| log_to_items(entry, area.width.saturating_sub(6) as usize))
+        .collect::<Vec<_>>();
+    let total = items.len() as u16;
+    let height = area.height.saturating_sub(2);
+    let max_scroll = total.saturating_sub(height);
+    if state.scroll > max_scroll {
+        state.scroll = max_scroll;
     }
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue))
+        .title(Line::from(" Conversation ").blue().bold());
+    let list = List::new(items).block(block).highlight_symbol(">> ");
+    frame.render_stateful_widget(
+        list,
+        area,
+        &mut ratatui::widgets::ListState::default().with_offset(state.scroll as usize),
+    );
+}
+
+fn log_to_items(entry: &LogLine, width: usize) -> Vec<ListItem<'static>> {
+    let mut items = Vec::new();
+    let label = format!("[{}] ", entry.kind.label());
+    let wrapped = wrap_text(&entry.text, width.saturating_sub(label.len()).max(10));
+
+    for (index, line) in wrapped.into_iter().enumerate() {
+        let prefix = if index == 0 {
+            label.clone()
+        } else {
+            " ".repeat(label.len())
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(entry.kind.color()).bold()),
+            Span::raw(line),
+        ])));
+    }
+
+    if items.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            label,
+            Style::default().fg(entry.kind.color()).bold(),
+        ))));
+    }
+
+    items
+}
+
+fn render_sidebar(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let commands = vec![
+        Line::from(vec![Span::styled(
+            "Commands",
+            Style::default().fg(Color::Cyan).bold(),
+        )]),
+        Line::from("/goal <text>"),
+        Line::from("/goal replace <text>"),
+        Line::from("/skill <name> <task>"),
+        Line::from("/skills list"),
+        Line::from("/mcp list"),
+        Line::from("/mcp add <name> <cmd>"),
+        Line::from("/mcp remove <name>"),
+        Line::from("/mcp status"),
+        Line::from("/clear"),
+        Line::from("/exit"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Keys",
+            Style::default().fg(Color::Yellow).bold(),
+        )]),
+        Line::from("Up/Down: history"),
+        Line::from("PgUp/PgDn: scroll"),
+        Line::from("Ctrl+L: clear"),
+        Line::from("Ctrl+U: clear input"),
+        Line::from("Ctrl+Q/Esc: quit"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Session",
+            Style::default().fg(Color::Green).bold(),
+        )]),
+        Line::from(format!("messages: {}", state.log.len())),
+        Line::from(format!("history: {}", state.history.len())),
+        Line::from(format!("status: {}", state.status)),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Line::from(" Control ").gray().bold());
+    frame.render_widget(
+        Paragraph::new(Text::from(commands))
+            .block(block)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn render_input(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title(Line::from(" Prompt ").green().bold());
+    let text = Paragraph::new(state.input.as_str())
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(text, area);
+
+    let cursor_x = area.x.saturating_add(1).saturating_add(
+        state
+            .input
+            .chars()
+            .count()
+            .min(area.width.saturating_sub(3) as usize) as u16,
+    );
+    let cursor_y = area.y.saturating_add(1);
+    frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+fn render_status(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let text = format!(
+        " {} | Enter sends | /help toggles help | scroll:{} | {} ",
+        state.status, state.scroll, state.zcode_bin
+    );
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(Style::default().bg(Color::Black).fg(Color::Gray))
+            .alignment(Alignment::Left),
+        area,
+    );
+}
+
+fn render_help_modal(frame: &mut Frame<'_>, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(Line::from(" Help ").magenta().bold());
+    let help = Paragraph::new(help_text())
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(Clear, area);
+    frame.render_widget(help, area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for raw_line in text.lines() {
+        let chars = raw_line.chars().collect::<Vec<_>>();
+        if chars.len() <= width {
+            lines.push(raw_line.to_string());
+            continue;
+        }
+        let mut start = 0;
+        while start < chars.len() {
+            let end = (start + width).min(chars.len());
+            lines.push(chars[start..end].iter().collect());
+            start = end;
+        }
+    }
     lines
 }
 
-fn wrap_line<F>(line: &str, width: usize, emit: &mut F)
-where
-    F: FnMut(&str),
-{
-    if width == 0 || line.chars().count() <= width {
-        emit(line);
-        return;
-    }
-
-    let chars: Vec<char> = line.chars().collect();
-    let mut start = 0;
-    while start < chars.len() {
-        let end = (start + width).min(chars.len());
-        let chunk: String = chars[start..end].iter().collect();
-        emit(&chunk);
-        start = end;
-    }
+fn display_mode(config: &AppConfig) -> &str {
+    config.mode.as_deref().unwrap_or("default")
 }
 
-fn truncate(text: &str, width: usize) -> String {
-    let mut result = String::new();
-    for ch in text.chars().take(width) {
-        result.push(ch);
-    }
-    result
+fn display_cwd(config: &AppConfig) -> String {
+    config.cwd.clone().unwrap_or_else(|| {
+        env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| ".".to_string())
+    })
 }
