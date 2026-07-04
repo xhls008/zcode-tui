@@ -9,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -118,38 +119,66 @@ impl McpServer {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthStatus {
-    EnvKey { variable: String, masked: String },
-    CredentialFile(PathBuf),
+    /// `~/.zcode/cli/config.json` exists — the kernel can actually run.
+    /// If an API key env var is also set it is carried along (masked).
+    Configured {
+        config_path: PathBuf,
+        env_key: Option<(String, String)>,
+    },
+    /// Auth-ish evidence exists (env key or credential file) but the kernel
+    /// hard-requires the model config file, so prompts will still fail.
+    Partial {
+        evidence: String,
+    },
     None,
 }
 
 impl AuthStatus {
     pub fn short_label(&self) -> String {
         match self {
-            Self::EnvKey { variable, .. } => format!("env:{variable}"),
-            Self::CredentialFile(_) => "credentials".to_string(),
+            Self::Configured { .. } => "config.json".to_string(),
+            Self::Partial { .. } => "partial".to_string(),
             Self::None => "none".to_string(),
         }
     }
 
     pub fn describe(&self) -> String {
         match self {
-            Self::EnvKey { variable, masked } => {
-                format!("authenticated via ${variable} ({masked})")
-            }
-            Self::CredentialFile(path) => {
-                format!("authenticated via credential file {}", path.display())
-            }
+            Self::Configured {
+                config_path,
+                env_key,
+            } => match env_key {
+                Some((variable, masked)) => format!(
+                    "configured via {} (plus ${variable} {masked})",
+                    config_path.display()
+                ),
+                Option::None => format!("configured via {}", config_path.display()),
+            },
+            Self::Partial { evidence } => format!(
+                "partially configured: {evidence} found, but the kernel still needs \
+                 ~/.zcode/cli/config.json — run `zcode login bigmodel-coding-plan-api-key <key>` \
+                 (or zai-coding-plan-api-key) to finish"
+            ),
             Self::None => {
-                "not authenticated: no API key env var or credential file found; run /login"
+                "not configured: no model config, API key env var, or credential file found; run /login"
                     .to_string()
             }
         }
+    }
+
+    pub fn is_configured(&self) -> bool {
+        matches!(self, Self::Configured { .. })
     }
 }
 
 /// Environment variables checked, in priority order, for an API key.
 pub const AUTH_ENV_VARS: &[&str] = &["ZCODE_API_KEY", "ZHIPUAI_API_KEY", "ZAI_API_KEY"];
+
+/// The kernel refuses to run without this file (verified 0.15.0), no matter
+/// which env vars are set — it is the source of truth for "configured".
+pub fn kernel_config_path_from(home: &Path) -> PathBuf {
+    home.join(".zcode").join("cli").join("config.json")
+}
 
 pub fn auth_credential_candidates(home: &Path) -> Vec<PathBuf> {
     vec![
@@ -165,21 +194,32 @@ pub fn detect_auth_status_with<F>(env_lookup: F, home: Option<&Path>) -> AuthSta
 where
     F: Fn(&str) -> Option<String>,
 {
-    for variable in AUTH_ENV_VARS {
-        if let Some(value) = env_lookup(variable) {
+    let env_key = AUTH_ENV_VARS.iter().find_map(|variable| {
+        env_lookup(variable).and_then(|value| {
             let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return AuthStatus::EnvKey {
-                    variable: variable.to_string(),
-                    masked: mask_secret(trimmed),
-                };
-            }
+            (!trimmed.is_empty()).then(|| (variable.to_string(), mask_secret(trimmed)))
+        })
+    });
+    if let Some(home) = home {
+        let config_path = kernel_config_path_from(home);
+        if config_path.is_file() {
+            return AuthStatus::Configured {
+                config_path,
+                env_key,
+            };
         }
+    }
+    if let Some((variable, masked)) = env_key {
+        return AuthStatus::Partial {
+            evidence: format!("${variable} ({masked})"),
+        };
     }
     if let Some(home) = home {
         for path in auth_credential_candidates(home) {
             if path.exists() {
-                return AuthStatus::CredentialFile(path);
+                return AuthStatus::Partial {
+                    evidence: format!("credential file {}", path.display()),
+                };
             }
         }
     }
@@ -201,8 +241,29 @@ pub fn mask_secret(secret: &str) -> String {
     format!("{head}…{tail}")
 }
 
-pub fn login_command(zcode_bin: &str, override_command: Option<&str>) -> Result<Vec<String>> {
-    build_auth_command(zcode_bin, "login", override_command)
+/// True when no graphical session is reachable (`DISPLAY` and
+/// `WAYLAND_DISPLAY` both unset/empty) — `zcode login` would try to open a
+/// browser and fail, so /login appends `--no-browser` to print the OAuth URL.
+pub fn env_is_headless<F>(env_lookup: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    ["DISPLAY", "WAYLAND_DISPLAY"]
+        .iter()
+        .all(|variable| env_lookup(variable).is_none_or(|value| value.trim().is_empty()))
+}
+
+pub fn login_command(
+    zcode_bin: &str,
+    override_command: Option<&str>,
+    headless: bool,
+) -> Result<Vec<String>> {
+    let mut command = build_auth_command(zcode_bin, "login", override_command)?;
+    // Only inject into the default command; an explicit override is verbatim.
+    if override_command.is_none() && headless {
+        command.push("--no-browser".to_string());
+    }
+    Ok(command)
 }
 
 pub fn logout_command(zcode_bin: &str, override_command: Option<&str>) -> Result<Vec<String>> {
@@ -329,6 +390,11 @@ pub fn build_prompt_command_with_attachments(
         command.extend(["--attach".to_string(), attach.clone()]);
     }
     command.extend(config.passthrough.iter().cloned());
+    // The end-of-run summary object (response/sessionId/usage/contextUsed)
+    // is the authoritative result; parse failures fall back to plain text.
+    if !command.iter().any(|arg| arg == "--json") {
+        command.push("--json".to_string());
+    }
     command.extend(["--prompt".to_string(), prompt.to_string()]);
     command
 }
@@ -2040,4 +2106,274 @@ pub fn strip_ansi(input: &str) -> String {
     }
 
     output
+}
+
+// ---- kernel db (read-only consumer) --------------------------------------
+//
+// The kernel live-writes ~/.zcode/cli/db/db.sqlite during a turn (verified
+// 2026-07-04: first part row lands ~1.6s in). Everything here is read-only
+// and failure-tolerant: any error means "skip this tick", an unknown schema
+// means every db-derived feature degrades to the pre-db behaviour.
+
+/// Migration ids known at the time this consumer was written. The db stays
+/// enabled while every id below exists (the kernel may append new ones);
+/// a missing id means the schema moved under us.
+pub const KNOWN_DB_MIGRATIONS: &[&str] = &[
+    "0001_base_session_store",
+    "0002_local_setting",
+    "0003_backfill_permission_local_setting",
+    "0004_session_target",
+    "0005_session_target_accounting",
+    "0006_input_history_attachments",
+    "0007_workflow_script_runtime",
+    "0008_workflow_definition_scope",
+    "0009_session_title_metadata",
+    "0010_usage_observability",
+    "0011_session_target_summary_title",
+    "0012_session_trace_id",
+    "0013_session_target_active_run_accounting",
+];
+
+pub fn kernel_db_path_from(home: &Path) -> PathBuf {
+    home.join(".zcode").join("cli").join("db").join("db.sqlite")
+}
+
+pub fn open_kernel_db_ro(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(Duration::from_millis(100))?;
+    Ok(conn)
+}
+
+/// Known ids must be a subset of the actual ids; extra (newer) migrations
+/// are fine. Any read error counts as unsupported.
+pub fn db_schema_supported(conn: &Connection) -> bool {
+    let Ok(mut stmt) = conn.prepare("SELECT id FROM schema_migration") else {
+        return false;
+    };
+    let ids: std::collections::HashSet<String> = match stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .and_then(Iterator::collect)
+    {
+        Ok(ids) => ids,
+        Err(_) => return false,
+    };
+    KNOWN_DB_MIGRATIONS
+        .iter()
+        .all(|migration| ids.contains(*migration))
+}
+
+/// Sessions are keyed by working directory; the row for a fresh prompt
+/// appears at turn start (~1.6s), so polling can resolve it early.
+pub fn latest_session_for_dir(conn: &Connection, directory: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT id FROM session WHERE directory = ?1 ORDER BY time_updated DESC LIMIT 1",
+        [directory],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+/// Rowid snapshot taken before spawning a prompt job so polling only ever
+/// attributes rows created by this run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DbBaseline {
+    pub part_rowid: i64,
+    pub tool_rowid: i64,
+}
+
+pub fn db_baseline(conn: &Connection) -> DbBaseline {
+    let max_rowid = |table: &str| -> i64 {
+        conn.query_row(
+            &format!("SELECT COALESCE(MAX(rowid), 0) FROM {table}"),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+    };
+    DbBaseline {
+        part_rowid: max_rowid("part"),
+        tool_rowid: max_rowid("tool_usage"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolChipStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveToolChip {
+    pub tool: String,
+    pub status: ToolChipStatus,
+    pub duration_ms: Option<i64>,
+}
+
+fn chip_status(status: &str, cancelled: bool) -> ToolChipStatus {
+    let status = status.to_ascii_lowercase();
+    if cancelled || status.contains("err") || status.contains("fail") {
+        ToolChipStatus::Failed
+    } else if matches!(
+        status.as_str(),
+        "completed" | "complete" | "done" | "success"
+    ) {
+        ToolChipStatus::Completed
+    } else {
+        ToolChipStatus::Running
+    }
+}
+
+/// tool_usage rows are inserted once and updated in place, so re-reading
+/// the window past the baseline each tick picks up status transitions.
+pub fn live_tool_chips(
+    conn: &Connection,
+    session_id: &str,
+    baseline: DbBaseline,
+) -> Result<Vec<LiveToolChip>> {
+    let mut stmt = conn.prepare(
+        "SELECT tool_name, status, duration_ms, COALESCE(cancelled_by_user, 0) \
+         FROM tool_usage WHERE session_id = ?1 AND rowid > ?2 ORDER BY rowid LIMIT 64",
+    )?;
+    let chips = stmt
+        .query_map(rusqlite::params![session_id, baseline.tool_rowid], |row| {
+            Ok(LiveToolChip {
+                tool: row.get::<_, String>(0)?,
+                status: chip_status(&row.get::<_, String>(1)?, row.get::<_, i64>(3)? != 0),
+                duration_ms: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(chips)
+}
+
+/// Typed view of a `part.data` JSON blob. Unknown types map to `None` and
+/// are skipped without failing the batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartEvent {
+    Text(String),
+    Reasoning(String),
+    Tool {
+        call_id: String,
+        tool: String,
+        status: ToolChipStatus,
+    },
+    StepStart,
+    StepFinish,
+}
+
+pub fn parse_part_data(data: &str) -> Option<PartEvent> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    match value.get("type")?.as_str()? {
+        "text" => Some(PartEvent::Text(value.get("text")?.as_str()?.to_string())),
+        "reasoning" => Some(PartEvent::Reasoning(
+            value.get("text")?.as_str()?.to_string(),
+        )),
+        "tool" => Some(PartEvent::Tool {
+            call_id: value
+                .get("callID")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            tool: value.get("tool")?.as_str()?.to_string(),
+            status: chip_status(
+                value
+                    .pointer("/state/status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                false,
+            ),
+        }),
+        "step-start" => Some(PartEvent::StepStart),
+        "step-finish" => Some(PartEvent::StepFinish),
+        _ => None,
+    }
+}
+
+/// First line of the newest reasoning part past the baseline, for the dim
+/// working-line shown while a prompt runs. Run-only: never enters the
+/// transcript.
+pub fn latest_reasoning(
+    conn: &Connection,
+    session_id: &str,
+    baseline: DbBaseline,
+) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT data FROM part WHERE session_id = ?1 AND rowid > ?2 \
+         ORDER BY rowid DESC LIMIT 32",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![session_id, baseline.part_rowid], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for data in rows {
+        if let Some(PartEvent::Reasoning(text)) = parse_part_data(&data) {
+            if let Some(line) = text.lines().find(|line| !line.trim().is_empty()) {
+                return Ok(Some(line.trim().to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+// ---- prompt --json summary ------------------------------------------------
+
+/// End-of-run summary object printed by `zcode --prompt --json` (one block,
+/// not JSONL — verified 0.15.0). `response` is the authoritative reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptSummary {
+    pub response: String,
+    pub session_id: Option<String>,
+    pub context_used: Option<u64>,
+    pub context_window: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+pub fn parse_prompt_summary(output: &str) -> Option<PromptSummary> {
+    let value: serde_json::Value = serde_json::from_str(output.trim()).ok()?;
+    Some(PromptSummary {
+        response: value.get("response")?.as_str()?.to_string(),
+        session_id: value
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        context_used: value
+            .pointer("/projection/contextUsed")
+            .and_then(serde_json::Value::as_u64),
+        context_window: value
+            .pointer("/projection/contextWindow")
+            .and_then(serde_json::Value::as_u64),
+        total_tokens: value
+            .pointer("/usage/totalTokens")
+            .and_then(serde_json::Value::as_u64),
+    })
+}
+
+/// Compact context watermark for the status line, e.g. `ctx 9k/200k (4%)`.
+pub fn format_context_watermark(used: u64, window: u64) -> String {
+    let kilo = |n: u64| -> String {
+        if n >= 1000 {
+            format!("{}k", n / 1000)
+        } else {
+            n.to_string()
+        }
+    };
+    if window == 0 {
+        return format!("ctx {}", kilo(used));
+    }
+    format!(
+        "ctx {}/{} ({}%)",
+        kilo(used),
+        kilo(window),
+        used * 100 / window
+    )
+}
+
+/// High-watermark hint threshold: suggest /new at >= 80% usage.
+pub fn context_watermark_warn(used: u64, window: u64) -> bool {
+    window > 0 && used * 100 / window >= 80
 }

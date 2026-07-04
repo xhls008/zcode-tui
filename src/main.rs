@@ -27,12 +27,15 @@ use ratatui::widgets::{
 use ratatui::{Frame, Terminal};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zcode_tui::{
-    classify_input, command_palette_rows, detect_auth_status, diff_line_role, file_suggestions,
-    git_diff_command, handle_local_command, help_text, is_newer_version, leader_action_for_key,
-    login_command, markdown_lines, parse_cli_args, parse_stream_event, parse_update_feed,
-    parse_update_feed_url, prompt_command_for, run_command, shorten_home, slash_suggestions,
-    spawn_streaming_command, wrap_display, AppConfig, DiffRole, InputAction, JobEvent,
-    LeaderAction, MdLineKind, SpanRole, StreamEvent, StreamingJob, UpdateFeed,
+    classify_input, command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
+    detect_auth_status, diff_line_role, env_is_headless, file_suggestions,
+    format_context_watermark, git_diff_command, handle_local_command, help_text, is_newer_version,
+    kernel_db_path_from, latest_reasoning, latest_session_for_dir, leader_action_for_key,
+    live_tool_chips, login_command, markdown_lines, open_kernel_db_ro, parse_cli_args,
+    parse_prompt_summary, parse_stream_event, parse_update_feed, parse_update_feed_url,
+    prompt_command_for, run_command, shorten_home, slash_suggestions, spawn_streaming_command,
+    wrap_display, AppConfig, AuthStatus, DbBaseline, DiffRole, InputAction, JobEvent, LeaderAction,
+    LiveToolChip, MdLineKind, SpanRole, StreamEvent, StreamingJob, ToolChipStatus, UpdateFeed,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -55,6 +58,22 @@ const ZCODE_LOGO: &str = r#"      _/^\_        /\/\/\/\/\      n_n_n_n_n_n      
 ███████╗ ╚██████╗ ╚██████╔╝ ██████╔╝ ███████╗
 ╚══════╝  ╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝"#;
 
+/// Not-configured welcome screen: the wordmark in Tsinghua purple (solid
+/// blocks bright, outline glyphs as the darker shadow layer) over a
+/// Beijing-skyline silhouette strip (鸟巢/长城/天坛).
+const UNAUTH_LOGO: &str = r#"███████╗  ██████╗  ██████╗  ██████╗  ███████╗
+╚══███╔╝ ██╔════╝ ██╔═══██╗ ██╔══██╗ ██╔════╝
+  ███╔╝  ██║      ██║   ██║ ██║  ██║ █████╗
+ ███╔╝   ██║      ██║   ██║ ██║  ██║ ██╔══╝
+███████╗ ╚██████╗ ╚██████╔╝ ██████╔╝ ███████╗
+╚══════╝  ╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝
+
+    /\/\/\/\/\      n_n_n_n_n_n        _/^\_
+    \/\/\/\/\/     _|_________|_      /_____\
+    /\/\/\/\/\    |_____________|    /_______\
+     \______/     |_____________|   |__|_|_|__|
+       鸟巢             长城             天坛"#;
+
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
@@ -75,6 +94,7 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
     let mut terminal = TerminalGuard::enter()?;
     let mut state = UiState::new(config, zcode_bin.to_string());
     state.push_banner();
+    state.push_unauth_screen_if_needed();
     let probe = spawn_startup_probe(zcode_bin.to_string());
 
     for prompt in state.config.initial_prompts.clone() {
@@ -87,6 +107,7 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
             state.apply_startup_report(report);
         }
         state.pump_job();
+        state.poll_live_progress();
         state.drain_queue();
         terminal.draw(&mut state)?;
 
@@ -131,7 +152,8 @@ fn run_login_effect(terminal: &mut TerminalGuard, state: &mut UiState) {
         return;
     }
     let override_command = env::var("ZCODE_TUI_LOGIN_CMD").ok();
-    let command = match login_command(&state.zcode_bin, override_command.as_deref()) {
+    let headless = env_is_headless(|key| env::var(key).ok());
+    let command = match login_command(&state.zcode_bin, override_command.as_deref(), headless) {
         Ok(command) => command,
         Err(error) => {
             state.push_error(&format!("{error:#}"));
@@ -159,11 +181,35 @@ fn run_interactive_command(command: &[String]) -> Result<ExitStatus> {
         .with_context(|| format!("failed to run {program}"))
 }
 
+enum DbProbe {
+    Missing,
+    Unsupported,
+    Supported(PathBuf),
+}
+
 struct StartupReport {
     kernel: Option<String>,
     installed: Option<String>,
     feed: Option<UpdateFeed>,
     feed_base: Option<String>,
+    db: DbProbe,
+}
+
+/// Read-only schema check for the kernel db. Missing file is the normal
+/// fresh-install state (silent); an unrecognized schema disables every
+/// db-derived feature for this run.
+fn probe_kernel_db() -> DbProbe {
+    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+        return DbProbe::Missing;
+    };
+    let path = kernel_db_path_from(&home);
+    if !path.is_file() {
+        return DbProbe::Missing;
+    }
+    match open_kernel_db_ro(&path) {
+        Ok(conn) if db_schema_supported(&conn) => DbProbe::Supported(path),
+        _ => DbProbe::Unsupported,
+    }
 }
 
 /// Probe, off the UI thread: the CLI kernel version, the installed desktop
@@ -232,6 +278,7 @@ fn spawn_startup_probe(zcode_bin: String) -> std::sync::mpsc::Receiver<StartupRe
             installed,
             feed,
             feed_base,
+            db: probe_kernel_db(),
         });
     });
     receiver
@@ -273,6 +320,10 @@ struct Theme {
     frame: Color,
     code_bg: Color,
     band_bg: Color,
+    /// Tsinghua purple, logo-only: never used on interactive elements, so
+    /// the GLM-blue single-accent discipline stays intact.
+    brand: Color,
+    brand_dim: Color,
 }
 
 impl Theme {
@@ -288,6 +339,10 @@ impl Theme {
             frame: Color::Rgb(56, 62, 78),
             code_bg: Color::Rgb(33, 38, 51),
             band_bg: Color::Rgb(48, 52, 63),
+            // 清华紫 #660874 as the shadow; a lightened variant carries the
+            // wordmark so it stays readable on dark terminals.
+            brand: Color::Rgb(178, 108, 196),
+            brand_dim: Color::Rgb(122, 42, 134),
         }
     }
 
@@ -327,6 +382,14 @@ impl Theme {
         self.styled(self.frame)
     }
 
+    fn brand(&self) -> Style {
+        self.styled(self.brand)
+    }
+
+    fn brand_dim(&self) -> Style {
+        self.styled(self.brand_dim)
+    }
+
     fn code(&self) -> Style {
         if self.plain {
             Style::default()
@@ -362,6 +425,21 @@ struct Suggestion {
     token_start: Option<usize>,
 }
 
+/// Per-run live-progress state fed by polling the kernel db. Purely
+/// cosmetic: it renders in the work panel while the job runs and vanishes
+/// at finalize, never entering the transcript.
+struct LiveProgress {
+    directory: String,
+    session_id: Option<String>,
+    /// Latest session for the directory at spawn time. A fresh (non-continue)
+    /// prompt creates a NEW session, so polling must skip this stale id when
+    /// resolving — latching onto it would filter every row away.
+    prior_session: Option<String>,
+    baseline: DbBaseline,
+    chips: Vec<LiveToolChip>,
+    reasoning: Option<String>,
+}
+
 struct ActiveJob {
     job: StreamingJob,
     log_index: usize,
@@ -374,6 +452,10 @@ struct ActiveJob {
     any_output: bool,
     cancel_requested: bool,
     started: Instant,
+    /// Assistant jobs buffer stdout here: with --json the whole output is
+    /// one end-of-run summary object, parsed at finalize.
+    raw: Vec<String>,
+    live: Option<LiveProgress>,
 }
 
 impl ActiveJob {
@@ -386,6 +468,16 @@ impl ActiveJob {
 
 const PERMISSION_MODES: [&str; 4] = ["build", "edit", "plan", "yolo"];
 
+/// Availability of the kernel's sqlite database for live progress.
+/// Resolved once by the startup probe; anything but Enabled degrades every
+/// db-derived feature to the pre-db behaviour.
+#[derive(Clone, PartialEq, Eq)]
+enum DbState {
+    Unknown,
+    Enabled(PathBuf),
+    Disabled,
+}
+
 struct UiState {
     config: AppConfig,
     zcode_bin: String,
@@ -393,6 +485,9 @@ struct UiState {
     kernel_version: Option<String>,
     /// A prompt has completed in this run, so later prompts auto --continue.
     session_active: bool,
+    auth_status: AuthStatus,
+    db_state: DbState,
+    context_watermark: Option<(u64, u64)>,
     log: Vec<LogLine>,
     input: String,
     cursor: usize,
@@ -415,7 +510,8 @@ struct UiState {
 
 impl UiState {
     fn new(config: AppConfig, zcode_bin: String) -> Self {
-        let auth_label = detect_auth_status().short_label();
+        let auth_status = detect_auth_status();
+        let auth_label = auth_status.short_label();
         let plain = config.no_color || env::var_os("NO_COLOR").is_some();
         Self {
             config,
@@ -423,6 +519,9 @@ impl UiState {
             theme: Theme::zhipu(plain),
             kernel_version: None,
             session_active: false,
+            auth_status,
+            db_state: DbState::Unknown,
+            context_watermark: None,
             log: Vec::new(),
             input: String::new(),
             cursor: 0,
@@ -445,7 +544,34 @@ impl UiState {
     }
 
     fn refresh_auth(&mut self) {
-        self.auth_label = detect_auth_status().short_label();
+        self.auth_status = detect_auth_status();
+        self.auth_label = self.auth_status.short_label();
+    }
+
+    /// Codex-style unauthenticated welcome: purple wordmark over the
+    /// skyline strip, then the three browser-free ways in. Startup only —
+    /// once configured, later launches never show it.
+    fn push_unauth_screen_if_needed(&mut self) {
+        if self.auth_status.is_configured() {
+            return;
+        }
+        self.log.push(LogLine::new(LogKind::Brand, UNAUTH_LOGO));
+        let headline = match &self.auth_status {
+            AuthStatus::Partial { evidence } => format!(
+                "partially configured: {evidence} found, but the kernel still needs \
+                 ~/.zcode/cli/config.json"
+            ),
+            _ => "not configured — the kernel needs a model config before prompts can run"
+                .to_string(),
+        };
+        self.push_system(&headline);
+        self.log.push(LogLine::new(
+            LogKind::Tip,
+            "Tip: three ways to sign in without a browser on this machine:\n\
+             › /login                                            OAuth (auto --no-browser when headless)\n\
+             › zcode login bigmodel-coding-plan-api-key <key>    智谱国内 coding plan\n\
+             › zcode login zai-coding-plan-api-key <key>         Z.AI international",
+        ));
     }
 
     fn resolve_cwd(&self) -> PathBuf {
@@ -941,8 +1067,81 @@ impl UiState {
 
     fn start_prompt_job(&mut self, prompt: &str) {
         match prompt_command_for(&self.zcode_bin, &self.config, prompt) {
-            Ok(command) => self.start_job(command, LogKind::Assistant, "zcode --prompt"),
+            Ok(command) => {
+                let live = self.prepare_live_progress();
+                self.start_job(command, LogKind::Assistant, "zcode --prompt");
+                if let Some(active) = &mut self.job {
+                    active.live = live;
+                }
+            }
             Err(error) => self.push_error(&format!("{error:#}")),
+        }
+    }
+
+    /// Snapshot the db just before spawning so polling only ever attributes
+    /// rows created by this run. Any failure means no live progress — the
+    /// job itself is unaffected.
+    fn prepare_live_progress(&self) -> Option<LiveProgress> {
+        let DbState::Enabled(path) = &self.db_state else {
+            return None;
+        };
+        let conn = open_kernel_db_ro(path).ok()?;
+        let directory = self
+            .resolve_cwd()
+            .canonicalize()
+            .unwrap_or_else(|_| self.resolve_cwd())
+            .to_string_lossy()
+            .into_owned();
+        let latest = latest_session_for_dir(&conn, &directory);
+        let (session_id, prior_session) = if let Some(resume) = &self.config.resume {
+            (Some(resume.clone()), None)
+        } else if self.config.continue_session || self.session_active {
+            (latest, None)
+        } else {
+            // Fresh run: the kernel will create a new session row (~1.6s in);
+            // remember the current latest so polling can tell them apart.
+            (None, latest)
+        };
+        Some(LiveProgress {
+            directory,
+            session_id,
+            prior_session,
+            baseline: db_baseline(&conn),
+            chips: Vec::new(),
+            reasoning: None,
+        })
+    }
+
+    /// Poll the kernel db (~every 5th 80ms tick) while an assistant job
+    /// runs. Every failure path is "skip this tick".
+    fn poll_live_progress(&mut self) {
+        if !self.tick.is_multiple_of(5) {
+            return;
+        }
+        let DbState::Enabled(path) = &self.db_state else {
+            return;
+        };
+        let path = path.clone();
+        let Some(active) = &mut self.job else { return };
+        if active.kind != LogKind::Assistant {
+            return;
+        }
+        let Some(live) = &mut active.live else { return };
+        let Ok(conn) = open_kernel_db_ro(&path) else {
+            return;
+        };
+        if live.session_id.is_none() {
+            live.session_id = latest_session_for_dir(&conn, &live.directory)
+                .filter(|candidate| Some(candidate) != live.prior_session.as_ref());
+        }
+        let Some(session_id) = live.session_id.clone() else {
+            return;
+        };
+        if let Ok(chips) = live_tool_chips(&conn, &session_id, live.baseline) {
+            live.chips = chips;
+        }
+        if let Ok(Some(reasoning)) = latest_reasoning(&conn, &session_id, live.baseline) {
+            live.reasoning = Some(reasoning);
         }
     }
 
@@ -968,6 +1167,8 @@ impl UiState {
                     any_output: false,
                     cancel_requested: false,
                     started: Instant::now(),
+                    raw: Vec::new(),
+                    live: None,
                 });
                 self.status = format!("running {label}");
             }
@@ -992,18 +1193,11 @@ impl UiState {
             match event {
                 Ok(JobEvent::Line(line)) => {
                     if kind == LogKind::Assistant {
-                        match parse_stream_event(&line) {
-                            Some(StreamEvent::Text(text)) => self.append_job_text(&text),
-                            Some(StreamEvent::ToolUse { name, detail }) => {
-                                self.push_job_side(LogKind::Tool, &format!("⚙ {name} {detail}"));
-                            }
-                            Some(StreamEvent::ToolResult { detail }) => {
-                                self.push_job_side(LogKind::Tool, &format!("↳ {detail}"));
-                            }
-                            Some(StreamEvent::Meta(meta)) => {
-                                self.push_job_side(LogKind::System, &format!("· {meta}"));
-                            }
-                            None => self.append_job_text(&line),
+                        // --json prints one end-of-run summary object; buffer
+                        // and parse at finalize (fallback replays these lines).
+                        if let Some(active) = &mut self.job {
+                            active.raw.push(line);
+                            active.any_output = true;
                         }
                     } else {
                         self.append_job_text(&line);
@@ -1060,10 +1254,36 @@ impl UiState {
         active.any_output = true;
     }
 
-    fn push_job_side(&mut self, kind: LogKind, text: &str) {
-        self.log.push(LogLine::new(kind, text));
-        if let Some(active) = &mut self.job {
-            active.any_output = true;
+    /// Fallback when stdout isn't the --json summary (older kernel or plain
+    /// output): replay the buffered lines through the streamed-event
+    /// interpretation the pump used to apply live.
+    fn render_assistant_fallback(&mut self, log_index: usize, raw: &str) {
+        let mut text = String::new();
+        let mut sides: Vec<(LogKind, String)> = Vec::new();
+        let append = |acc: &mut String, piece: &str| {
+            if !acc.is_empty() {
+                acc.push('\n');
+            }
+            acc.push_str(piece);
+        };
+        for line in raw.lines() {
+            match parse_stream_event(line) {
+                Some(StreamEvent::Text(t)) => append(&mut text, &t),
+                Some(StreamEvent::ToolUse { name, detail }) => {
+                    sides.push((LogKind::Tool, format!("⚙ {name} {detail}")));
+                }
+                Some(StreamEvent::ToolResult { detail }) => {
+                    sides.push((LogKind::Tool, format!("↳ {detail}")));
+                }
+                Some(StreamEvent::Meta(meta)) => {
+                    sides.push((LogKind::System, format!("· {meta}")));
+                }
+                None => append(&mut text, line),
+            }
+        }
+        self.log[log_index].text = text;
+        for (kind, line) in sides {
+            self.log.push(LogLine::new(kind, &line));
         }
     }
 
@@ -1071,6 +1291,25 @@ impl UiState {
         let Some(active) = self.job.take() else {
             return;
         };
+        if active.kind == LogKind::Assistant && !active.raw.is_empty() {
+            let raw = active.raw.join("\n");
+            match parse_prompt_summary(&raw) {
+                Some(summary) => {
+                    let response = summary.response.trim_end();
+                    self.log[active.log_index].text = if response.is_empty() {
+                        "(no output)".to_string()
+                    } else {
+                        response.to_string()
+                    };
+                    if let (Some(used), Some(window)) =
+                        (summary.context_used, summary.context_window)
+                    {
+                        self.context_watermark = Some((used, window));
+                    }
+                }
+                None => self.render_assistant_fallback(active.log_index, &raw),
+            }
+        }
         if !active.any_output {
             self.log[active.log_index].text = match active.kind {
                 LogKind::Diff => "working tree clean".to_string(),
@@ -1208,6 +1447,18 @@ impl UiState {
 
     fn apply_startup_report(&mut self, report: StartupReport) {
         self.kernel_version = report.kernel;
+        self.db_state = match report.db {
+            DbProbe::Supported(path) => DbState::Enabled(path),
+            DbProbe::Unsupported => {
+                // The one allowed dim notice; everything else degrades silently.
+                self.push_system(
+                    "kernel db schema not recognized; live tool progress disabled \
+                     (a newer zcode-tui may support it)",
+                );
+                DbState::Disabled
+            }
+            DbProbe::Missing => DbState::Disabled,
+        };
         let banner_pos = self
             .log
             .iter()
@@ -1247,6 +1498,7 @@ impl UiState {
 enum LogKind {
     Banner,
     Logo,
+    Brand,
     Tip,
     User,
     Assistant,
@@ -1367,21 +1619,26 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     let root = frame.area();
     let input_lines = state.input.split('\n').count() as u16;
     let composer_height = input_lines.clamp(1, 5) + 2;
+    let live_lines = live_panel_lines(state);
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(6),
+            Constraint::Length(live_lines.len() as u16),
             Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
         .split(root);
 
     render_conversation(frame, vertical[0], state);
-    render_composer(frame, vertical[1], state);
-    render_footer(frame, vertical[2], state);
+    if !live_lines.is_empty() {
+        frame.render_widget(Paragraph::new(live_lines), vertical[1]);
+    }
+    render_composer(frame, vertical[2], state);
+    render_footer(frame, vertical[3], state);
 
     if !state.suggestions.is_empty() {
-        render_suggestions(frame, vertical[1], state);
+        render_suggestions(frame, vertical[2], state);
     }
     if state.show_help {
         render_help_modal(frame, centered_rect(74, 70, root), &state.theme);
@@ -1389,6 +1646,55 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     if state.show_palette {
         render_command_palette(frame, centered_rect(82, 68, root), state);
     }
+}
+
+/// Run-only work panel above the composer: tool chips plus the newest
+/// reasoning line, gone the moment the job finalizes.
+fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
+    let Some(active) = &state.job else {
+        return Vec::new();
+    };
+    let Some(live) = &active.live else {
+        return Vec::new();
+    };
+    let t = &state.theme;
+    let mut lines = Vec::new();
+    if !live.chips.is_empty() {
+        let mut spans = vec![Span::raw(" ".to_string())];
+        // Keep the newest chips in view when a turn runs many tools.
+        let visible: Vec<&LiveToolChip> = live.chips.iter().rev().take(6).collect();
+        for (index, chip) in visible.into_iter().rev().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("   ".to_string()));
+            }
+            match chip.status {
+                ToolChipStatus::Running => {
+                    let symbol = SPINNER_FRAMES[state.tick % SPINNER_FRAMES.len()];
+                    spans.push(Span::styled(format!("{symbol} "), t.accent()));
+                    spans.push(Span::styled(chip.tool.clone(), t.text()));
+                }
+                ToolChipStatus::Completed => {
+                    spans.push(Span::styled("✓ ".to_string(), t.good()));
+                    spans.push(Span::styled(chip.tool.clone(), t.dim()));
+                    if let Some(ms) = chip.duration_ms {
+                        spans.push(Span::styled(
+                            format!(" {:.1}s", ms as f32 / 1000.0),
+                            t.dim(),
+                        ));
+                    }
+                }
+                ToolChipStatus::Failed => {
+                    spans.push(Span::styled("✗ ".to_string(), t.bad()));
+                    spans.push(Span::styled(chip.tool.clone(), t.dim()));
+                }
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    if let Some(reasoning) = &live.reasoning {
+        lines.push(Line::from(Span::styled(format!(" {reasoning}"), t.dim())));
+    }
+    lines
 }
 
 fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
@@ -1419,6 +1725,20 @@ fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
         inner,
         &mut ListState::default().with_offset(offset as usize),
     );
+}
+
+/// Split a line into (matches, chunk) runs so adjacent chars of the same
+/// class share one span.
+fn chunk_by(text: &str, pred: impl Fn(char) -> bool) -> Vec<(bool, String)> {
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    for c in text.chars() {
+        let class = pred(c);
+        match runs.last_mut() {
+            Some((last, chunk)) if *last == class => chunk.push(c),
+            _ => runs.push((class, c.to_string())),
+        }
+    }
+    runs
 }
 
 fn log_to_items(entry: &LogLine, width: usize, theme: &Theme) -> Vec<ListItem<'static>> {
@@ -1461,6 +1781,22 @@ fn log_to_items(entry: &LogLine, width: usize, theme: &Theme) -> Vec<ListItem<'s
                     raw.to_string(),
                     style,
                 ))));
+            }
+        }
+        LogKind::Brand => {
+            // Solid blocks carry the bright purple; every other glyph
+            // (box-drawing outlines, the skyline strip) is the shadow layer.
+            for raw in entry.text.lines() {
+                let mut spans = Vec::new();
+                for (is_block, chunk) in chunk_by(raw, |c| c == '█') {
+                    let style = if is_block {
+                        theme.brand().bold()
+                    } else {
+                        theme.brand_dim()
+                    };
+                    spans.push(Span::styled(chunk, style));
+                }
+                items.push(ListItem::new(Line::from(spans)));
             }
         }
         LogKind::Tip => {
@@ -1746,12 +2082,17 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
         ])
     };
     frame.render_widget(Paragraph::new(left), area);
+    let mut right = String::new();
+    if let Some((used, window)) = state.context_watermark {
+        right.push_str(&format_context_watermark(used, window));
+        if context_watermark_warn(used, window) {
+            right.push_str(" · /new?");
+        }
+        right.push_str(" · ");
+    }
+    right.push_str(&format!("auth {} ", state.auth_label));
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("auth {} ", state.auth_label),
-            t.dim(),
-        )))
-        .alignment(Alignment::Right),
+        Paragraph::new(Line::from(Span::styled(right, t.dim()))).alignment(Alignment::Right),
         area,
     );
 }

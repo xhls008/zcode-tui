@@ -53,6 +53,13 @@ Kimi 有 TUI，Codex 有 TUI，Claude Code 有 TUI。ZCode 都发布了，Linux 
 - CJK 感知：中文按 2 列宽度折行与定位光标，表格按显示宽度对齐。
 - **非阻塞流式执行**：`zcode --prompt` 和 `! <cmd>` 的输出按行实时进 transcript，
   spinner 显示耗时，`Esc`/`Ctrl+C` 取消，忙时新输入自动排队。
+- **实时工具进度**：prompt 运行期间只读轮询内核会话库（`~/.zcode/cli/db/db.sqlite`，
+  内核边跑边写），工具调用实时渲染为 chip（运行中 spinner → 完成 ✓ + 耗时 /
+  失败 ✗），最新 reasoning 以 dim 单行显示；仅运行时显示、结束即清场；
+  内核 schema 不识别或库缺失时整组自动降级，不影响任何既有功能。
+- **上下文水位**：prompt 通道用 `--json` 总结对象作为权威结果（response 走
+  markdown 渲染，解析失败自动降级纯文本），状态栏常驻 `ctx 9k/200k (4%)`
+  用量显示，≥80% 提示 `/new`。
 - **实时补全菜单**：输入 `/` 即弹出建议（前缀 > 子串 > 子序列模糊匹配），
   上下键选择、`Tab`/`Enter` 接受、`Esc` 关闭。
 - **`@文件` 提及**：输入 `@` 补全项目内路径（跳过 .git/target/node_modules）；
@@ -65,10 +72,14 @@ Kimi 有 TUI，Codex 有 TUI，Claude Code 有 TUI。ZCode 都发布了，Linux 
 
 **认证**
 
-- `/auth` 本地检测登录态：依次检查 `ZCODE_API_KEY`、`ZHIPUAI_API_KEY`、`ZAI_API_KEY`
-  环境变量（打码显示），再查 `~/.zcode/v2/credentials.json` 等凭证文件。
+- `/auth` 三态检测：内核硬性要求 `~/.zcode/cli/config.json`（实测 0.15.0），
+  以它为"已配置"的判据；只有 env key（`ZCODE_API_KEY` 链，打码显示）或凭证
+  文件时如实显示"部分配置"并给出补齐命令，不再误报已登录。
+- **未登录启动屏**：清华紫 ZCODE 字标（块体亮紫 + 描边暗紫阴影），底部
+  鸟巢/长城/天坛轮廓线，列出三条免浏览器登录路径；`NO_COLOR` 全退化。
 - `/login` 挂起 TUI，交互式执行 `zcode login`（Z.AI OAuth，可用
-  `ZCODE_TUI_LOGIN_CMD` 覆盖）。
+  `ZCODE_TUI_LOGIN_CMD` 覆盖）；无桌面环境（无 `DISPLAY`/`WAYLAND_DISPLAY`）
+  自动附 `--no-browser`，OAuth URL 直接打印在终端。
 - `/logout` 执行 `zcode logout`（可用 `ZCODE_TUI_LOGOUT_CMD` 覆盖）。
 - 顶栏和状态栏常驻显示当前认证方式。
 

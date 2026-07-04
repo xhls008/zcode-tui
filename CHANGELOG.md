@@ -4,6 +4,30 @@
 构建 x86_64-musl 静态 Linux 二进制（无需 Rust 工具链即可使用），连同
 SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版本段。
 
+## [0.2.0] - 2026-07-04
+
+准流式进度与认证体验(openspec 变更 db-live-progress-and-auth-screen,
+基于设计文档 §5.1 的流式 spike 实测)。
+
+### 新增
+
+- **实时工具进度**:prompt 运行期间只读轮询内核会话库(`db.sqlite`),
+  工具调用实时渲染为 chip(运行中 spinner → 完成 ✓ + 耗时 / 失败 ✗),
+  最新 reasoning 以 dim 单行显示在工作区;仅运行时显示,turn 结束清场,
+  不进 transcript;schema 不识别 / 文件缺失 / 读取失败一律整组降级,
+  行为回到纯 spinner
+- **上下文水位**:prompt 通道改用 `--json` 整块总结对象为权威结果
+  (response 走 markdown,解析失败自动纯文本降级),状态栏显示
+  `ctx 9k/200k (4%)`,≥80% 提示 /new
+- **未登录启动屏**:清华紫 ZCODE 字标(块体亮紫 + 描边暗紫阴影层)、
+  底部鸟巢/长城/天坛轮廓、三条免浏览器登录路径引导;NO_COLOR 全退化
+- `/login` 在无桌面环境(无 DISPLAY/WAYLAND_DISPLAY)自动附 `--no-browser`
+
+### 修复
+
+- `/auth` 三态检测:内核硬性要求 `~/.zcode/cli/config.json`,仅有
+  env API key 时如实显示"部分配置"并给补齐命令,不再误报已认证
+
 ## [0.1.0] - 2026-07-04
 
 首个发布版本：官方 ZCode 桌面包缺 `@zcode/tui` 期间的终端 TUI fallback，

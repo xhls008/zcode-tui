@@ -3,10 +3,14 @@ use std::path::PathBuf;
 
 use zcode_tui::{
     build_prompt_command, build_prompt_command_with_attachments, classify_input,
-    command_palette_rows, detect_auth_status_with, extract_file_mentions, file_suggestions,
-    handle_local_command, leader_action_for_key, load_mcp_config, login_command, logout_command,
-    mask_secret, parse_cli_args, save_mcp_config, slash_suggestions, strip_ansi,
-    user_mcp_config_path_from, AppConfig, AuthStatus, InputAction, LeaderAction, McpServer,
+    command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
+    detect_auth_status_with, env_is_headless, extract_file_mentions, file_suggestions,
+    format_context_watermark, handle_local_command, latest_reasoning, latest_session_for_dir,
+    leader_action_for_key, live_tool_chips, load_mcp_config, login_command, logout_command,
+    mask_secret, open_kernel_db_ro, parse_cli_args, parse_part_data, parse_prompt_summary,
+    save_mcp_config, slash_suggestions, strip_ansi, user_mcp_config_path_from, AppConfig,
+    AuthStatus, InputAction, LeaderAction, McpServer, PartEvent, ToolChipStatus,
+    KNOWN_DB_MIGRATIONS,
 };
 
 #[test]
@@ -59,6 +63,7 @@ fn build_prompt_command_uses_headless_zcode_cli_options() {
             "/tmp/a.txt",
             "--attach",
             "/tmp/b.txt",
+            "--json",
             "--prompt",
             "explain this",
         ]
@@ -81,6 +86,7 @@ fn build_prompt_command_appends_mention_attachments() {
             "zcode",
             "--attach",
             "src/lib.rs",
+            "--json",
             "--prompt",
             "review @src/lib.rs",
         ]
@@ -486,23 +492,51 @@ fn user_mcp_config_path_prefers_xdg() {
 }
 
 #[test]
-fn detect_auth_status_prefers_env_key_and_masks_it() {
+fn detect_auth_status_env_key_alone_is_only_partial() {
+    // Verified against kernel 0.15.0: env keys without the model config
+    // file still fail, so they must never read as fully configured.
     let status = detect_auth_status_with(
         |key| (key == "ZCODE_API_KEY").then(|| "sk-zcode-1234567890".to_string()),
         None,
     );
     match status {
-        AuthStatus::EnvKey { variable, masked } => {
-            assert_eq!(variable, "ZCODE_API_KEY");
-            assert!(!masked.contains("1234567890"));
-            assert!(masked.contains("7890"));
+        AuthStatus::Partial { evidence } => {
+            assert!(evidence.contains("$ZCODE_API_KEY"));
+            assert!(!evidence.contains("1234567890"));
+            assert!(evidence.contains("7890"));
         }
-        other => panic!("expected env key auth, got {other:?}"),
+        other => panic!("expected partial auth, got {other:?}"),
     }
 }
 
 #[test]
-fn detect_auth_status_finds_credential_file_then_none() {
+fn detect_auth_status_config_json_wins_and_carries_env_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join(".zcode").join("cli").join("config.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, "{}").unwrap();
+
+    let status = detect_auth_status_with(
+        |key| (key == "ZCODE_API_KEY").then(|| "sk-zcode-1234567890".to_string()),
+        Some(temp.path()),
+    );
+    match status {
+        AuthStatus::Configured {
+            config_path,
+            env_key,
+        } => {
+            assert_eq!(config_path, config);
+            let (variable, masked) = env_key.expect("env key carried along");
+            assert_eq!(variable, "ZCODE_API_KEY");
+            assert!(!masked.contains("1234567890"));
+        }
+        other => panic!("expected configured auth, got {other:?}"),
+    }
+    assert!(detect_auth_status_with(|_| None, Some(temp.path())).is_configured());
+}
+
+#[test]
+fn detect_auth_status_credential_file_is_partial_then_none() {
     let temp = tempfile::tempdir().unwrap();
     assert_eq!(
         detect_auth_status_with(|_| None, Some(temp.path())),
@@ -512,27 +546,49 @@ fn detect_auth_status_finds_credential_file_then_none() {
     let creds = temp.path().join(".zcode").join("credentials.json");
     fs::create_dir_all(creds.parent().unwrap()).unwrap();
     fs::write(&creds, "{}").unwrap();
-    assert_eq!(
-        detect_auth_status_with(|_| None, Some(temp.path())),
-        AuthStatus::CredentialFile(creds)
-    );
+    match detect_auth_status_with(|_| None, Some(temp.path())) {
+        AuthStatus::Partial { evidence } => {
+            assert!(evidence.contains("credentials.json"));
+        }
+        other => panic!("expected partial auth, got {other:?}"),
+    }
 }
 
 #[test]
 fn auth_commands_use_default_or_override() {
     assert_eq!(
-        login_command("zcode", None).unwrap(),
+        login_command("zcode", None, false).unwrap(),
         vec!["zcode", "login"]
     );
     assert_eq!(
         logout_command("/opt/zcode", None).unwrap(),
         vec!["/opt/zcode", "logout"]
     );
+    // Headless injects --no-browser into the default command only; an
+    // explicit override always runs verbatim.
     assert_eq!(
-        login_command("zcode", Some("zcode login --no-browser")).unwrap(),
+        login_command("zcode", None, true).unwrap(),
         vec!["zcode", "login", "--no-browser"]
     );
-    assert!(login_command("zcode", Some("  ")).is_err());
+    assert_eq!(
+        login_command("zcode", Some("zcode login --custom"), true).unwrap(),
+        vec!["zcode", "login", "--custom"]
+    );
+    assert!(login_command("zcode", Some("  "), false).is_err());
+}
+
+#[test]
+fn env_is_headless_requires_both_displays_absent() {
+    assert!(env_is_headless(|_| None));
+    assert!(env_is_headless(
+        |key| (key == "DISPLAY").then(|| "  ".to_string())
+    ));
+    assert!(!env_is_headless(
+        |key| (key == "DISPLAY").then(|| ":0".to_string())
+    ));
+    assert!(!env_is_headless(
+        |key| (key == "WAYLAND_DISPLAY").then(|| "wayland-0".to_string())
+    ));
 }
 
 #[test]
@@ -769,4 +825,198 @@ fn stream_events_are_recognized() {
     );
     assert_eq!(parse_stream_event("plain text line"), None);
     assert_eq!(parse_stream_event("{not json}"), None);
+}
+
+// ---- kernel db consumer -------------------------------------------------
+
+/// Minimal kernel-shaped db for consumer tests: real table names, only the
+/// columns the read-only queries touch.
+fn fake_kernel_db(dir: &std::path::Path) -> PathBuf {
+    let path = dir.join("db.sqlite");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE schema_migration (id TEXT PRIMARY KEY);
+         CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_updated INTEGER);
+         CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+         CREATE TABLE tool_usage (id TEXT PRIMARY KEY, session_id TEXT, tool_name TEXT, \
+          status TEXT, duration_ms INTEGER, cancelled_by_user INTEGER);",
+    )
+    .unwrap();
+    for migration in KNOWN_DB_MIGRATIONS {
+        conn.execute("INSERT INTO schema_migration (id) VALUES (?1)", [migration])
+            .unwrap();
+    }
+    path
+}
+
+#[test]
+fn db_schema_check_allows_newer_but_rejects_missing_migrations() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = fake_kernel_db(temp.path());
+    let writer = rusqlite::Connection::open(&path).unwrap();
+
+    let ro = open_kernel_db_ro(&path).unwrap();
+    assert!(db_schema_supported(&ro));
+
+    // A kernel upgrade appending migrations must not disable the consumer.
+    writer
+        .execute(
+            "INSERT INTO schema_migration (id) VALUES ('0014_future_migration')",
+            [],
+        )
+        .unwrap();
+    assert!(db_schema_supported(&ro));
+
+    // Any known id missing means the schema moved under us.
+    writer
+        .execute(
+            "DELETE FROM schema_migration WHERE id = ?1",
+            [KNOWN_DB_MIGRATIONS[0]],
+        )
+        .unwrap();
+    assert!(!db_schema_supported(&ro));
+
+    // No table / no file both read as unsupported, never as an error.
+    writer.execute("DROP TABLE schema_migration", []).unwrap();
+    assert!(!db_schema_supported(&ro));
+    assert!(open_kernel_db_ro(&temp.path().join("missing.sqlite")).is_err());
+}
+
+#[test]
+fn db_session_resolution_and_live_queries() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = fake_kernel_db(temp.path());
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer
+        .execute_batch(
+            "INSERT INTO session VALUES ('sess_old', '/proj', 100);
+             INSERT INTO session VALUES ('sess_new', '/proj', 200);
+             INSERT INTO session VALUES ('sess_other', '/elsewhere', 300);",
+        )
+        .unwrap();
+
+    let ro = open_kernel_db_ro(&path).unwrap();
+    assert_eq!(
+        latest_session_for_dir(&ro, "/proj"),
+        Some("sess_new".to_string())
+    );
+    assert_eq!(latest_session_for_dir(&ro, "/nowhere"), None);
+
+    // Baseline excludes pre-existing rows; later inserts and in-place
+    // status updates are both visible on re-read.
+    writer
+        .execute_batch(
+            "INSERT INTO tool_usage VALUES ('t0', 'sess_new', 'OldTool', 'completed', 5, 0);",
+        )
+        .unwrap();
+    let baseline = db_baseline(&ro);
+    writer
+        .execute_batch(
+            "INSERT INTO tool_usage VALUES ('t1', 'sess_new', 'Read', 'running', NULL, 0);
+             INSERT INTO tool_usage VALUES ('t2', 'sess_new', 'Bash', 'completed', 103, 0);
+             INSERT INTO tool_usage VALUES ('t3', 'sess_other', 'Grep', 'completed', 9, 0);",
+        )
+        .unwrap();
+    let chips = live_tool_chips(&ro, "sess_new", baseline).unwrap();
+    assert_eq!(chips.len(), 2);
+    assert_eq!(chips[0].tool, "Read");
+    assert_eq!(chips[0].status, ToolChipStatus::Running);
+    assert_eq!(chips[1].status, ToolChipStatus::Completed);
+    assert_eq!(chips[1].duration_ms, Some(103));
+
+    writer
+        .execute(
+            "UPDATE tool_usage SET status = 'failed' WHERE id = 't1'",
+            [],
+        )
+        .unwrap();
+    let chips = live_tool_chips(&ro, "sess_new", baseline).unwrap();
+    assert_eq!(chips[0].status, ToolChipStatus::Failed);
+
+    writer
+        .execute_batch(
+            "INSERT INTO part VALUES ('p1', 'sess_new', \
+              '{\"type\":\"reasoning\",\"text\":\"  \\nScanning the repo\\nmore\"}');
+             INSERT INTO part VALUES ('p2', 'sess_new', '{\"type\":\"unknown-future\"}');",
+        )
+        .unwrap();
+    assert_eq!(
+        latest_reasoning(&ro, "sess_new", baseline).unwrap(),
+        Some("Scanning the repo".to_string())
+    );
+}
+
+#[test]
+fn part_data_parses_real_kernel_samples_and_skips_unknown() {
+    // Captured from a real 0.15.0 run (2026-07-04 spike).
+    let tool = r#"{"type":"tool","callID":"call_e484","tool":"Bash","state":{"status":"completed","input":{"command":"echo hello"},"output":"hello","title":"Bash"}}"#;
+    assert_eq!(
+        parse_part_data(tool),
+        Some(PartEvent::Tool {
+            call_id: "call_e484".to_string(),
+            tool: "Bash".to_string(),
+            status: ToolChipStatus::Completed,
+        })
+    );
+    assert_eq!(
+        parse_part_data(r#"{"type":"text","text":"hi","time":1}"#),
+        Some(PartEvent::Text("hi".to_string()))
+    );
+    assert_eq!(
+        parse_part_data(r#"{"type":"step-finish","cost":0,"tokens":{}}"#),
+        Some(PartEvent::StepFinish)
+    );
+    assert_eq!(parse_part_data(r#"{"type":"hologram"}"#), None);
+    assert_eq!(parse_part_data("not json at all"), None);
+}
+
+// ---- prompt --json summary ------------------------------------------------
+
+#[test]
+fn prompt_summary_parses_real_shape_and_falls_back_on_text() {
+    // Shape captured from a real 0.15.0 run.
+    let raw = r#"{
+  "sessionId": "sess_43fd89a8",
+  "traceId": "519c3389",
+  "turnId": "turn_c8894b36",
+  "response": "**Files:**\n- data.txt",
+  "usage": { "totalTokens": 17859 },
+  "eventCount": 173,
+  "projection": { "status": "idle", "contextUsed": 9055, "contextWindow": 200000 }
+}"#;
+    let summary = parse_prompt_summary(raw).expect("summary parses");
+    assert_eq!(summary.response, "**Files:**\n- data.txt");
+    assert_eq!(summary.session_id.as_deref(), Some("sess_43fd89a8"));
+    assert_eq!(summary.context_used, Some(9055));
+    assert_eq!(summary.context_window, Some(200000));
+    assert_eq!(summary.total_tokens, Some(17859));
+
+    assert_eq!(parse_prompt_summary("plain text answer"), None);
+    assert_eq!(parse_prompt_summary(r#"{"no_response": true}"#), None);
+}
+
+#[test]
+fn prompt_command_carries_json_flag_exactly_once() {
+    let config = AppConfig::default();
+    let command = build_prompt_command("zcode", &config, "hello");
+    assert_eq!(
+        command.iter().filter(|arg| *arg == "--json").count(),
+        1,
+        "exactly one --json: {command:?}"
+    );
+    let with_passthrough = AppConfig {
+        passthrough: vec!["--json".to_string()],
+        ..Default::default()
+    };
+    let command = build_prompt_command("zcode", &with_passthrough, "hello");
+    assert_eq!(command.iter().filter(|arg| *arg == "--json").count(), 1);
+}
+
+#[test]
+fn context_watermark_formats_and_warns() {
+    assert_eq!(format_context_watermark(9055, 200000), "ctx 9k/200k (4%)");
+    assert_eq!(format_context_watermark(512, 0), "ctx 512");
+    assert!(!context_watermark_warn(9055, 200000));
+    assert!(context_watermark_warn(160000, 200000));
+    assert!(!context_watermark_warn(1, 0));
 }
