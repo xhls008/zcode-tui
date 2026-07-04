@@ -89,6 +89,28 @@ Kimi 有 TUI，Codex 有 TUI，Claude Code 有 TUI。ZCode 都发布了，Linux 
 
 ## 安装 / 更新
 
+**方式一：下载 Release 二进制（SSH 服务器推荐，无需 Rust 工具链）**
+
+每个版本都会发布 [GitHub Release](https://github.com/xhls008/zcode-tui/releases)，
+附带静态链接的 Linux x86_64 二进制（musl，任何发行版开箱可用）和校验和：
+
+```bash
+mkdir -p ~/.local/bin
+curl -fL -o ~/.local/bin/zcode-tui \
+  https://github.com/xhls008/zcode-tui/releases/latest/download/zcode-tui-x86_64-unknown-linux-musl
+chmod +x ~/.local/bin/zcode-tui
+```
+
+需要 `zcode` wrapper 的话，再取同一 Release 里的 `install.sh` 以 `--no-build`
+模式生成（不需要 cargo）：
+
+```bash
+curl -fLO https://github.com/xhls008/zcode-tui/releases/latest/download/install.sh
+bash install.sh --no-build
+```
+
+**方式二：从源码构建**
+
 一条命令完成构建和安装（更新同样跑它）：
 
 ```bash
@@ -123,8 +145,10 @@ zcode tui
 
 - 官方 Linux 桌面包（`/opt/ZCode`，deb 来自 `cdn-zcode.z.ai`）内嵌了 headless CLI
   内核 `resources/glm/zcode.cjs`（`--prompt`、`--attach`、`login`、`skills` 等都在）。
-- 内核需要 `node:sqlite`（Node ≥ 22.5），wrapper 用 Electron 自带的 Node
-  （`ELECTRON_RUN_AS_NODE=1 /opt/ZCode/zcode`）运行它。
+- 内核需要 `node:sqlite`（Node ≥ 22.5），wrapper 优先用 Electron 自带的 Node
+  （`ELECTRON_RUN_AS_NODE=1 /opt/ZCode/zcode`）运行它；Electron 起不动时
+  （无桌面机器缺 GUI 库）自动回退到系统 Node（需 ≥ 22.5），
+  `ZCODE_FORCE_SYSTEM_NODE=1` 可强制走系统 Node。
 - `zcode tui` 或裸 `zcode` 前先探测 `@zcode/tui` 能否解析；官方 Linux 包
   报下面这个错误时，才 fallback 到本项目：
 
@@ -133,6 +157,30 @@ Cannot find package '@zcode/tui'
 ```
 
 首次使用前需要登录：`zcode login`（Z.AI OAuth），或在 TUI 里执行 `/login`。
+
+## SSH / 无桌面环境
+
+这是本项目的核心使用场景：在没有桌面的服务器上通过 SSH 直接用终端跟 ZCode
+干活。TUI 本身是纯终端程序（无剪贴板、通知、浏览器依赖，ratatui + crossterm
+在 SSH/tmux 里和 vim 一样工作），要打通的只有内核引导这一环：
+
+1. **拿到内核**：无桌面机器不必安装 deb，解包即可（无需 root）：
+
+   ```bash
+   dpkg-deb -x ZCode-<ver>.deb ~/.local/opt/zcode/<ver>/
+   ```
+
+   wrapper 自动探测 `$ZCODE_APP` → `/opt/ZCode` → `~/.local/opt/zcode/*/opt/ZCode`。
+
+2. **运行内核**：极简服务器往往缺 Electron 加载所需的桌面库（libgtk-3、
+   libnss3 等，即使 `ELECTRON_RUN_AS_NODE=1` 也要先过动态链接）。wrapper 会
+   探测 Electron 能否启动，起不动时自动回退到系统 Node（需 ≥ 22.5，内核依赖
+   `node:sqlite`）。两条路满足其一即可：装 Node ≥ 22.5，或
+   `apt install libgtk-3-0t64 libnss3`（只装库，不需要桌面会话）。
+
+3. **登录**：无浏览器环境推荐两条路——设 `ZCODE_API_KEY` 环境变量，或从已
+   登录的桌面机拷贝 `~/.zcode/v2/credentials.json` 到同一路径。
+   `zcode login` 的 OAuth 流程在无桌面机器上未验证。
 
 ## 命令
 
@@ -200,6 +248,9 @@ ZCODE_TUI_LOGOUT_CMD         覆盖 /logout 执行的命令
 ZCODE_TUI_IDE_CMD            覆盖 /ide 启动的 IDE 命令
 ZCODE_TUI_NO_UPDATE_CHECK    置 1 关闭启动时的官方更新检测
 ZCODE_API_KEY 等             /auth 检测的 API key 环境变量链
+ZCODE_APP                    wrapper：指定 ZCode 桌面包目录（覆盖自动探测）
+ZCODE_FALLBACK_TUI           wrapper：指定 fallback TUI 二进制路径
+ZCODE_FORCE_SYSTEM_NODE      wrapper：置 1 强制用系统 Node 运行内核
 ```
 
 ## 设计与参考

@@ -4,6 +4,7 @@
 #   ./install.sh                 build + install binary and wrapper
 #   ./install.sh --prefix DIR    install under DIR/bin (default ~/.local)
 #   ./install.sh --no-wrapper    install only the zcode-tui binary
+#   ./install.sh --no-build      skip cargo; wrap an existing zcode-tui binary
 #   ./install.sh --uninstall     remove installed binary and managed wrapper
 #
 # Re-run after `git pull` or local changes to update the installation.
@@ -12,11 +13,12 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${HOME}/.local"
 INSTALL_WRAPPER=true
+BUILD=true
 UNINSTALL=false
 MARKER="managed by zcode-tui install.sh"
 
 usage() {
-    sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # Locate the ZCode desktop app dir holding resources/glm/zcode.cjs. Checked:
@@ -49,6 +51,7 @@ while [ $# -gt 0 ]; do
             ;;
         --prefix=*) PREFIX="${1#*=}" ;;
         --no-wrapper) INSTALL_WRAPPER=false ;;
+        --no-build) BUILD=false ;;
         --uninstall) UNINSTALL=true ;;
         -h | --help)
             usage
@@ -81,16 +84,26 @@ if $UNINSTALL; then
     exit 0
 fi
 
-command -v cargo >/dev/null 2>&1 || {
-    echo "error: cargo not found; install Rust from https://rustup.rs" >&2
-    exit 1
-}
+if $BUILD; then
+    command -v cargo >/dev/null 2>&1 || {
+        echo "error: cargo not found; install Rust from https://rustup.rs" >&2
+        echo "       (or download a release binary to ${TUI_BIN} and re-run with --no-build)" >&2
+        exit 1
+    }
 
-echo "building release binary..."
-cargo build --release --quiet --manifest-path "${REPO_DIR}/Cargo.toml"
+    echo "building release binary..."
+    cargo build --release --quiet --manifest-path "${REPO_DIR}/Cargo.toml"
 
-install -Dm755 "${REPO_DIR}/target/release/zcode-tui" "$TUI_BIN"
-echo "installed ${TUI_BIN} ($("$TUI_BIN" --version))"
+    install -Dm755 "${REPO_DIR}/target/release/zcode-tui" "$TUI_BIN"
+    echo "installed ${TUI_BIN} ($("$TUI_BIN" --version))"
+else
+    if [ ! -x "$TUI_BIN" ]; then
+        echo "error: --no-build needs an existing ${TUI_BIN}; download it from" >&2
+        echo "       https://github.com/xhls008/zcode-tui/releases first" >&2
+        exit 1
+    fi
+    echo "using existing ${TUI_BIN} ($("$TUI_BIN" --version))"
+fi
 
 APP_DIR="$(detect_app_dir || true)"
 if [ -n "$APP_DIR" ]; then
@@ -167,10 +180,31 @@ fi
 ZCODE_CJS="${APP_DIR}/resources/glm/zcode.cjs"
 ELECTRON_BIN="${APP_DIR}/zcode"
 
-# The kernel needs node:sqlite (Node >= 22.5); prefer the Electron-embedded
-# Node over the system node.
+# The kernel needs node:sqlite (Node >= 22.5). Prefer the Electron-embedded
+# Node, but on headless boxes Electron can fail to start even with
+# ELECTRON_RUN_AS_NODE=1 (its desktop shared libraries are still linked at
+# load time), so probe it once per run and fall back to a recent-enough
+# system node. ZCODE_FORCE_SYSTEM_NODE=1 skips Electron entirely.
+ELECTRON_USABLE=""
+electron_usable() {
+    if [ -z "$ELECTRON_USABLE" ]; then
+        if [ -z "${ZCODE_FORCE_SYSTEM_NODE:-}" ] && [ -x "$ELECTRON_BIN" ] &&
+            ELECTRON_RUN_AS_NODE=1 "$ELECTRON_BIN" -e "" >/dev/null 2>&1; then
+            ELECTRON_USABLE=yes
+        else
+            ELECTRON_USABLE=no
+        fi
+    fi
+    [ "$ELECTRON_USABLE" = yes ]
+}
+
+node_is_recent() {
+    command -v node >/dev/null 2>&1 || return 1
+    node -e 'const [maj, min] = process.versions.node.split(".").map(Number); process.exit(maj > 22 || (maj === 22 && min >= 5) ? 0 : 1)' 2>/dev/null
+}
+
 run_node() {
-    if [ -x "$ELECTRON_BIN" ]; then
+    if electron_usable; then
         ELECTRON_RUN_AS_NODE=1 "$ELECTRON_BIN" "$@"
     else
         node "$@"
@@ -186,10 +220,17 @@ if $wants_tui && [ -x "$FALLBACK_TUI" ]; then
     fi
 fi
 
-if [ -x "$ELECTRON_BIN" ]; then
+if electron_usable; then
     ELECTRON_RUN_AS_NODE=1 exec "$ELECTRON_BIN" "$ZCODE_CJS" "$@"
 fi
-exec node "$ZCODE_CJS" "$@"
+if node_is_recent; then
+    exec node "$ZCODE_CJS" "$@"
+fi
+echo "zcode: cannot run the CLI kernel: Electron at ${ELECTRON_BIN} failed to start" >&2
+echo "       (missing desktop libraries on a headless box?) and no system node >= 22.5" >&2
+echo "       was found (the kernel needs node:sqlite). Install Node.js >= 22.5 or the" >&2
+echo "       Electron desktop libraries; ZCODE_FORCE_SYSTEM_NODE=1 forces system node." >&2
+exit 127
 WRAP
     sed -i "s|__TUI_BIN__|${TUI_BIN}|" "$WRAPPER"
     chmod +x "$WRAPPER"
