@@ -152,6 +152,93 @@ out = run_pty(
 check("s4: art still present", "鸟巢" in strip_ansi(out))
 check("s4: no brand purple escape", "178;108;196" not in out)
 
+
+# ---- scenario 5: /sessions picker (user story: 找回昨天的会话) ----
+print("== scenario 5: /sessions picker ==", flush=True)
+out = run_pty(
+    {}, SPIKE,
+    [
+        (2.5, b"/sessions"),
+        (0.8, b"\r"),      # submit the command -> picker opens
+        (1.0, b"\r"),      # Enter resumes the selected session
+        (1.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=25,
+)
+plain = strip_ansi(out)
+check("s5: picker overlay shown", "sessions · Enter resumes" in plain)
+check("s5: Enter resumes a session", "resuming sess" in plain)
+
+# ---- scenario 6: Ctrl+R reverse search (user story: 只记得一个词) ----
+print("== scenario 6: Ctrl+R reverse search ==", flush=True)
+out = run_pty(
+    {}, SPIKE,
+    [
+        (2.5, b"\x12"),     # Ctrl+R
+        (0.5, b"read"),
+        (0.8, b"\r"),      # recall best match into the composer
+        (0.8, b"\x15"),     # Ctrl+U clear input (avoid submitting a prompt)
+        (0.5, b"/exit"),
+        (0.4, b"\r"),
+    ],
+    timeout=25,
+)
+plain = strip_ansi(out)
+check("s6: search overlay shown", "reverse search:" in plain)
+# ratatui diff-renders cells: a status sharing a prefix with the previous one
+# only emits the divergent tail, so probe a suffix plus the recalled text.
+check(
+    "s6: match recalled from kernel-persisted history",
+    "from history" in plain and "Read notes.txt" in plain,
+)
+
+# ---- scenario 7: folding long output (user story: 长输出不刷屏) ----
+print("== scenario 7: fold + Ctrl+O ==", flush=True)
+out = run_pty(
+    {}, SPIKE,
+    [
+        (2.0, b"! seq 1 120"),
+        (0.5, b"\r"),
+        (3.0, b"\x0f"),     # Ctrl+O expand
+        (1.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=30,
+)
+plain = strip_ansi(out)
+check("s7: long output folded with hidden count", "+112 lines" in plain and "Ctrl+O" in plain)
+check("s7: Ctrl+O expands", "expanded (Ctrl+O folds back)" in plain)
+
+# ---- scenario 8: ui config color override (user story: 换掉强调色) ----
+print("== scenario 8: config accent override ==", flush=True)
+cfg = os.path.join(SPIKE, "tui-config")
+with open(cfg, "w") as fh:
+    fh.write("accent = #ff8800\n")
+out = run_pty(
+    {"ZCODE_TUI_CONFIG": cfg}, SPIKE,
+    [
+        (2.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=15,
+)
+check("s8: custom accent color rendered", "38;2;255;136;0" in out)
+
+# ---- scenario 9: mouse scroll does not break anything ----
+print("== scenario 9: mouse wheel ==", flush=True)
+out = run_pty(
+    {}, SPIKE,
+    [
+        (2.0, b"\x1b[<64;10;10M\x1b[<64;10;10M"),  # SGR wheel-up twice
+        (1.0, b"\x1b[<65;10;10M"),                  # wheel-down
+        (1.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=15,
+)
+check("s9: no panic under mouse events", "panicked" not in strip_ansi(out))
+
 failed = [name for name, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} checks passed", flush=True)
 sys.exit(1 if failed else 0)

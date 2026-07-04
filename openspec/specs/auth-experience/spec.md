@@ -1,7 +1,8 @@
-# auth-experience
+# auth-experience Specification
 
-## ADDED Requirements
-
+## Purpose
+TBD - created by archiving change db-live-progress-and-auth-screen. Update Purpose after archive.
+## Requirements
 ### Requirement: 认证检测三态
 认证检测 MUST 区分三态:已配置(`~/.zcode/cli/config.json` 存在)、
 部分配置(config.json 不存在但 env key 链任一存在)、未配置(两者皆无)。
@@ -32,9 +33,10 @@ MUST 全部退化为无色。已配置时 MUST NOT 显示该屏。
 - **THEN** 字符画与文案照常显示但无任何颜色样式
 
 ### Requirement: /login 无桌面自动 --no-browser
-/login 构建登录命令时,若 `DISPLAY` 与 `WAYLAND_DISPLAY` 均未设置,
-SHALL 自动附加 `--no-browser`;判定逻辑 MUST 为 lib.rs 纯函数
-(env 快照入参,可单测);`ZCODE_TUI_LOGIN_CMD` 覆盖时不做注入。
+The /login command SHALL append `--no-browser` when both `DISPLAY` and
+`WAYLAND_DISPLAY` are unset/empty. The headless check MUST be a pure
+lib.rs function (env snapshot as input, unit-testable). When
+`ZCODE_TUI_LOGIN_CMD` overrides the command, nothing SHALL be injected.
 
 #### Scenario: SSH 无桌面登录
 - **WHEN** DISPLAY 与 WAYLAND_DISPLAY 均未设置,用户执行 /login
@@ -52,3 +54,4 @@ Theme SHALL 新增 `brand` 与 `brand_dim` token(清华紫亮化变体与暗紫
 #### Scenario: 强调色纪律不破
 - **WHEN** 未登录屏与正常 transcript 同屏渲染
 - **THEN** 紫色仅出现在字标/阴影/轮廓区域,其余强调元素仍为 GLM 蓝
+

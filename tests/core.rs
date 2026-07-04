@@ -5,11 +5,12 @@ use zcode_tui::{
     build_prompt_command, build_prompt_command_with_attachments, classify_input,
     command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
     detect_auth_status_with, env_is_headless, extract_file_mentions, file_suggestions,
-    format_context_watermark, handle_local_command, latest_reasoning, latest_session_for_dir,
-    leader_action_for_key, live_tool_chips, load_mcp_config, login_command, logout_command,
-    mask_secret, open_kernel_db_ro, parse_cli_args, parse_part_data, parse_prompt_summary,
-    save_mcp_config, slash_suggestions, strip_ansi, user_mcp_config_path_from, AppConfig,
-    AuthStatus, InputAction, LeaderAction, McpServer, PartEvent, ToolChipStatus,
+    fold_preview, format_context_watermark, handle_local_command, history_search, latest_reasoning,
+    latest_session_for_dir, leader_action_for_key, list_recent_sessions, live_tool_chips,
+    load_mcp_config, login_command, logout_command, mask_secret, open_kernel_db_ro, parse_cli_args,
+    parse_hex_color, parse_part_data, parse_prompt_summary, parse_ui_config, recent_input_history,
+    relative_age, save_mcp_config, slash_suggestions, strip_ansi, user_mcp_config_path_from,
+    AppConfig, AuthStatus, InputAction, LeaderAction, McpServer, PartEvent, ToolChipStatus,
     KNOWN_DB_MIGRATIONS,
 };
 
@@ -836,7 +837,8 @@ fn fake_kernel_db(dir: &std::path::Path) -> PathBuf {
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "CREATE TABLE schema_migration (id TEXT PRIMARY KEY);
-         CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_updated INTEGER);
+         CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_updated INTEGER);
+         CREATE TABLE input_history (id TEXT PRIMARY KEY, text TEXT);
          CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
          CREATE TABLE tool_usage (id TEXT PRIMARY KEY, session_id TEXT, tool_name TEXT, \
           status TEXT, duration_ms INTEGER, cancelled_by_user INTEGER);",
@@ -889,9 +891,9 @@ fn db_session_resolution_and_live_queries() {
     let writer = rusqlite::Connection::open(&path).unwrap();
     writer
         .execute_batch(
-            "INSERT INTO session VALUES ('sess_old', '/proj', 100);
-             INSERT INTO session VALUES ('sess_new', '/proj', 200);
-             INSERT INTO session VALUES ('sess_other', '/elsewhere', 300);",
+            "INSERT INTO session VALUES ('sess_old', 'old work', '/proj', 100);
+             INSERT INTO session VALUES ('sess_new', NULL, '/proj', 200);
+             INSERT INTO session VALUES ('sess_other', 'elsewhere', '/elsewhere', 300);",
         )
         .unwrap();
 
@@ -1019,4 +1021,124 @@ fn context_watermark_formats_and_warns() {
     assert!(!context_watermark_warn(9055, 200000));
     assert!(context_watermark_warn(160000, 200000));
     assert!(!context_watermark_warn(1, 0));
+}
+
+// ---- session picker / history / folding / ui config -----------------------
+
+#[test]
+fn recent_sessions_current_dir_first_with_title_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = fake_kernel_db(temp.path());
+    let ro = open_kernel_db_ro(&path).unwrap();
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer
+        .execute_batch(
+            "INSERT INTO session VALUES ('sess_a', 'fix the bug', '/proj', 100);
+             INSERT INTO session VALUES ('sess_b', NULL, '/proj/sub', 300);
+             INSERT INTO session VALUES ('sess_c', '', '/other', 200);",
+        )
+        .unwrap();
+
+    let rows = list_recent_sessions(&ro, "/proj", 10).unwrap();
+    // Current-directory session first despite being the oldest.
+    assert_eq!(rows[0].id, "sess_a");
+    assert_eq!(rows[0].title, "fix the bug");
+    // Missing/empty titles fall back to the directory tail.
+    let by_id = |id: &str| rows.iter().find(|row| row.id == id).unwrap().clone();
+    assert_eq!(by_id("sess_b").title, "sub");
+    assert_eq!(by_id("sess_c").title, "other");
+    // Remaining rows by recency.
+    assert_eq!(rows[1].id, "sess_b");
+    assert_eq!(rows[2].id, "sess_c");
+
+    assert_eq!(list_recent_sessions(&ro, "/proj", 2).unwrap().len(), 2);
+}
+
+#[test]
+fn relative_age_buckets() {
+    assert_eq!(relative_age(1_000_000, 990_000), "now");
+    assert_eq!(relative_age(1_000_000, 1_000_000 - 5 * 60_000), "5m");
+    assert_eq!(
+        relative_age(1_000_000_000, 1_000_000_000 - 3 * 3_600_000),
+        "3h"
+    );
+    assert_eq!(
+        relative_age(1_000_000_000_000, 1_000_000_000_000 - 2 * 86_400_000),
+        "2d"
+    );
+}
+
+#[test]
+fn input_history_reads_oldest_first_and_dedups() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = fake_kernel_db(temp.path());
+    let ro = open_kernel_db_ro(&path).unwrap();
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer
+        .execute_batch(
+            "INSERT INTO input_history VALUES ('i1', 'first');
+             INSERT INTO input_history VALUES ('i2', 'second');
+             INSERT INTO input_history VALUES ('i3', 'second');
+             INSERT INTO input_history VALUES ('i4', '   ');
+             INSERT INTO input_history VALUES ('i5', 'third');",
+        )
+        .unwrap();
+
+    assert_eq!(
+        recent_input_history(&ro, 200).unwrap(),
+        vec!["first", "second", "third"]
+    );
+    // The limit applies to the newest entries.
+    assert_eq!(recent_input_history(&ro, 2).unwrap(), vec!["third"]);
+}
+
+#[test]
+fn history_search_is_substring_newest_first() {
+    let history: Vec<String> = ["cargo test", "/mcp list", "cargo build", "/mcp list"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        history_search(&history, "mcp", 10),
+        vec!["/mcp list".to_string()]
+    );
+    assert_eq!(
+        history_search(&history, "CARGO", 10),
+        vec!["cargo build".to_string(), "cargo test".to_string()]
+    );
+    assert_eq!(history_search(&history, "", 2).len(), 2);
+    assert!(history_search(&history, "nothing", 10).is_empty());
+}
+
+#[test]
+fn fold_preview_thresholds() {
+    let long = ["line"; 120].join("\n");
+    assert_eq!(fold_preview(&long, 24, 8), Some((8, 112)));
+    let short = ["line"; 10].join("\n");
+    assert_eq!(fold_preview(&short, 24, 8), None);
+    assert_eq!(fold_preview(&long, 24, 200), None);
+}
+
+#[test]
+fn ui_config_parses_colors_and_mouse_ignoring_junk() {
+    let config = parse_ui_config(
+        "# comment\n\
+         accent = #ff8800\n\
+         brand=#B26CC4\n\
+         accent = 不是颜色\n\
+         unknown_key = #112233\n\
+         mouse = off\n\
+         mouse = maybe\n\
+         no equals sign here\n",
+    );
+    // A later malformed value must not clobber an earlier good one.
+    assert_eq!(config.colors.get("accent"), Some(&(0xff, 0x88, 0x00)));
+    assert_eq!(config.colors.get("brand"), Some(&(0xb2, 0x6c, 0xc4)));
+    assert!(!config.colors.contains_key("unknown_key"));
+    assert_eq!(config.mouse, Some(false));
+
+    assert_eq!(parse_ui_config(""), zcode_tui::UiConfig::default());
+    assert_eq!(parse_hex_color("#12345"), None);
+    assert_eq!(parse_hex_color("123456"), None);
+    assert_eq!(parse_hex_color(" #A1b2C3 "), Some((0xa1, 0xb2, 0xc3)));
 }

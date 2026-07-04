@@ -463,7 +463,7 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
     match parts[0].as_str() {
         "exit" | "quit" => Ok(InputAction::Quit),
         "help" | "clear" | "editor" | "login" | "logout" | "auth" | "status" | "diff" | "ide"
-        | "mode" | "resume" | "new" => Ok(InputAction::Local(parts)),
+        | "sessions" | "mode" | "resume" | "new" => Ok(InputAction::Local(parts)),
         "skills" => {
             let mut local = parts;
             if local.len() == 1 {
@@ -578,6 +578,11 @@ pub fn command_catalog() -> &'static [CommandSpec] {
         CommandSpec {
             command: "/resume",
             summary: "resume the latest session or one by sess_ id",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/sessions",
+            summary: "pick a recent kernel session to resume",
             route: "local",
         },
         CommandSpec {
@@ -1385,6 +1390,7 @@ pub fn help_text() -> &'static str {
                                ZCODE_TUI_IDE_CMD
   /mode [build|edit|plan|yolo] show or switch permission mode
   /resume [sess_id]            resume latest (bare) or a specific session
+  /sessions                    pick a recent session from a list
   /new                         start a fresh session; context resets
   /editor                      edit current prompt in $VISUAL or $EDITOR
   /clear                       clear this screen
@@ -1400,6 +1406,10 @@ keys:
   Ctrl+A / Ctrl+E              jump to start / end of input
   Ctrl+G                       edit prompt externally
   Ctrl+J                       insert newline
+  Ctrl+R                       reverse-search input history
+  Ctrl+O                       expand / fold the last long output
+  Mouse wheel                  scroll the transcript (hold Shift to select
+                               text; ZCODE_TUI_NO_MOUSE=1 disables capture)
   Esc                          close popups / cancel running job
 "#
 }
@@ -2376,4 +2386,168 @@ pub fn format_context_watermark(used: u64, window: u64) -> String {
 /// High-watermark hint threshold: suggest /new at >= 80% usage.
 pub fn context_watermark_warn(used: u64, window: u64) -> bool {
     window > 0 && used * 100 / window >= 80
+}
+
+// ---- session picker / history / folding / ui config -----------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRow {
+    pub id: String,
+    pub title: String,
+    pub directory: String,
+    pub time_updated: i64,
+}
+
+/// Recent kernel sessions for the picker: current-directory sessions first,
+/// then by recency. Title falls back to the directory tail.
+pub fn list_recent_sessions(
+    conn: &Connection,
+    current_dir: &str,
+    limit: usize,
+) -> Result<Vec<SessionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, COALESCE(title, ''), COALESCE(directory, ''), COALESCE(time_updated, 0) \
+         FROM session ORDER BY (directory = ?1) DESC, time_updated DESC LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![current_dir, limit as i64], |row| {
+            let id: String = row.get(0)?;
+            let title: String = row.get(1)?;
+            let directory: String = row.get(2)?;
+            let title = if title.trim().is_empty() {
+                directory
+                    .rsplit('/')
+                    .find(|piece| !piece.is_empty())
+                    .unwrap_or(&id)
+                    .to_string()
+            } else {
+                title
+            };
+            Ok(SessionRow {
+                id,
+                title,
+                directory,
+                time_updated: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Compact relative age for the picker, from millisecond timestamps.
+pub fn relative_age(now_ms: i64, then_ms: i64) -> String {
+    let seconds = (now_ms - then_ms).max(0) / 1000;
+    match seconds {
+        0..=59 => "now".to_string(),
+        60..=3599 => format!("{}m", seconds / 60),
+        3600..=86_399 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+/// The kernel persists every --prompt input; read it (oldest→newest) as the
+/// base of the Up/Down history. Read-only, adjacent duplicates collapsed.
+pub fn recent_input_history(conn: &Connection, limit: usize) -> Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT COALESCE(text, '') FROM input_history ORDER BY rowid DESC LIMIT ?1")?;
+    let mut rows = stmt
+        .query_map([limit as i64], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.reverse();
+    rows.retain(|text| !text.trim().is_empty());
+    rows.dedup();
+    Ok(rows)
+}
+
+/// Ctrl+R matcher: case-insensitive substring over the merged history,
+/// newest first, de-duplicated.
+pub fn history_search(history: &[String], query: &str, limit: usize) -> Vec<String> {
+    let needle = query.to_lowercase();
+    let mut seen = std::collections::HashSet::new();
+    history
+        .iter()
+        .rev()
+        .filter(|entry| needle.is_empty() || entry.to_lowercase().contains(&needle))
+        .filter(|entry| seen.insert(entry.as_str()))
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+/// Folding decision for long transcript cells: Some((visible_head_lines,
+/// hidden_count)) when the text exceeds the threshold. Render-time only.
+pub fn fold_preview(text: &str, threshold: usize, head: usize) -> Option<(usize, usize)> {
+    let total = text.lines().count();
+    (total > threshold && head < total).then(|| (head, total - head))
+}
+
+/// User config: theme token overrides plus the mouse switch. Parsing never
+/// fails — bad lines fall back to defaults so startup cannot break.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UiConfig {
+    pub colors: BTreeMap<String, (u8, u8, u8)>,
+    pub mouse: Option<bool>,
+}
+
+pub const UI_CONFIG_COLOR_KEYS: &[&str] = &[
+    "accent",
+    "accent_dim",
+    "text",
+    "dim",
+    "good",
+    "bad",
+    "frame",
+    "code_bg",
+    "band_bg",
+    "brand",
+    "brand_dim",
+];
+
+pub fn parse_hex_color(value: &str) -> Option<(u8, u8, u8)> {
+    let hex = value.trim().strip_prefix('#')?;
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok();
+    Some((channel(0..2)?, channel(2..4)?, channel(4..6)?))
+}
+
+pub fn parse_ui_config(content: &str) -> UiConfig {
+    let mut config = UiConfig::default();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if key == "mouse" {
+            config.mouse = match value.to_ascii_lowercase().as_str() {
+                "on" | "true" | "1" => Some(true),
+                "off" | "false" | "0" => Some(false),
+                _ => config.mouse,
+            };
+        } else if UI_CONFIG_COLOR_KEYS.contains(&key) {
+            if let Some(rgb) = parse_hex_color(value) {
+                config.colors.insert(key.to_string(), rgb);
+            }
+        }
+    }
+    config
+}
+
+pub fn ui_config_path_from(home: &Path) -> PathBuf {
+    home.join(".config").join("zcode-tui").join("config")
+}
+
+/// Resolve and parse the user config; every failure path yields defaults.
+pub fn load_ui_config() -> UiConfig {
+    let path = std::env::var_os("ZCODE_TUI_CONFIG")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| ui_config_path_from(Path::new(&home))));
+    path.and_then(|path| fs::read_to_string(path).ok())
+        .map(|content| parse_ui_config(&content))
+        .unwrap_or_default()
 }

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{self, Stdout};
@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -28,20 +28,26 @@ use ratatui::{Frame, Terminal};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zcode_tui::{
     classify_input, command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
-    detect_auth_status, diff_line_role, env_is_headless, file_suggestions,
-    format_context_watermark, git_diff_command, handle_local_command, help_text, is_newer_version,
-    kernel_db_path_from, latest_reasoning, latest_session_for_dir, leader_action_for_key,
-    live_tool_chips, login_command, markdown_lines, open_kernel_db_ro, parse_cli_args,
-    parse_prompt_summary, parse_stream_event, parse_update_feed, parse_update_feed_url,
-    prompt_command_for, run_command, shorten_home, slash_suggestions, spawn_streaming_command,
+    detect_auth_status, diff_line_role, env_is_headless, file_suggestions, fold_preview,
+    format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
+    is_newer_version, kernel_db_path_from, latest_reasoning, latest_session_for_dir,
+    leader_action_for_key, list_recent_sessions, live_tool_chips, load_ui_config, login_command,
+    markdown_lines, open_kernel_db_ro, parse_cli_args, parse_prompt_summary, parse_stream_event,
+    parse_update_feed, parse_update_feed_url, prompt_command_for, recent_input_history,
+    relative_age, run_command, shorten_home, slash_suggestions, spawn_streaming_command,
     wrap_display, AppConfig, AuthStatus, DbBaseline, DiffRole, InputAction, JobEvent, LeaderAction,
-    LiveToolChip, MdLineKind, SpanRole, StreamEvent, StreamingJob, ToolChipStatus, UpdateFeed,
+    LiveToolChip, MdLineKind, SessionRow, SpanRole, StreamEvent, StreamingJob, ToolChipStatus,
+    UiConfig, UpdateFeed,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SUGGESTION_LIMIT: usize = 8;
+/// Foldable cells longer than this render as a head preview by default.
+const FOLD_THRESHOLD: usize = 24;
+const FOLD_HEAD: usize = 8;
+const HISTORY_SEARCH_LIMIT: usize = 8;
 
 /// ZCODE wordmark over a Beijing skyline: 天坛, 鸟巢, 长城, 清华校门.
 /// Shown when a newer official ZCode release is detected.
@@ -91,8 +97,8 @@ fn main() -> Result<()> {
 }
 
 fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
-    let mut terminal = TerminalGuard::enter()?;
     let mut state = UiState::new(config, zcode_bin.to_string());
+    let mut terminal = TerminalGuard::enter(state.mouse_enabled)?;
     state.push_banner();
     state.push_unauth_screen_if_needed();
     let probe = spawn_startup_probe(zcode_bin.to_string());
@@ -124,6 +130,15 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
             Event::Paste(text) => {
                 state.insert_text(&text.replace("\r\n", "\n").replace('\r', "\n"));
             }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    state.scroll = state.scroll.saturating_add(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    state.scroll = state.scroll.saturating_sub(3);
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -415,6 +430,29 @@ impl Theme {
             Style::default().fg(Color::Rgb(14, 18, 30)).bg(self.accent)
         }
     }
+
+    /// Apply user config color overrides; NO_COLOR (plain) still wins
+    /// because every accessor checks `plain` first.
+    fn with_overrides(mut self, config: &UiConfig) -> Self {
+        for (key, (r, g, b)) in &config.colors {
+            let color = Color::Rgb(*r, *g, *b);
+            match key.as_str() {
+                "accent" => self.accent = color,
+                "accent_dim" => self.accent_dim = color,
+                "text" => self.text = color,
+                "dim" => self.dim = color,
+                "good" => self.good = color,
+                "bad" => self.bad = color,
+                "frame" => self.frame = color,
+                "code_bg" => self.code_bg = color,
+                "band_bg" => self.band_bg = color,
+                "brand" => self.brand = color,
+                "brand_dim" => self.brand_dim = color,
+                _ => {}
+            }
+        }
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -506,6 +544,14 @@ struct UiState {
     job: Option<ActiveJob>,
     queued: VecDeque<String>,
     tick: usize,
+    /// /sessions picker overlay: rows + selected index.
+    session_picker: Option<(Vec<SessionRow>, usize)>,
+    /// Ctrl+R reverse search overlay: query + selected index.
+    history_query: Option<(String, usize)>,
+    /// Log indices the user expanded with Ctrl+O (folding is the default
+    /// for long foldable cells).
+    unfolded: HashSet<usize>,
+    mouse_enabled: bool,
 }
 
 impl UiState {
@@ -513,10 +559,13 @@ impl UiState {
         let auth_status = detect_auth_status();
         let auth_label = auth_status.short_label();
         let plain = config.no_color || env::var_os("NO_COLOR").is_some();
+        let ui_config = load_ui_config();
+        let mouse_enabled =
+            env::var_os("ZCODE_TUI_NO_MOUSE").is_none() && ui_config.mouse != Some(false);
         Self {
             config,
             zcode_bin,
-            theme: Theme::zhipu(plain),
+            theme: Theme::zhipu(plain).with_overrides(&ui_config),
             kernel_version: None,
             session_active: false,
             auth_status,
@@ -540,6 +589,10 @@ impl UiState {
             job: None,
             queued: VecDeque::new(),
             tick: 0,
+            session_picker: None,
+            history_query: None,
+            unfolded: HashSet::new(),
+            mouse_enabled,
         }
     }
 
@@ -753,9 +806,20 @@ impl UiState {
             self.leader_pending = false;
             return self.handle_leader_key(key);
         }
+        if self.session_picker.is_some() {
+            return self.handle_session_picker_key(key);
+        }
+        if self.history_query.is_some() {
+            return self.handle_history_search_key(key);
+        }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
+            KeyCode::Char('r') if ctrl => {
+                self.history_query = Some((String::new(), 0));
+                self.status = "reverse search: type to filter, Enter recalls".to_string();
+            }
+            KeyCode::Char('o') if ctrl => self.toggle_fold(),
             KeyCode::Char('q') if ctrl => return Some(UiEffect::Quit),
             KeyCode::Char('c') if ctrl => {
                 if self.job.is_some() {
@@ -932,6 +996,7 @@ impl UiState {
             return;
         }
         self.log.clear();
+        self.unfolded.clear();
         self.scroll = 0;
         self.push_banner();
     }
@@ -1000,6 +1065,10 @@ impl UiState {
             }
             Some("editor") => return Some(UiEffect::Editor),
             Some("login") => return Some(UiEffect::Login),
+            Some("sessions") => {
+                self.open_session_picker();
+                return None;
+            }
             Some("diff") => {
                 let cwd = self.resolve_cwd();
                 let diff_command = git_diff_command(&cwd, &command[1..]);
@@ -1254,6 +1323,144 @@ impl UiState {
         active.any_output = true;
     }
 
+    fn handle_session_picker_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
+        match key.code {
+            KeyCode::Esc => {
+                self.session_picker = None;
+                self.status = "session picker closed".to_string();
+            }
+            KeyCode::Up => {
+                if let Some((_, index)) = &mut self.session_picker {
+                    *index = index.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some((rows, index)) = &mut self.session_picker {
+                    *index = (*index + 1).min(rows.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Enter => {
+                if let Some((rows, index)) = self.session_picker.take() {
+                    if let Some(row) = rows.get(index) {
+                        let id = row.id.clone();
+                        self.set_resume(Some(&id));
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_history_search_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                self.history_query = None;
+                self.status = "search cancelled".to_string();
+            }
+            KeyCode::Enter => {
+                if let Some((query, index)) = self.history_query.take() {
+                    let matches = history_search(&self.history, &query, HISTORY_SEARCH_LIMIT);
+                    match matches.get(index) {
+                        Some(entry) => {
+                            let entry = entry.clone();
+                            self.set_input(&entry);
+                            self.status = "recalled from history".to_string();
+                        }
+                        None => self.status = "no history match".to_string(),
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some((query, index)) = &mut self.history_query {
+                    query.pop();
+                    *index = 0;
+                }
+            }
+            KeyCode::Up => {
+                if let Some((query, index)) = &mut self.history_query {
+                    let count = history_search(&self.history, query, HISTORY_SEARCH_LIMIT).len();
+                    *index = (*index + 1).min(count.saturating_sub(1));
+                }
+            }
+            KeyCode::Down => {
+                if let Some((_, index)) = &mut self.history_query {
+                    *index = index.saturating_sub(1);
+                }
+            }
+            KeyCode::Char(ch) if !ctrl => {
+                if let Some((query, index)) = &mut self.history_query {
+                    query.push(ch);
+                    *index = 0;
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn open_session_picker(&mut self) {
+        let DbState::Enabled(path) = &self.db_state else {
+            self.push_system(
+                "session list unavailable: kernel db not readable (missing or schema changed)",
+            );
+            return;
+        };
+        let Ok(conn) = open_kernel_db_ro(path) else {
+            self.push_system("session list unavailable: kernel db busy, try again");
+            return;
+        };
+        let directory = self
+            .resolve_cwd()
+            .canonicalize()
+            .unwrap_or_else(|_| self.resolve_cwd())
+            .to_string_lossy()
+            .into_owned();
+        match list_recent_sessions(&conn, &directory, 20) {
+            Ok(rows) if rows.is_empty() => self.push_system("no sessions recorded yet"),
+            Ok(rows) => {
+                self.session_picker = Some((rows, 0));
+                self.show_palette = false;
+                self.show_help = false;
+                self.status = "pick a session: ↑↓ select · Enter resume · Esc close".to_string();
+            }
+            Err(error) => self.push_system(&format!("session list unavailable: {error:#}")),
+        }
+    }
+
+    /// Toggle the most recent foldable over-threshold cell between the
+    /// folded preview and the full text.
+    fn toggle_fold(&mut self) {
+        let target = self
+            .log
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, entry)| {
+                foldable_kind(entry.kind)
+                    && fold_preview(&entry.text, FOLD_THRESHOLD, FOLD_HEAD).is_some()
+            })
+            .map(|(index, _)| index);
+        match target {
+            Some(index) => {
+                let expanded = if self.unfolded.remove(&index) {
+                    false
+                } else {
+                    self.unfolded.insert(index);
+                    true
+                };
+                self.status = if expanded {
+                    "expanded (Ctrl+O folds back)".to_string()
+                } else {
+                    "folded".to_string()
+                };
+                self.scroll = 0;
+            }
+            None => self.status = "no long output to fold".to_string(),
+        }
+    }
+
     /// Fallback when stdout isn't the --json summary (older kernel or plain
     /// output): replay the buffered lines through the streamed-event
     /// interpretation the pump used to apply live.
@@ -1317,6 +1524,18 @@ impl UiState {
             };
         } else if self.log[active.log_index].text.is_empty() {
             self.log.remove(active.log_index);
+            // Fold state is keyed by log index; shift entries past the hole.
+            self.unfolded = self
+                .unfolded
+                .iter()
+                .map(|&index| {
+                    if index > active.log_index {
+                        index - 1
+                    } else {
+                        index
+                    }
+                })
+                .collect();
         }
         let elapsed = active.started.elapsed().as_secs_f32();
         let (success, detail) = active
@@ -1448,7 +1667,22 @@ impl UiState {
     fn apply_startup_report(&mut self, report: StartupReport) {
         self.kernel_version = report.kernel;
         self.db_state = match report.db {
-            DbProbe::Supported(path) => DbState::Enabled(path),
+            DbProbe::Supported(path) => {
+                // The kernel already persists every prompt input; merge it in
+                // as the base of Up/Down history (this process's inputs stay
+                // on top). Read-only, failures leave the in-process history.
+                if let Ok(conn) = open_kernel_db_ro(&path) {
+                    if let Ok(persisted) = recent_input_history(&conn, 200) {
+                        if !persisted.is_empty() {
+                            let mut merged = persisted;
+                            merged.append(&mut self.history);
+                            merged.dedup();
+                            self.history = merged;
+                        }
+                    }
+                }
+                DbState::Enabled(path)
+            }
             DbProbe::Unsupported => {
                 // The one allowed dim notice; everything else degrades silently.
                 self.push_system(
@@ -1508,6 +1742,14 @@ enum LogKind {
     Tool,
 }
 
+/// Long assistant replies stay full; everything mechanical can fold.
+fn foldable_kind(kind: LogKind) -> bool {
+    matches!(
+        kind,
+        LogKind::Tool | LogKind::System | LogKind::Diff | LogKind::Error
+    )
+}
+
 #[derive(Debug)]
 struct LogLine {
     kind: LogKind,
@@ -1556,10 +1798,11 @@ fn edit_input_in_editor(initial: &str) -> Result<String> {
 
 struct TerminalGuard {
     terminal: Tui,
+    mouse: bool,
 }
 
 impl TerminalGuard {
-    fn enter() -> Result<Self> {
+    fn enter(mouse: bool) -> Result<Self> {
         enable_raw_mode().context("failed to enable raw mode")?;
         execute!(
             io::stdout(),
@@ -1567,9 +1810,12 @@ impl TerminalGuard {
             EnableBracketedPaste,
             Hide
         )?;
+        if mouse {
+            execute!(io::stdout(), EnableMouseCapture)?;
+        }
         let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        Ok(Self { terminal, mouse })
     }
 
     fn draw(&mut self, state: &mut UiState) -> Result<()> {
@@ -1579,6 +1825,9 @@ impl TerminalGuard {
 
     /// Leave the TUI, run `f` with the normal terminal, then restore.
     fn suspend<T>(&mut self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        if self.mouse {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+        }
         disable_raw_mode().context("failed to disable raw mode")?;
         execute!(
             io::stdout(),
@@ -1595,6 +1844,9 @@ impl TerminalGuard {
             Hide
         )
         .context("failed to re-enter alternate screen")?;
+        if self.mouse {
+            let _ = execute!(io::stdout(), EnableMouseCapture);
+        }
         enable_raw_mode().context("failed to re-enable raw mode")?;
         self.terminal
             .clear()
@@ -1606,6 +1858,9 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
+        if self.mouse {
+            let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
+        }
         let _ = execute!(
             self.terminal.backend_mut(),
             Show,
@@ -1645,6 +1900,12 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     }
     if state.show_palette {
         render_command_palette(frame, centered_rect(82, 68, root), state);
+    }
+    if state.session_picker.is_some() {
+        render_session_picker(frame, centered_rect(84, 60, root), state);
+    }
+    if state.history_query.is_some() {
+        render_history_search(frame, centered_rect(72, 50, root), state);
     }
 }
 
@@ -1709,6 +1970,19 @@ fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
     for (index, entry) in state.log.iter().enumerate() {
         if index > 0 {
             items.push(ListItem::new(Line::default()));
+        }
+        // Long mechanical output folds to a head preview unless expanded.
+        if foldable_kind(entry.kind) && !state.unfolded.contains(&index) {
+            if let Some((head, hidden)) = fold_preview(&entry.text, FOLD_THRESHOLD, FOLD_HEAD) {
+                let preview_text = entry.text.lines().take(head).collect::<Vec<_>>().join("\n");
+                let preview = LogLine::new(entry.kind, &preview_text);
+                items.extend(log_to_items(&preview, width, &state.theme));
+                items.push(ListItem::new(Line::from(Span::styled(
+                    format!("  … (+{hidden} lines · Ctrl+O)"),
+                    state.theme.dim(),
+                ))));
+                continue;
+            }
         }
         items.extend(log_to_items(entry, width, &state.theme));
     }
@@ -2173,6 +2447,84 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
         )));
     frame.render_widget(Clear, area);
     frame.render_widget(List::new(items).block(block), area);
+}
+
+fn render_session_picker(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let t = &state.theme;
+    let Some((rows, index)) = &state.session_picker else {
+        return;
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0);
+    let home = env::var("HOME").ok();
+    let items = rows
+        .iter()
+        .map(|row| {
+            let title: String = row.title.chars().take(40).collect();
+            let dir = shorten_home(&row.directory, home.as_deref());
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{title:<42}"), t.text()),
+                Span::styled(
+                    format!("{:>4}  ", relative_age(now_ms, row.time_updated)),
+                    t.dim(),
+                ),
+                Span::styled(dir, t.dim()),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(t.frame())
+        .title(Line::from(Span::styled(
+            " sessions · Enter resumes · Esc closes ".to_string(),
+            t.dim(),
+        )));
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(t.selection())
+            .highlight_symbol("› "),
+        area,
+        &mut ListState::default().with_selected(Some(*index)),
+    );
+}
+
+fn render_history_search(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let t = &state.theme;
+    let Some((query, index)) = &state.history_query else {
+        return;
+    };
+    let matches = history_search(&state.history, query, HISTORY_SEARCH_LIMIT);
+    let items = matches
+        .iter()
+        .map(|entry| {
+            let line: String = entry.replace('\n', " ⏎ ").chars().take(96).collect();
+            ListItem::new(Line::from(Span::styled(line, t.text())))
+        })
+        .collect::<Vec<_>>();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(t.frame())
+        .title(Line::from(vec![
+            Span::styled(" reverse search: ".to_string(), t.dim()),
+            Span::styled(query.clone(), t.accent()),
+            Span::styled(" · Enter recalls · Esc closes ".to_string(), t.dim()),
+        ]));
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(t.selection())
+            .highlight_symbol("› "),
+        area,
+        &mut ListState::default()
+            .with_selected(Some((*index).min(matches.len().saturating_sub(1)))),
+    );
 }
 
 fn render_help_modal(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {

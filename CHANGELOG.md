@@ -4,6 +4,27 @@
 构建 x86_64-musl 静态 Linux 二进制（无需 Rust 工具链即可使用），连同
 SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版本段。
 
+## [0.3.0] - 2026-07-04
+
+日用舒适度批(openspec 变更 session-picker-and-ui-comfort):
+把 db 地基的红利与界面增强清单剩余项一次交付。
+
+### 新增
+
+- **`/sessions` 会话选择浮层**:列出最近内核会话(标题/目录/相对时间,
+  当前目录的排前),↑↓ 选择、Enter 设为 `--resume`、Esc 关闭;
+  db 降级时明确提示不可用
+- **持久输入历史**:启动时读入内核 `input_history`(内核本就记录每条
+  --prompt),Up/Down 跨进程可用;**Ctrl+R 反向搜索**浮层,子串过滤、
+  新→旧,Enter 取回输入框
+- **鼠标滚轮**滚动 transcript(±3 行);`ZCODE_TUI_NO_MOUSE=1` 或配置
+  `mouse = off` 关闭;按住 Shift 仍可用终端原生选择
+- **长输出折叠**:Tool/System/Diff/Error 单元超过 24 行默认折叠为头 8 行
+  + `… (+N lines · Ctrl+O)`,Ctrl+O 展开/收起;助手回复永不折叠
+- **配置文件** `~/.config/zcode-tui/config`(`ZCODE_TUI_CONFIG` 覆盖路径):
+  行式 `key = value`,支持 11 个主题 token 十六进制覆盖与 `mouse` 开关;
+  坏值/未知键静默忽略,配置永远不会阻止启动;NO_COLOR 优先级最高
+
 ## [0.2.0] - 2026-07-04
 
 准流式进度与认证体验(openspec 变更 db-live-progress-and-auth-screen,

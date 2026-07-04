@@ -46,6 +46,8 @@ Kimi 有 TUI，Codex 有 TUI，Claude Code 有 TUI。ZCode 都发布了，Linux 
   在内核会话中延续；`/new` 重开（上下文重置）、`/resume [sess_id]` 恢复
   最近或指定会话、`/mode` 或 `Shift+Tab` 切换权限模式
   （build/edit/plan/yolo），欢迎框实时显示会话状态。
+- **`/sessions` 会话选择器**：浮层列出最近内核会话（标题/目录/相对时间，
+  当前目录的排前），↑↓ 选择、Enter 接续、Esc 关闭。
 
 **交互**
 
@@ -65,6 +67,12 @@ Kimi 有 TUI，Codex 有 TUI，Claude Code 有 TUI。ZCode 都发布了，Linux 
 - **`@文件` 提及**：输入 `@` 补全项目内路径（跳过 .git/target/node_modules）；
   提交时存在的 `@路径` 自动翻译成 `--attach`。
 - readline 式光标编辑：Left/Right、Home/End、`Ctrl+A/E`、`Ctrl+W`、Delete。
+- **持久输入历史**：启动时读入内核 `input_history`（内核记录每条 --prompt），
+  Up/Down 跨进程可用；`Ctrl+R` 反向搜索（子串过滤、新→旧、Enter 取回）。
+- **鼠标滚轮**回看 transcript（±3 行/格）；`ZCODE_TUI_NO_MOUSE=1` 或配置
+  `mouse = off` 关闭捕获；按住 Shift 可用终端原生文本选择。
+- **长输出折叠**：工具/系统/diff/错误单元超过 24 行默认折叠为头 8 行 +
+  `… (+N lines · Ctrl+O)`，`Ctrl+O` 展开/收起；助手回复永不折叠。
 - bracketed paste：多行粘贴不会误触发提交。
 - `Ctrl+P` 命令面板；OpenCode 风格 leader key：`Ctrl+X` 后接 `p/h/e/x/u/q`。
 - `Ctrl+G` 或 `/editor` 调 `$VISUAL`/`$EDITOR` 编辑长 prompt；`Ctrl+J` 多行输入。
@@ -229,6 +237,7 @@ text                         通过 zcode --prompt 发送 prompt
 /mcp status                  作为 /mcp status 转发给 ZCode
 /mode [build|edit|plan|yolo] 查看/切换权限模式（Shift+Tab 循环）
 /resume [sess_id]            恢复最近（不带参数）或指定会话
+/sessions                    浮层选择最近会话并接续
 /new                         重开会话，上下文重置
 /diff [args]                 git diff 语法着色（--staged、路径等）
 /ide [path]                  在 IDE 中打开 cwd 或指定路径
@@ -253,7 +262,9 @@ Ctrl+A / Ctrl+E              行首 / 行尾
 Ctrl+W                       删除前一个词
 Ctrl+G                       用 $VISUAL 或 $EDITOR 编辑当前输入
 Ctrl+J                       插入换行
-PgUp / PgDn                  回看滚动 / 跟随最新输出
+Ctrl+R                       反向搜索输入历史
+Ctrl+O                       展开 / 折叠最近的长输出
+PgUp / PgDn / 鼠标滚轮       回看滚动 / 跟随最新输出
 ?                            空输入时打开帮助
 ```
 
@@ -266,10 +277,27 @@ ZCODE_TUI_LOGOUT_CMD         覆盖 /logout 执行的命令
 ZCODE_TUI_IDE_CMD            覆盖 /ide 启动的 IDE 命令
 ZCODE_TUI_NO_UPDATE_CHECK    置 1 关闭启动时的官方更新检测
 ZCODE_API_KEY 等             /auth 检测的 API key 环境变量链
+ZCODE_TUI_NO_MOUSE           置 1 关闭鼠标捕获
+ZCODE_TUI_CONFIG             配置文件路径（默认 ~/.config/zcode-tui/config）
 ZCODE_APP                    wrapper：指定 ZCode 桌面包目录（覆盖自动探测）
 ZCODE_FALLBACK_TUI           wrapper：指定 fallback TUI 二进制路径
 ZCODE_FORCE_SYSTEM_NODE      wrapper：置 1 强制用系统 Node 运行内核
 ```
+
+## 配置文件
+
+`~/.config/zcode-tui/config`（行式 `key = value`，`#` 行为注释；坏值和
+未知键静默忽略，配置永远不会阻止启动）：
+
+```text
+# 主题 token 覆盖（十六进制颜色）：accent accent_dim text dim good bad
+# frame code_bg band_bg brand brand_dim
+accent = #6088ff
+# 关闭鼠标捕获
+mouse = off
+```
+
+`NO_COLOR`/`--no-color` 优先级最高，设置后所有颜色（含自定义）全部退化。
 
 ## 设计与参考
 
