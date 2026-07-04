@@ -178,9 +178,16 @@ Cannot find package '@zcode/tui'
    `node:sqlite`）。两条路满足其一即可：装 Node ≥ 22.5，或
    `apt install libgtk-3-0t64 libnss3`（只装库，不需要桌面会话）。
 
-3. **登录**：无浏览器环境推荐两条路——设 `ZCODE_API_KEY` 环境变量，或从已
-   登录的桌面机拷贝 `~/.zcode/v2/credentials.json` 到同一路径。
-   `zcode login` 的 OAuth 流程在无桌面机器上未验证。
+3. **登录**：内核硬性要求 `~/.zcode/cli/config.json`（模型配置），只设
+   `ZCODE_API_KEY` 环境变量是**不够**的（实测 0.15.0）。免浏览器的路，
+   按推荐顺序：
+
+   - Coding Plan API key 一条命令配置：
+     `zcode login bigmodel-coding-plan-api-key <key>`（智谱国内）或
+     `zcode login zai-coding-plan-api-key <key>`（Z.AI 国际）；
+   - `zcode login --no-browser`：打印 OAuth URL，任意设备打开完成授权；
+   - 从已登录机器**同时拷贝** `~/.zcode/cli/config.json` 和
+     `~/.zcode/v2/credentials.json` 两个文件。
 
 ## 命令
 

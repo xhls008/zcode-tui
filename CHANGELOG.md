@@ -36,6 +36,7 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 - headless `--prompt` 默认 yolo，edit/plan 模式的工具确认暂无人接住
   （需要内核 app-server 协议，按需评估）
-- `zcode login` 的 OAuth 流程在无桌面机器上未实测；推荐 env API key
-  或拷贝 `~/.zcode/v2/credentials.json`
+- 内核要求 `~/.zcode/cli/config.json` 模型配置，仅设 env API key 不够；
+  免浏览器登录用 `zcode login <zai|bigmodel>-coding-plan-api-key <key>`
+  或 `zcode login --no-browser`（详见 README 的 SSH / 无桌面环境一节）
 - 仅 Linux x86_64；macOS / Windows 见设计文档第 7 节移植计划
