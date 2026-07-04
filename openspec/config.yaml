@@ -1,0 +1,19 @@
+schema: spec-driven
+
+context: |
+  项目：zcode-tui — 官方 ZCode 的第三方 Rust 终端 TUI fallback。
+  定位：在 ZCode 上做加法，不替代；内核能力（模型/会话/权限/工具执行）
+  只调用不重造；官方 TUI 发布后 wrapper 自动退位。
+  技术栈：Rust 2021, ratatui + crossterm, pulldown-cmark + syntect,
+  serde/serde_json, unicode-width。lib.rs 放纯逻辑（必须可单测），
+  main.rs 放渲染与事件。
+  质量门禁：cargo fmt --check、clippy -D warnings 零告警、
+  tests/core.rs 集成测试全绿，行为改动配 pty 冒烟验证。
+  权威设计文档：docs/2026-07-04-design.md（含架构、能力边界、路线图）。
+
+rules:
+  proposal:
+    - 先对照 docs/2026-07-04-design.md 第 9 节路线图与"明确不做"清单
+    - 涉及子进程的功能必须说明取消/清理路径（进程组）
+  tasks:
+    - 每个任务附验证方式（单测或 pty 冒烟）

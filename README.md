@@ -12,72 +12,162 @@ Kimi 有 TUI，Codex 有 TUI，Claude Code 有 TUI。ZCode 都发布了，Linux 
 
 ## 功能
 
-- Rust 编写，不依赖 Python 运行时。
-- Ratatui + Crossterm 多面板终端界面。
-- 极客风 terminal bus 顶栏，带 `智谱 @zcode` 标识。
-- Transcript、Control Matrix、Prompt、Status 四块主区域。
-- `Ctrl+P` 命令面板。
-- OpenCode 风格 leader key：`Ctrl+X` 后接 `p/h/e/x/u/q`。
-- `Tab` slash 命令建议和补全。
-- `/help` 或空输入下 `?` 打开帮助。
-- Up/Down 输入历史。
-- PgUp/PgDn、Home、End 滚动。
-- `Ctrl+G` 调 `$VISUAL` 或 `$EDITOR` 编辑长 prompt。
-- `Ctrl+J` 多行输入。
+设计参考了 Claude Code、Codex CLI、Gemini CLI、OpenCode、Crush 的使用习惯，
+调研记录见 `docs/references/tui-research-2026-07.md`。
+
+**视觉与渲染**
+
+- Codex 风布局：无边框流式 transcript，用户消息和输入框用浅色底横条 +
+  `›` 提示符，助手回复 `•` 开头平铺，会话信息横幅进 transcript，
+  底部一行 dim 快捷键提示（运行任务时变 spinner 工作行）。
+- 智谱风配色：GLM 蓝单一强调色 + 冷灰中性色阶，行内代码蓝色文字、
+  引用绿色，语义绿/红只用于 diff 与错误；
+  `--no-color` 或 `NO_COLOR` 时退化为无色。
+- **语法高亮**：围栏代码块按语言用 syntect 着色（Codex 同款方案，
+  base16-ocean 主题）；` ```diff ` 围栏按 +绿/−红/@@蓝 渲染。
+- **启动欢迎框**：Codex 风圆角信息框，显示内核/TUI 版本、目录、
+  mode、auth 及对应的切换命令提示。
+- **官方更新检测**：启动时后台读取 `/opt/ZCode` 的 electron-updater
+  配置并拉取官方 `latest-linux.yml`（与桌面端同一发布渠道），发现新版
+  时显示天坛/鸟巢/长城/清华校门元素的 ZCODE ASCII logo 和 Tip 提示
+  （含 changelog 链接与 deb 直链）；`ZCODE_TUI_NO_UPDATE_CHECK=1` 关闭。
+- **Markdown 渲染**：助手回复按 markdown 渲染——标题、粗斜体、行内代码、
+  围栏代码块、列表、引用、**表格（按显示宽度对齐列）**、分隔线
+  （pulldown-cmark，Codex CLI 同款）。
+- **`/diff [args]`**：git diff 语法着色（+绿 −红 @@蓝 文件头加粗），
+  如 `/diff --staged`、`/diff HEAD~1`。
+- **工具调用可视化**：当 zcode 以 `--json` 输出 JSONL 事件时，
+  `tool_use`/`tool_result` 渲染为紧凑 chip（`⚙ bash {...}` / `↳ 结果`），
+  文本事件正常走 markdown；纯文本输出不受影响。
+
+**会话**
+
+- **多轮连续对话**：首条 prompt 成功后自动带 `--continue`，TUI 里的对话
+  在内核会话中延续；`/new` 重开（上下文重置）、`/resume [sess_id]` 恢复
+  最近或指定会话、`/mode` 或 `Shift+Tab` 切换权限模式
+  （build/edit/plan/yolo），欢迎框实时显示会话状态。
+
+**交互**
+
+- Rust + Ratatui + Crossterm，单一静态二进制，毫秒级启动。
+- CJK 感知：中文按 2 列宽度折行与定位光标，表格按显示宽度对齐。
+- **非阻塞流式执行**：`zcode --prompt` 和 `! <cmd>` 的输出按行实时进 transcript，
+  spinner 显示耗时，`Esc`/`Ctrl+C` 取消，忙时新输入自动排队。
+- **实时补全菜单**：输入 `/` 即弹出建议（前缀 > 子串 > 子序列模糊匹配），
+  上下键选择、`Tab`/`Enter` 接受、`Esc` 关闭。
+- **`@文件` 提及**：输入 `@` 补全项目内路径（跳过 .git/target/node_modules）；
+  提交时存在的 `@路径` 自动翻译成 `--attach`。
+- readline 式光标编辑：Left/Right、Home/End、`Ctrl+A/E`、`Ctrl+W`、Delete。
+- bracketed paste：多行粘贴不会误触发提交。
+- `Ctrl+P` 命令面板；OpenCode 风格 leader key：`Ctrl+X` 后接 `p/h/e/x/u/q`。
+- `Ctrl+G` 或 `/editor` 调 `$VISUAL`/`$EDITOR` 编辑长 prompt；`Ctrl+J` 多行输入。
+- Up/Down 输入历史；PgUp/PgDn 回看滚动（自动跟随最新输出）。
+
+**认证**
+
+- `/auth` 本地检测登录态：依次检查 `ZCODE_API_KEY`、`ZHIPUAI_API_KEY`、`ZAI_API_KEY`
+  环境变量（打码显示），再查 `~/.zcode/v2/credentials.json` 等凭证文件。
+- `/login` 挂起 TUI，交互式执行 `zcode login`（Z.AI OAuth，可用
+  `ZCODE_TUI_LOGIN_CMD` 覆盖）。
+- `/logout` 执行 `zcode logout`（可用 `ZCODE_TUI_LOGOUT_CMD` 覆盖）。
+- 顶栏和状态栏常驻显示当前认证方式。
+
+**MCP 配置**（`.mcp.json` 与 Claude Code 格式兼容）
+
+- 两级 scope：项目 `.mcp.json` 和用户级 `~/.config/zcode/mcp.json`（`--scope user`）。
+- stdio 与远程 server：`/mcp add --transport http|sse <name> <url>`。
+- `/mcp add-json`、`/mcp get`、`/mcp enable`、`/mcp disable`（软开关，不删配置）。
+- `/mcp status` 等运行态命令继续转发给 ZCode。
+
+**路由**
+
+- 普通文本通过 `zcode --prompt` 发送给 ZCode。
+- `/goal ...`、`/goal replace ...`、`/skill <name> <task>` 转发给 ZCode。
+- `/skills [list]` 调 `zcode skills list`；`/status` 显示会话/认证/MCP 概览。
 - `! <cmd>` 本地 shell escape。
 - 官方 `zcode tui` 因缺 `@zcode/tui` 失败时，可自动 fallback 到这个 TUI。
-- 普通文本通过 `zcode --prompt` 发送给 ZCode。
-- `/goal ...`、`/goal replace ...` 转发给 ZCode。
-- `/skill <name> <task>` 转发给 ZCode。
-- `/skills [list]` 调 `zcode skills list`。
-- 本地 MCP 配置管理：
-  - `/mcp list`
-  - `/mcp config`
-  - `/mcp add <name> <command> [args...]`
-  - `/mcp remove <name>`
-- `/mcp status` 等运行态 MCP 命令继续转发给 ZCode。
 
-## 安装
+## 安装 / 更新
 
-构建 release 版本：
+一条命令完成构建和安装（更新同样跑它）：
+
+```bash
+./install.sh
+```
+
+它会把 release 二进制装到 `~/.local/bin/zcode-tui`，并生成 `~/.local/bin/zcode`
+wrapper（带管理标记，重复运行幂等；已存在的非托管 wrapper 会先备份）。
+其他用法：
+
+```bash
+./install.sh --prefix /usr/local   # 装到别的前缀
+./install.sh --no-wrapper          # 只装 zcode-tui 二进制
+./install.sh --uninstall           # 卸载
+```
+
+也可以手动构建直接运行：
 
 ```bash
 cargo build --release
-```
-
-直接运行：
-
-```bash
 ./target/release/zcode-tui
 ```
 
-或者让本地 ZCode wrapper 指向它：
+或让 wrapper 指向自定义位置的 fallback：
 
 ```bash
 export ZCODE_FALLBACK_TUI="$PWD/target/release/zcode-tui"
 zcode tui
 ```
 
-这台机器上的 `~/.local/bin/zcode` 已经打过补丁：先尝试官方 TUI；只有当 Linux 包报下面这个错误时，才 fallback 到本项目：
+这台机器上的 `~/.local/bin/zcode` 是一个 wrapper，串起官方包和本项目：
+
+- 官方 Linux 桌面包（`/opt/ZCode`，deb 来自 `cdn-zcode.z.ai`）内嵌了 headless CLI
+  内核 `resources/glm/zcode.cjs`（`--prompt`、`--attach`、`login`、`skills` 等都在）。
+- 内核需要 `node:sqlite`（Node ≥ 22.5），wrapper 用 Electron 自带的 Node
+  （`ELECTRON_RUN_AS_NODE=1 /opt/ZCode/zcode`）运行它。
+- `zcode tui` 或裸 `zcode` 前先探测 `@zcode/tui` 能否解析；官方 Linux 包
+  报下面这个错误时，才 fallback 到本项目：
 
 ```text
 Cannot find package '@zcode/tui'
 ```
 
+首次使用前需要登录：`zcode login`（Z.AI OAuth），或在 TUI 里执行 `/login`。
+
 ## 命令
 
 ```text
 text                         通过 zcode --prompt 发送 prompt
+@<path>                      提及 cwd 内的文件，自动 --attach（越界/符号链接逃逸会被拒绝）
 ! <cmd>                      执行本地 shell 命令
 /goal <text>                 转发给 ZCode goal 处理
 /goal replace <text>         替换当前 ZCode goal
 /skill <name> <task>         强制使用某个 ZCode skill
 /skills [list]               通过 zcode skills list 列出 skills
-/mcp list                    列出本地 .mcp.json 里的 MCP server
-/mcp config                  打印本地 .mcp.json 路径
-/mcp add <name> <cmd> [args] 添加/更新 MCP server
+/login                       挂起 TUI 交互式登录（zcode login）
+/logout                      登出（zcode logout）
+/auth                        显示本地认证状态（env key / 凭证文件）
+/status                      会话、认证、MCP 概览
+/mcp list                    列出项目级 + 用户级 MCP server
+/mcp config                  打印两级 MCP 配置路径
+/mcp add <name> [--] <cmd> [args]
+                             添加 stdio MCP server；--scope/--transport 须在
+                             命令名之前，-- 之后的参数原样归 server
+/mcp add --transport http|sse <name> <url>
+                             添加远程 MCP server
+/mcp add-json <name> <json>  从 JSON 添加 server
+/mcp get <name>              以 JSON 显示某个 server
+/mcp enable|disable <name>   启用/禁用（不删配置）
 /mcp remove <name>           删除 MCP server
+/mcp ... --scope user        操作 ~/.config/zcode/mcp.json
 /mcp status                  作为 /mcp status 转发给 ZCode
+/mode [build|edit|plan|yolo] 查看/切换权限模式（Shift+Tab 循环）
+/resume [sess_id]            恢复最近（不带参数）或指定会话
+/new                         重开会话，上下文重置
+/diff [args]                 git diff 语法着色（--staged、路径等）
+/ide [path]                  在 IDE 中打开 cwd 或指定路径
+                             （自动探测 code/cursor/zed/subl/idea，
+                             可用 ZCODE_TUI_IDE_CMD 覆盖）
 /editor                      用 $VISUAL 或 $EDITOR 编辑当前输入
 /clear                       清屏
 /exit                        退出
@@ -87,24 +177,37 @@ text                         通过 zcode --prompt 发送 prompt
 
 ```text
 Ctrl+P                       命令面板
-Ctrl+X then p                命令面板
-Ctrl+X then h                帮助
-Ctrl+X then e                外部编辑器
-Ctrl+X then x                清空会话
-Ctrl+X then u                清空输入
-Ctrl+X then q                退出
-Tab                          slash 命令补全/建议
+Ctrl+X then p/h/e/x/u/q      leader：面板/帮助/编辑器/清会话/清输入/退出
+Tab / Up / Down              建议菜单：接受 / 选择
+Shift+Tab                    循环切换权限模式
+Enter                        发送；菜单导航中则接受选中项
+Esc                          关闭菜单弹窗 → 取消运行中任务 → 退出
+Left/Right Home/End          输入光标移动
+Ctrl+A / Ctrl+E              行首 / 行尾
+Ctrl+W                       删除前一个词
 Ctrl+G                       用 $VISUAL 或 $EDITOR 编辑当前输入
 Ctrl+J                       插入换行
+PgUp / PgDn                  回看滚动 / 跟随最新输出
 ?                            空输入时打开帮助
 ```
 
-## 参考
+## 环境变量
 
-Claude Code 和 OpenCode 的官方使用习惯参考已经下载到本地：
+```text
+ZCODE_TUI_ZCODE_BIN          zcode 二进制路径（默认 zcode）
+ZCODE_TUI_LOGIN_CMD          覆盖 /login 执行的命令
+ZCODE_TUI_LOGOUT_CMD         覆盖 /logout 执行的命令
+ZCODE_TUI_IDE_CMD            覆盖 /ide 启动的 IDE 命令
+ZCODE_TUI_NO_UPDATE_CHECK    置 1 关闭启动时的官方更新检测
+ZCODE_API_KEY 等             /auth 检测的 API key 环境变量链
+```
 
-- `docs/references/agent-tui-habits.md`
-- `docs/references/raw/`
+## 设计与参考
+
+- **`docs/2026-07-04-design.md`** — 权威设计文档：定位原则（在 ZCode 上做加法
+  不替代）、系统架构、流式任务模型、视觉语言、能力边界、跨平台设计、路线图
+- `docs/references/tui-research-2026-07.md` — 补全 / 认证 / MCP / Rust 适用性横向调研
+- `docs/references/agent-tui-habits.md` 与 `docs/references/raw/` — 原始文档快照
 
 ## 限制
 

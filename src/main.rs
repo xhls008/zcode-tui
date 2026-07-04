@@ -1,11 +1,18 @@
+use std::collections::VecDeque;
 use std::env;
 use std::fs;
 use std::io::{self, Stdout};
-use std::process::{self, Command};
+use std::path::PathBuf;
+use std::process::{self, Command, ExitStatus};
+use std::sync::mpsc::TryRecvError;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -14,20 +21,48 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
 use ratatui::{Frame, Terminal};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zcode_tui::{
-    classify_input, command_catalog, command_palette_rows, handle_local_command, help_text,
-    leader_action_for_key, parse_cli_args, run_prompt, run_shell_command, slash_suggestions,
-    AppConfig, InputAction, LeaderAction,
+    classify_input, command_palette_rows, detect_auth_status, diff_line_role, file_suggestions,
+    git_diff_command, handle_local_command, help_text, is_newer_version, leader_action_for_key,
+    login_command, markdown_lines, parse_cli_args, parse_stream_event, parse_update_feed,
+    parse_update_feed_url, prompt_command_for, run_command, shorten_home, slash_suggestions,
+    spawn_streaming_command, wrap_display, AppConfig, DiffRole, InputAction, JobEvent,
+    LeaderAction, MdLineKind, SpanRole, StreamEvent, StreamingJob, UpdateFeed,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
+
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SUGGESTION_LIMIT: usize = 8;
+
+/// ZCODE wordmark over a Beijing skyline: 天坛, 鸟巢, 长城, 清华校门.
+/// Shown when a newer official ZCode release is detected.
+const ZCODE_LOGO: &str = r#"      _/^\_        /\/\/\/\/\      n_n_n_n_n_n      .-~~~~~-.
+     /_____\       \/\/\/\/\/     _|_________|_    /  _____  \
+    /_______\      /\/\/\/\/\    |_____________|  | | |___| | |
+   |__|_|_|__|      \______/     |_____________|  |_|       |_|
+      天坛             鸟巢             长城           清华校门
+
+███████╗  ██████╗  ██████╗  ██████╗  ███████╗
+╚══███╔╝ ██╔════╝ ██╔═══██╗ ██╔══██╗ ██╔════╝
+  ███╔╝  ██║      ██║   ██║ ██║  ██║ █████╗
+ ███╔╝   ██║      ██║   ██║ ██║  ██║ ██╔══╝
+███████╗ ╚██████╗ ╚██████╔╝ ██████╔╝ ███████╗
+╚══════╝  ╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝"#;
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         println!("{}", help_text());
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "-V" || arg == "--version") {
+        println!("zcode-tui {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -39,152 +74,682 @@ fn main() -> Result<()> {
 fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
     let mut terminal = TerminalGuard::enter()?;
     let mut state = UiState::new(config, zcode_bin.to_string());
-    state.push_system("Rust fallback started. Type /help for commands, Ctrl+Q to quit.");
+    state.push_banner();
+    let probe = spawn_startup_probe(zcode_bin.to_string());
 
-    let initial_prompts = state.config.initial_prompts.clone();
-    for prompt in initial_prompts {
-        state.submit_prompt(&prompt);
+    for prompt in state.config.initial_prompts.clone() {
+        state.queued.push_back(prompt);
     }
 
     loop {
+        state.tick = state.tick.wrapping_add(1);
+        if let Ok(report) = probe.try_recv() {
+            state.apply_startup_report(report);
+        }
+        state.pump_job();
+        state.drain_queue();
         terminal.draw(&mut state)?;
-        if let Event::Key(key) = event::read()? {
-            if state.handle_key(key) {
-                break;
+
+        if !event::poll(Duration::from_millis(80))? {
+            continue;
+        }
+        match event::read()? {
+            Event::Key(key) if key.kind != KeyEventKind::Release => match state.handle_key(key) {
+                Some(UiEffect::Quit) => break,
+                Some(UiEffect::Editor) => run_editor_effect(&mut terminal, &mut state),
+                Some(UiEffect::Login) => run_login_effect(&mut terminal, &mut state),
+                None => {}
+            },
+            Event::Paste(text) => {
+                state.insert_text(&text.replace("\r\n", "\n").replace('\r', "\n"));
             }
+            _ => {}
         }
     }
 
     Ok(())
 }
 
-#[derive(Debug)]
+fn run_editor_effect(terminal: &mut TerminalGuard, state: &mut UiState) {
+    let current = state.input.clone();
+    let edited = terminal.suspend(|| edit_input_in_editor(&current));
+    match edited {
+        Ok(updated) => {
+            state.set_input(updated.trim_end_matches('\n'));
+            state.status = "editor returned".to_string();
+        }
+        Err(error) => {
+            state.push_error(&format!("{error:#}"));
+            state.status = "editor error".to_string();
+        }
+    }
+}
+
+fn run_login_effect(terminal: &mut TerminalGuard, state: &mut UiState) {
+    if state.job.is_some() {
+        state.status = "busy: wait for the running job before /login".to_string();
+        return;
+    }
+    let override_command = env::var("ZCODE_TUI_LOGIN_CMD").ok();
+    let command = match login_command(&state.zcode_bin, override_command.as_deref()) {
+        Ok(command) => command,
+        Err(error) => {
+            state.push_error(&format!("{error:#}"));
+            return;
+        }
+    };
+    state.push_system(&format!("interactive login: {}", command.join(" ")));
+    let result = terminal.suspend(|| run_interactive_command(&command));
+    match result {
+        Ok(status) if status.success() => state.push_system("login command finished"),
+        Ok(status) => state.push_error(&format!("login command exited with {status}")),
+        Err(error) => state.push_error(&format!("{error:#}")),
+    }
+    state.refresh_auth();
+    state.status = format!("auth: {}", state.auth_label);
+}
+
+fn run_interactive_command(command: &[String]) -> Result<ExitStatus> {
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("empty command"))?;
+    Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to run {program}"))
+}
+
+struct StartupReport {
+    kernel: Option<String>,
+    installed: Option<String>,
+    feed: Option<UpdateFeed>,
+    feed_base: Option<String>,
+}
+
+/// Probe, off the UI thread: the CLI kernel version, the installed desktop
+/// package version, and the official electron-updater feed (the same
+/// latest-linux.yml the ZCode desktop app polls, so the notice matches the
+/// official release channel). ZCODE_TUI_NO_UPDATE_CHECK=1 skips the network.
+fn spawn_startup_probe(zcode_bin: String) -> std::sync::mpsc::Receiver<StartupReport> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let kernel = run_command(&[zcode_bin, "version".to_string()])
+            .ok()
+            .and_then(|output| {
+                output
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| line.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                    .map(str::to_string)
+            });
+        let installed = run_command(&[
+            "dpkg-query".to_string(),
+            "-W".to_string(),
+            "-f=${Version}".to_string(),
+            "zcode".to_string(),
+        ])
+        .ok()
+        .map(|version| {
+            version
+                .trim()
+                .split('-')
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .filter(|version| !version.is_empty());
+
+        let mut feed = None;
+        let mut feed_base = None;
+        if env::var_os("ZCODE_TUI_NO_UPDATE_CHECK").is_none() {
+            let candidates = [
+                env::var("ZCODE_APP")
+                    .ok()
+                    .map(|app| format!("{app}/resources/app-update.yml")),
+                Some("/opt/ZCode/resources/app-update.yml".to_string()),
+            ];
+            for path in candidates.into_iter().flatten() {
+                let Ok(content) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                if let Some(url) = parse_update_feed_url(&content) {
+                    feed_base = Some(url.trim_end_matches("latest-linux.yml").to_string());
+                    feed = run_command(&[
+                        "curl".to_string(),
+                        "-fsSL".to_string(),
+                        "--max-time".to_string(),
+                        "5".to_string(),
+                        url,
+                    ])
+                    .ok()
+                    .and_then(|body| parse_update_feed(&body));
+                }
+                break;
+            }
+        }
+        let _ = sender.send(StartupReport {
+            kernel,
+            installed,
+            feed,
+            feed_base,
+        });
+    });
+    receiver
+}
+
+fn build_update_tip(installed: &str, feed: &UpdateFeed, feed_base: Option<&str>) -> String {
+    let mut lines = vec![format!(
+        "Tip: 官方 ZCode {} 已发布，本机 {installed}。更新说明: https://zcode.z.ai/en/changelog",
+        feed.version
+    )];
+    match (feed_base, &feed.deb_file) {
+        (Some(base), Some(file)) => {
+            lines.push(format!("下载: {base}{file}"));
+            lines.push(format!("安装: sudo apt install ./{file} 后无需其他改动"));
+        }
+        _ => lines.push("下载: https://zcode.z.ai".to_string()),
+    }
+    lines.join("\n")
+}
+
+enum UiEffect {
+    Quit,
+    Editor,
+    Login,
+}
+
+/// 智谱-flavored theme in a Codex-like shell: one GLM-blue accent, cool
+/// neutrals, elevated background bands instead of borders, semantic
+/// green/red for state. `plain` honors --no-color/NO_COLOR.
+#[derive(Clone, Copy)]
+struct Theme {
+    plain: bool,
+    accent: Color,
+    accent_dim: Color,
+    text: Color,
+    dim: Color,
+    good: Color,
+    bad: Color,
+    frame: Color,
+    code_bg: Color,
+    band_bg: Color,
+}
+
+impl Theme {
+    fn zhipu(plain: bool) -> Self {
+        Self {
+            plain,
+            accent: Color::Rgb(96, 136, 255),
+            accent_dim: Color::Rgb(64, 88, 168),
+            text: Color::Rgb(222, 226, 234),
+            dim: Color::Rgb(122, 130, 146),
+            good: Color::Rgb(126, 200, 154),
+            bad: Color::Rgb(232, 116, 116),
+            frame: Color::Rgb(56, 62, 78),
+            code_bg: Color::Rgb(33, 38, 51),
+            band_bg: Color::Rgb(48, 52, 63),
+        }
+    }
+
+    fn styled(&self, color: Color) -> Style {
+        if self.plain {
+            Style::default()
+        } else {
+            Style::default().fg(color)
+        }
+    }
+
+    fn accent(&self) -> Style {
+        self.styled(self.accent)
+    }
+
+    fn accent_dim(&self) -> Style {
+        self.styled(self.accent_dim)
+    }
+
+    fn text(&self) -> Style {
+        self.styled(self.text)
+    }
+
+    fn dim(&self) -> Style {
+        self.styled(self.dim)
+    }
+
+    fn good(&self) -> Style {
+        self.styled(self.good)
+    }
+
+    fn bad(&self) -> Style {
+        self.styled(self.bad)
+    }
+
+    fn frame(&self) -> Style {
+        self.styled(self.frame)
+    }
+
+    fn code(&self) -> Style {
+        if self.plain {
+            Style::default()
+        } else {
+            Style::default().fg(self.text).bg(self.code_bg)
+        }
+    }
+
+    /// Elevated background band, Codex-style, for user messages and the
+    /// composer instead of drawn borders.
+    fn band(&self) -> Style {
+        if self.plain {
+            Style::default()
+        } else {
+            Style::default().bg(self.band_bg)
+        }
+    }
+
+    fn selection(&self) -> Style {
+        if self.plain {
+            Style::default().reversed()
+        } else {
+            Style::default().fg(Color::Rgb(14, 18, 30)).bg(self.accent)
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Suggestion {
+    insert: String,
+    display: String,
+    /// Char index where the replaced region starts; None replaces the whole input.
+    token_start: Option<usize>,
+}
+
+struct ActiveJob {
+    job: StreamingJob,
+    log_index: usize,
+    kind: LogKind,
+    label: String,
+    finished: Option<(bool, String)>,
+    finished_at: Option<Instant>,
+    eofs: usize,
+    entry_started: bool,
+    any_output: bool,
+    cancel_requested: bool,
+    started: Instant,
+}
+
+impl ActiveJob {
+    /// The child exited and every output stream reported EOF, so no more
+    /// lines can arrive: safe to finalize without losing tail output.
+    fn drained(&self) -> bool {
+        self.finished.is_some() && self.eofs >= self.job.streams
+    }
+}
+
+const PERMISSION_MODES: [&str; 4] = ["build", "edit", "plan", "yolo"];
+
 struct UiState {
     config: AppConfig,
     zcode_bin: String,
+    theme: Theme,
+    kernel_version: Option<String>,
+    /// A prompt has completed in this run, so later prompts auto --continue.
+    session_active: bool,
     log: Vec<LogLine>,
     input: String,
+    cursor: usize,
     history: Vec<String>,
     history_index: Option<usize>,
     scroll: u16,
     status: String,
+    auth_label: String,
     show_help: bool,
     show_palette: bool,
     leader_pending: bool,
+    suggestions: Vec<Suggestion>,
+    suggestion_index: usize,
+    suggestion_nav: bool,
+    suggestions_dismissed: bool,
+    job: Option<ActiveJob>,
+    queued: VecDeque<String>,
+    tick: usize,
 }
 
 impl UiState {
     fn new(config: AppConfig, zcode_bin: String) -> Self {
+        let auth_label = detect_auth_status().short_label();
+        let plain = config.no_color || env::var_os("NO_COLOR").is_some();
         Self {
             config,
             zcode_bin,
+            theme: Theme::zhipu(plain),
+            kernel_version: None,
+            session_active: false,
             log: Vec::new(),
             input: String::new(),
+            cursor: 0,
             history: Vec::new(),
             history_index: None,
             scroll: 0,
             status: "ready".to_string(),
+            auth_label,
             show_help: false,
             show_palette: false,
             leader_pending: false,
+            suggestions: Vec::new(),
+            suggestion_index: 0,
+            suggestion_nav: false,
+            suggestions_dismissed: false,
+            job: None,
+            queued: VecDeque::new(),
+            tick: 0,
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> bool {
+    fn refresh_auth(&mut self) {
+        self.auth_label = detect_auth_status().short_label();
+    }
+
+    fn resolve_cwd(&self) -> PathBuf {
+        self.config
+            .cwd
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    // ---- input editing -------------------------------------------------
+
+    fn char_count(&self) -> usize {
+        self.input.chars().count()
+    }
+
+    fn byte_index(&self, char_index: usize) -> usize {
+        self.input
+            .char_indices()
+            .nth(char_index)
+            .map(|(index, _)| index)
+            .unwrap_or(self.input.len())
+    }
+
+    fn set_input(&mut self, text: &str) {
+        self.input = text.to_string();
+        self.cursor = self.char_count();
+        self.after_input_change();
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        let index = self.byte_index(self.cursor);
+        self.input.insert(index, ch);
+        self.cursor += 1;
+        self.after_input_change();
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let index = self.byte_index(self.cursor);
+        self.input.insert_str(index, text);
+        self.cursor += text.chars().count();
+        self.after_input_change();
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let index = self.byte_index(self.cursor - 1);
+        self.input.remove(index);
+        self.cursor -= 1;
+        self.after_input_change();
+    }
+
+    fn delete_forward(&mut self) {
+        if self.cursor >= self.char_count() {
+            return;
+        }
+        let index = self.byte_index(self.cursor);
+        self.input.remove(index);
+        self.after_input_change();
+    }
+
+    fn delete_word_back(&mut self) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut start = self.cursor;
+        while start > 0 && chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        if start == self.cursor {
+            return;
+        }
+        let from = self.byte_index(start);
+        let to = self.byte_index(self.cursor);
+        self.input.replace_range(from..to, "");
+        self.cursor = start;
+        self.after_input_change();
+    }
+
+    fn clear_input(&mut self) {
+        self.input.clear();
+        self.cursor = 0;
+        self.after_input_change();
+    }
+
+    fn after_input_change(&mut self) {
+        self.history_index = None;
+        self.suggestions_dismissed = false;
+        self.refresh_suggestions();
+    }
+
+    // ---- suggestions ---------------------------------------------------
+
+    fn refresh_suggestions(&mut self) {
+        self.suggestions.clear();
+        self.suggestion_index = 0;
+        self.suggestion_nav = false;
+        if self.suggestions_dismissed {
+            return;
+        }
+
+        if self.input.starts_with('/') && !self.input.contains('\n') {
+            self.suggestions = slash_suggestions(&self.input, SUGGESTION_LIMIT)
+                .into_iter()
+                .map(|item| Suggestion {
+                    insert: format!("{} ", item.command),
+                    display: format!(
+                        "{:<18} {:<7} {}",
+                        item.command,
+                        format!("[{}]", item.route),
+                        item.summary
+                    ),
+                    token_start: None,
+                })
+                .collect();
+            return;
+        }
+
+        if let Some((start, query)) = self.at_token_before_cursor() {
+            let root = self.resolve_cwd();
+            self.suggestions = file_suggestions(&root, &query, SUGGESTION_LIMIT)
+                .into_iter()
+                .map(|path| Suggestion {
+                    insert: format!("@{path}"),
+                    display: path,
+                    token_start: Some(start),
+                })
+                .collect();
+        }
+    }
+
+    /// If the token immediately before the cursor starts with `@`, return
+    /// (token start char index, query without the `@`).
+    fn at_token_before_cursor(&self) -> Option<(usize, String)> {
+        let chars: Vec<char> = self.input.chars().collect();
+        let cursor = self.cursor.min(chars.len());
+        let mut start = cursor;
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        if start >= cursor || chars[start] != '@' {
+            return None;
+        }
+        let query: String = chars[start + 1..cursor].iter().collect();
+        Some((start, query))
+    }
+
+    fn accept_suggestion(&mut self) {
+        let Some(suggestion) = self.suggestions.get(self.suggestion_index).cloned() else {
+            return;
+        };
+        match suggestion.token_start {
+            None => {
+                self.input = suggestion.insert;
+                self.cursor = self.char_count();
+            }
+            Some(start) => {
+                let from = self.byte_index(start);
+                let to = self.byte_index(self.cursor);
+                self.input.replace_range(from..to, &suggestion.insert);
+                self.cursor = start + suggestion.insert.chars().count();
+            }
+        }
+        self.status = format!("completed {}", suggestion.display.trim_end());
+        self.after_input_change();
+    }
+
+    // ---- key handling --------------------------------------------------
+
+    fn handle_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
         if self.leader_pending {
             self.leader_pending = false;
             return self.handle_leader_key(key);
         }
 
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.input.is_empty() {
-                    return true;
+            KeyCode::Char('q') if ctrl => return Some(UiEffect::Quit),
+            KeyCode::Char('c') if ctrl => {
+                if self.job.is_some() {
+                    self.cancel_job();
+                } else if self.input.is_empty() {
+                    return Some(UiEffect::Quit);
+                } else {
+                    self.clear_input();
+                    self.status = "input cleared".to_string();
                 }
-                self.input.clear();
-                self.status = "input cleared".to_string();
             }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('d') if ctrl => return Some(UiEffect::Quit),
+            KeyCode::Char('p') if ctrl => {
                 self.show_palette = !self.show_palette;
                 self.show_help = false;
                 self.status = "command palette".to_string();
             }
-            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('x') if ctrl => {
                 self.leader_pending = true;
                 self.status = "leader: p palette | h help | e editor | x clear | u input | q quit"
                     .to_string();
             }
-            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.open_external_editor();
+            KeyCode::Char('g') if ctrl => return Some(UiEffect::Editor),
+            KeyCode::Char('j') if ctrl => self.insert_char('\n'),
+            KeyCode::Char('a') if ctrl => self.cursor = 0,
+            KeyCode::Char('e') if ctrl => self.cursor = self.char_count(),
+            KeyCode::Char('w') if ctrl => self.delete_word_back(),
+            KeyCode::Char('l') if ctrl => {
+                self.clear_log();
+                self.status = "cleared".to_string();
             }
-            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.input.push('\n');
-                self.history_index = None;
+            KeyCode::Char('u') if ctrl => {
+                self.clear_input();
+                self.status = "input cleared".to_string();
             }
             KeyCode::Char('?') if self.input.is_empty() => {
                 self.show_help = !self.show_help;
                 self.show_palette = false;
                 self.status = "help toggled".to_string();
             }
-            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.log.clear();
-                self.status = "cleared".to_string();
+            KeyCode::Char(ch) if !ctrl => self.insert_char(ch),
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => self.delete_forward(),
+            KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Right => self.cursor = (self.cursor + 1).min(self.char_count()),
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.char_count(),
+            KeyCode::Tab => {
+                if !self.suggestions.is_empty() {
+                    self.accept_suggestion();
+                } else if self.input.starts_with('/') || self.at_token_before_cursor().is_some() {
+                    self.status = "no matches".to_string();
+                } else {
+                    self.status = "tab completes / commands and @ paths".to_string();
+                }
             }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.input.clear();
-                self.history_index = None;
-            }
-            KeyCode::Char(ch) => {
-                self.input.push(ch);
-                self.history_index = None;
-            }
-            KeyCode::Backspace => {
-                self.input.pop();
-                self.history_index = None;
-            }
-            KeyCode::Tab => self.complete_slash_command(),
+            KeyCode::BackTab => self.cycle_mode(),
             KeyCode::Enter => {
-                let input = self.input.trim().to_string();
-                self.input.clear();
-                self.history_index = None;
-                self.show_palette = false;
-                if self.handle_submit(&input) {
-                    return true;
+                if !self.suggestions.is_empty() && self.suggestion_nav {
+                    self.accept_suggestion();
+                } else {
+                    let input = self.input.trim().to_string();
+                    if let Some(effect) = self.handle_submit(&input) {
+                        return Some(effect);
+                    }
                 }
             }
             KeyCode::Esc => {
-                if self.show_help {
+                if !self.suggestions.is_empty() {
+                    self.suggestions_dismissed = true;
+                    self.refresh_suggestions();
+                } else if self.show_help {
                     self.show_help = false;
                 } else if self.show_palette {
                     self.show_palette = false;
+                } else if self.job.is_some() {
+                    self.cancel_job();
                 } else {
-                    return true;
+                    return Some(UiEffect::Quit);
                 }
             }
-            KeyCode::Up => self.recall_history(-1),
-            KeyCode::Down => self.recall_history(1),
+            KeyCode::Up => {
+                if !self.suggestions.is_empty() {
+                    self.suggestion_index = self.suggestion_index.saturating_sub(1);
+                    self.suggestion_nav = true;
+                } else {
+                    self.recall_history(-1);
+                }
+            }
+            KeyCode::Down => {
+                if !self.suggestions.is_empty() {
+                    self.suggestion_index =
+                        (self.suggestion_index + 1).min(self.suggestions.len() - 1);
+                    self.suggestion_nav = true;
+                } else {
+                    self.recall_history(1);
+                }
+            }
             KeyCode::PageUp => {
                 self.scroll = self.scroll.saturating_add(6);
-                self.status = format!("scroll +{}", self.scroll);
+                self.status = format!("scrollback +{}", self.scroll);
             }
             KeyCode::PageDown => {
                 self.scroll = self.scroll.saturating_sub(6);
-                self.status = format!("scroll +{}", self.scroll);
+                self.status = if self.scroll == 0 {
+                    "following tail".to_string()
+                } else {
+                    format!("scrollback +{}", self.scroll)
+                };
             }
-            KeyCode::Home => self.scroll = u16::MAX / 2,
-            KeyCode::End => self.scroll = 0,
             _ => {}
         }
-        false
+        None
     }
 
-    fn handle_leader_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_leader_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
         let action = match key.code {
             KeyCode::Esc => {
                 self.status = "leader cancelled".to_string();
-                return false;
+                return None;
             }
             KeyCode::Char(ch) => leader_action_for_key(ch),
             _ => None,
@@ -201,43 +766,19 @@ impl UiState {
                 self.show_palette = false;
                 self.status = "help toggled".to_string();
             }
-            Some(LeaderAction::Editor) => self.open_external_editor(),
+            Some(LeaderAction::Editor) => return Some(UiEffect::Editor),
             Some(LeaderAction::ClearConversation) => {
-                self.log.clear();
+                self.clear_log();
                 self.status = "cleared".to_string();
             }
             Some(LeaderAction::ClearInput) => {
-                self.input.clear();
+                self.clear_input();
                 self.status = "input cleared".to_string();
             }
-            Some(LeaderAction::Quit) => return true,
+            Some(LeaderAction::Quit) => return Some(UiEffect::Quit),
             None => self.status = "unknown leader key".to_string(),
         }
-        false
-    }
-
-    fn complete_slash_command(&mut self) {
-        if !self.input.trim_start().starts_with('/') {
-            self.status = "tab: slash completion only".to_string();
-            return;
-        }
-        let suggestions = slash_suggestions(&self.input, 8);
-        match suggestions.as_slice() {
-            [] => self.status = "no slash matches".to_string(),
-            [single] => {
-                self.input = single.command.to_string();
-                if !self.input.ends_with(' ') {
-                    self.input.push(' ');
-                }
-                self.show_palette = false;
-                self.status = format!("completed {}", single.command);
-            }
-            _ => {
-                self.show_palette = true;
-                self.show_help = false;
-                self.status = format!("{} slash matches", suggestions.len());
-            }
-        }
+        None
     }
 
     fn recall_history(&mut self, direction: isize) {
@@ -250,52 +791,117 @@ impl UiState {
         } else {
             (current + 1).min(self.history.len())
         };
-        self.history_index = (next < self.history.len()).then_some(next);
-        self.input = self
-            .history_index
+        let recalled = (next < self.history.len()).then_some(next);
+        self.input = recalled
             .map(|index| self.history[index].clone())
             .unwrap_or_default();
+        self.cursor = self.char_count();
+        self.suggestions.clear();
+        self.history_index = recalled;
     }
 
-    fn handle_submit(&mut self, input: &str) -> bool {
+    fn clear_log(&mut self) {
+        if self.job.is_some() {
+            self.status = "busy: cannot clear while a job streams output".to_string();
+            return;
+        }
+        self.log.clear();
+        self.scroll = 0;
+        self.push_banner();
+    }
+
+    // ---- submit + jobs ---------------------------------------------------
+
+    fn handle_submit(&mut self, input: &str) -> Option<UiEffect> {
         if input.is_empty() {
-            return false;
+            return None;
+        }
+        self.show_palette = false;
+
+        let classified = classify_input(input);
+        if let Ok(InputAction::Quit) = classified {
+            self.status = "bye".to_string();
+            return Some(UiEffect::Quit);
+        }
+
+        if self.job.is_some() {
+            self.queued.push_back(input.to_string());
+            self.history.push(input.to_string());
+            self.clear_input();
+            self.status = format!("queued ({} waiting)", self.queued.len());
+            return None;
         }
 
         self.history.push(input.to_string());
+        self.clear_input();
+        self.submit_now(input)
+    }
+
+    fn submit_now(&mut self, input: &str) -> Option<UiEffect> {
         self.push_user(input);
         self.scroll = 0;
 
         match classify_input(input) {
-            Ok(InputAction::Prompt(prompt)) => self.submit_prompt(&prompt),
-            Ok(InputAction::Local(command)) => self.handle_local(&command),
-            Ok(InputAction::Shell(command)) => self.submit_shell(&command),
+            Ok(InputAction::Prompt(prompt)) => self.start_prompt_job(&prompt),
+            Ok(InputAction::Local(command)) => return self.handle_local(&command),
+            Ok(InputAction::Shell(command)) => self.start_shell_job(&command),
             Ok(InputAction::Quit) => {
                 self.status = "bye".to_string();
-                return true;
+                return Some(UiEffect::Quit);
             }
             Ok(InputAction::Empty) => {}
             Err(error) => self.push_error(&format!("{error:#}")),
         }
-        false
+        None
     }
 
-    fn handle_local(&mut self, command: &[String]) {
-        if command.first().map(String::as_str) == Some("help") {
-            self.show_help = !self.show_help;
-            self.show_palette = false;
-            self.status = "help toggled".to_string();
+    fn drain_queue(&mut self) {
+        if self.job.is_some() {
             return;
         }
-        if command.first().map(String::as_str) == Some("editor") {
-            self.open_external_editor();
-            return;
+        if let Some(next) = self.queued.pop_front() {
+            let _ = self.submit_now(&next);
+        }
+    }
+
+    fn handle_local(&mut self, command: &[String]) -> Option<UiEffect> {
+        match command.first().map(String::as_str) {
+            Some("help") => {
+                self.show_help = !self.show_help;
+                self.show_palette = false;
+                self.status = "help toggled".to_string();
+                return None;
+            }
+            Some("editor") => return Some(UiEffect::Editor),
+            Some("login") => return Some(UiEffect::Login),
+            Some("diff") => {
+                let cwd = self.resolve_cwd();
+                let diff_command = git_diff_command(&cwd, &command[1..]);
+                self.start_job(diff_command, LogKind::Diff, "git diff");
+                return None;
+            }
+            Some("mode") => {
+                self.set_mode(command.get(1).map(String::as_str));
+                return None;
+            }
+            Some("resume") => {
+                self.set_resume(command.get(1).map(String::as_str));
+                return None;
+            }
+            Some("new") => {
+                self.new_session();
+                return None;
+            }
+            _ => {}
         }
 
         match handle_local_command(command, &self.config, &self.zcode_bin) {
             Ok(output) if output == "__CLEAR__" => {
-                self.log.clear();
+                self.clear_log();
                 self.status = "cleared".to_string();
+            }
+            Ok(output) if output.starts_with("__IDE__") => {
+                self.launch_ide(output.trim_start_matches("__IDE__"));
             }
             Ok(output) => {
                 self.push_system(output.trim_end());
@@ -303,52 +909,328 @@ impl UiState {
             }
             Err(error) => self.push_error(&format!("{error:#}")),
         }
+        if command.first().map(String::as_str) == Some("logout") {
+            self.refresh_auth();
+        }
+        None
     }
 
-    fn submit_shell(&mut self, command: &str) {
-        self.status = format!("running ! {command}");
+    /// Launch the IDE detached so it outlives the TUI and never blocks it.
+    fn launch_ide(&mut self, raw: &str) {
+        let parts = match shell_words::split(raw) {
+            Ok(parts) if !parts.is_empty() => parts,
+            _ => {
+                self.push_error("invalid IDE command");
+                return;
+            }
+        };
+        let spawned = Command::new(&parts[0])
+            .args(&parts[1..])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(_) => {
+                self.push_system(&format!("opened in IDE: {}", parts.join(" ")));
+                self.status = "ide launched".to_string();
+            }
+            Err(error) => self.push_error(&format!("failed to launch {}: {error}", parts[0])),
+        }
+    }
+
+    fn start_prompt_job(&mut self, prompt: &str) {
+        match prompt_command_for(&self.zcode_bin, &self.config, prompt) {
+            Ok(command) => self.start_job(command, LogKind::Assistant, "zcode --prompt"),
+            Err(error) => self.push_error(&format!("{error:#}")),
+        }
+    }
+
+    fn start_shell_job(&mut self, command: &str) {
         self.push_system(&format!("$ {command}"));
-        match run_shell_command(command) {
-            Ok(output) if output.trim().is_empty() => {
-                self.push_system("(no output)");
-                self.status = "shell done".to_string();
+        let full = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
+        self.start_job(full, LogKind::System, "! shell");
+    }
+
+    fn start_job(&mut self, command: Vec<String>, kind: LogKind, label: &str) {
+        match spawn_streaming_command(&command) {
+            Ok(job) => {
+                self.log.push(LogLine::new(kind, ""));
+                self.job = Some(ActiveJob {
+                    job,
+                    log_index: self.log.len() - 1,
+                    kind,
+                    label: label.to_string(),
+                    finished: None,
+                    finished_at: None,
+                    eofs: 0,
+                    entry_started: false,
+                    any_output: false,
+                    cancel_requested: false,
+                    started: Instant::now(),
+                });
+                self.status = format!("running {label}");
             }
-            Ok(output) => {
-                self.push_system(output.trim_end());
-                self.status = "shell done".to_string();
-            }
-            Err(error) => {
-                self.push_error(&format!("{error:#}"));
-                self.status = "shell error".to_string();
+            Err(error) => self.push_error(&format!("{error:#}")),
+        }
+    }
+
+    fn cancel_job(&mut self) {
+        if let Some(active) = &mut self.job {
+            active.cancel_requested = true;
+            active.job.cancel();
+            self.status = "cancelling...".to_string();
+        }
+    }
+
+    fn pump_job(&mut self) {
+        loop {
+            let (event, kind) = {
+                let Some(active) = &mut self.job else { return };
+                (active.job.receiver.try_recv(), active.kind)
+            };
+            match event {
+                Ok(JobEvent::Line(line)) => {
+                    if kind == LogKind::Assistant {
+                        match parse_stream_event(&line) {
+                            Some(StreamEvent::Text(text)) => self.append_job_text(&text),
+                            Some(StreamEvent::ToolUse { name, detail }) => {
+                                self.push_job_side(LogKind::Tool, &format!("⚙ {name} {detail}"));
+                            }
+                            Some(StreamEvent::ToolResult { detail }) => {
+                                self.push_job_side(LogKind::Tool, &format!("↳ {detail}"));
+                            }
+                            Some(StreamEvent::Meta(meta)) => {
+                                self.push_job_side(LogKind::System, &format!("· {meta}"));
+                            }
+                            None => self.append_job_text(&line),
+                        }
+                    } else {
+                        self.append_job_text(&line);
+                    }
+                    self.scroll = 0;
+                }
+                Ok(JobEvent::Eof) => {
+                    if let Some(active) = &mut self.job {
+                        active.eofs += 1;
+                    }
+                }
+                Ok(JobEvent::Finished { success, detail }) => {
+                    if let Some(active) = &mut self.job {
+                        active.finished = Some((success, detail));
+                        active.finished_at = Some(Instant::now());
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    let Some(active) = &self.job else { return };
+                    // Finalize once the child exited and both streams hit EOF
+                    // (nothing left to lose). The timeout only covers a
+                    // grandchild that inherited the pipes and keeps them open.
+                    let drained = active.drained();
+                    let stuck = active
+                        .finished_at
+                        .is_some_and(|at| at.elapsed() > Duration::from_millis(1500));
+                    if drained || stuck {
+                        self.finalize_job();
+                    }
+                    return;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.finalize_job();
+                    return;
+                }
             }
         }
     }
 
-    fn submit_prompt(&mut self, prompt: &str) {
-        self.status = "running zcode --prompt ...".to_string();
-        self.push_system("running zcode --prompt ...");
-        match run_prompt(&self.zcode_bin, &self.config, prompt) {
-            Ok(output) if output.trim().is_empty() => {
-                self.push_assistant("(no output)");
-                self.status = "done".to_string();
+    fn append_job_text(&mut self, text: &str) {
+        let last_index = self.log.len() - 1;
+        let Some(active) = &mut self.job else { return };
+        if active.log_index != last_index {
+            self.log.push(LogLine::new(active.kind, ""));
+            active.log_index = self.log.len() - 1;
+            active.entry_started = false;
+        }
+        let entry = &mut self.log[active.log_index];
+        if active.entry_started {
+            entry.text.push('\n');
+        }
+        entry.text.push_str(text);
+        active.entry_started = true;
+        active.any_output = true;
+    }
+
+    fn push_job_side(&mut self, kind: LogKind, text: &str) {
+        self.log.push(LogLine::new(kind, text));
+        if let Some(active) = &mut self.job {
+            active.any_output = true;
+        }
+    }
+
+    fn finalize_job(&mut self) {
+        let Some(active) = self.job.take() else {
+            return;
+        };
+        if !active.any_output {
+            self.log[active.log_index].text = match active.kind {
+                LogKind::Diff => "working tree clean".to_string(),
+                _ => "(no output)".to_string(),
+            };
+        } else if self.log[active.log_index].text.is_empty() {
+            self.log.remove(active.log_index);
+        }
+        let elapsed = active.started.elapsed().as_secs_f32();
+        let (success, detail) = active
+            .finished
+            .unwrap_or((false, "job ended unexpectedly".to_string()));
+        if active.cancel_requested {
+            self.status = "cancelled".to_string();
+            self.push_system(&format!("{} cancelled", active.label));
+        } else if success {
+            self.status = format!("done ({elapsed:.1}s)");
+            // A prompt landed in a kernel session: keep the conversation
+            // going by resuming that session on subsequent prompts.
+            if active.kind == LogKind::Assistant && !self.session_active {
+                self.session_active = true;
+                if self.config.resume.is_none() {
+                    self.config.continue_session = true;
+                }
+                self.refresh_banner();
             }
-            Ok(output) => {
-                self.push_assistant(output.trim_end());
-                self.status = "done".to_string();
+        } else {
+            self.status = "error".to_string();
+            self.push_error(&format!("{} failed: {detail}", active.label));
+        }
+        self.scroll = 0;
+    }
+
+    // ---- log helpers -----------------------------------------------------
+
+    fn banner_text(&self) -> String {
+        let home = env::var("HOME").ok();
+        let cwd = shorten_home(&display_cwd(&self.config), home.as_deref());
+        let version = match &self.kernel_version {
+            Some(kernel) => format!("kernel {kernel} · tui {}", env!("CARGO_PKG_VERSION")),
+            None => format!("tui {}", env!("CARGO_PKG_VERSION")),
+        };
+        let session = if let Some(id) = &self.config.resume {
+            format!("resume {id}")
+        } else if self.config.continue_session || self.session_active {
+            "continuing latest".to_string()
+        } else {
+            "fresh".to_string()
+        };
+        format!(
+            ">_ 智谱 ZCODE ({version})\n\ndirectory: {cwd}\nmode: {}   /mode to change\nsession: {session}   /new to reset\nauth: {}   /login to sign in",
+            display_mode(&self.config),
+            self.auth_label
+        )
+    }
+
+    fn push_banner(&mut self) {
+        let text = self.banner_text();
+        self.log.push(LogLine::new(LogKind::Banner, &text));
+    }
+
+    fn refresh_banner(&mut self) {
+        if let Some(pos) = self
+            .log
+            .iter()
+            .position(|entry| matches!(entry.kind, LogKind::Banner))
+        {
+            self.log[pos].text = self.banner_text();
+        }
+    }
+
+    // ---- session state ---------------------------------------------------
+
+    fn set_mode(&mut self, mode: Option<&str>) {
+        match mode {
+            None => self.push_system(&format!(
+                "mode: {} (available: {})",
+                display_mode(&self.config),
+                PERMISSION_MODES.join(", ")
+            )),
+            Some(mode) if PERMISSION_MODES.contains(&mode) => {
+                self.config.mode = Some(mode.to_string());
+                self.refresh_banner();
+                self.push_system(&format!("mode set to {mode}"));
+                self.status = format!("mode {mode}");
             }
-            Err(error) => {
-                self.push_error(&format!("{error:#}"));
-                self.status = "error".to_string();
+            Some(other) => self.push_error(&format!(
+                "unknown mode: {other} (use {})",
+                PERMISSION_MODES.join(", ")
+            )),
+        }
+    }
+
+    fn cycle_mode(&mut self) {
+        let current = display_mode(&self.config);
+        let next = PERMISSION_MODES
+            .iter()
+            .position(|mode| *mode == current)
+            .map(|index| PERMISSION_MODES[(index + 1) % PERMISSION_MODES.len()])
+            .unwrap_or(PERMISSION_MODES[0]);
+        self.config.mode = Some(next.to_string());
+        self.refresh_banner();
+        self.status = format!("mode {next} (Shift+Tab cycles)");
+    }
+
+    fn set_resume(&mut self, id: Option<&str>) {
+        match id {
+            Some(id) if id.starts_with("sess_") => {
+                self.config.resume = Some(id.to_string());
+                self.config.continue_session = false;
+                self.session_active = false;
+                self.push_system(&format!("resuming {id} on the next prompt"));
+            }
+            Some(other) => {
+                self.push_error(&format!("session ids look like sess_...: got {other}"));
+                return;
+            }
+            None => {
+                self.config.resume = None;
+                self.config.continue_session = true;
+                self.push_system("continuing the latest session for this directory");
             }
         }
+        self.refresh_banner();
+    }
+
+    fn new_session(&mut self) {
+        self.config.resume = None;
+        self.config.continue_session = false;
+        self.session_active = false;
+        self.clear_log();
+        self.push_system("fresh session: context resets on the next prompt");
+        self.status = "new session".to_string();
+    }
+
+    fn apply_startup_report(&mut self, report: StartupReport) {
+        self.kernel_version = report.kernel;
+        let banner_pos = self
+            .log
+            .iter()
+            .position(|entry| matches!(entry.kind, LogKind::Banner));
+        self.refresh_banner();
+        let (Some(installed), Some(feed)) = (&report.installed, &report.feed) else {
+            return;
+        };
+        if !is_newer_version(&feed.version, installed) {
+            return;
+        }
+        let tip = build_update_tip(installed, feed, report.feed_base.as_deref());
+        let insert_at = banner_pos.map(|pos| pos + 1).unwrap_or(self.log.len());
+        self.log
+            .insert(insert_at, LogLine::new(LogKind::Logo, ZCODE_LOGO));
+        self.log
+            .insert(insert_at + 1, LogLine::new(LogKind::Tip, &tip));
+        self.status = format!("update available: ZCode {}", feed.version);
+        self.scroll = 0;
     }
 
     fn push_user(&mut self, text: &str) {
         self.log.push(LogLine::new(LogKind::User, text));
-    }
-
-    fn push_assistant(&mut self, text: &str) {
-        self.log.push(LogLine::new(LogKind::Assistant, text));
     }
 
     fn push_system(&mut self, text: &str) {
@@ -357,48 +1239,21 @@ impl UiState {
 
     fn push_error(&mut self, text: &str) {
         self.log.push(LogLine::new(LogKind::Error, text));
-    }
-
-    fn open_external_editor(&mut self) {
-        match edit_input_in_editor(&self.input) {
-            Ok(updated) => {
-                self.input = updated.trim_end_matches('\n').to_string();
-                self.status = "editor returned".to_string();
-            }
-            Err(error) => {
-                self.push_error(&format!("{error:#}"));
-                self.status = "editor error".to_string();
-            }
-        }
+        self.status = "error".to_string();
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogKind {
+    Banner,
+    Logo,
+    Tip,
     User,
     Assistant,
     System,
     Error,
-}
-
-impl LogKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::User => "you",
-            Self::Assistant => "zcode",
-            Self::System => "system",
-            Self::Error => "error",
-        }
-    }
-
-    fn color(self) -> Color {
-        match self {
-            Self::User => Color::Cyan,
-            Self::Assistant => Color::Green,
-            Self::System => Color::Yellow,
-            Self::Error => Color::Red,
-        }
-    }
+    Diff,
+    Tool,
 }
 
 #[derive(Debug)]
@@ -433,20 +1288,13 @@ fn edit_input_in_editor(initial: &str) -> Result<String> {
     let mut args = parts;
     args.push(path.display().to_string());
 
-    disable_raw_mode().context("failed to disable raw mode for editor")?;
-    execute!(io::stdout(), LeaveAlternateScreen, Show)
-        .context("failed to leave alternate screen for editor")?;
     let status = Command::new(&program)
         .args(&args)
         .status()
-        .with_context(|| format!("failed to run editor: {program}"));
-    let restore_screen = execute!(io::stdout(), EnterAlternateScreen, Hide)
-        .context("failed to re-enter alternate screen after editor");
-    let restore_raw = enable_raw_mode().context("failed to re-enable raw mode after editor");
-
-    status?;
-    restore_screen?;
-    restore_raw?;
+        .with_context(|| format!("failed to run editor: {program}"))?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("editor exited with {status}"));
+    }
 
     let updated =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -461,7 +1309,12 @@ struct TerminalGuard {
 impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode().context("failed to enable raw mode")?;
-        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            Hide
+        )?;
         let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::new(backend)?;
         Ok(Self { terminal })
@@ -471,240 +1324,480 @@ impl TerminalGuard {
         self.terminal.draw(|frame| render(frame, state))?;
         Ok(())
     }
+
+    /// Leave the TUI, run `f` with the normal terminal, then restore.
+    fn suspend<T>(&mut self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        disable_raw_mode().context("failed to disable raw mode")?;
+        execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableBracketedPaste,
+            Show
+        )
+        .context("failed to leave alternate screen")?;
+        let result = f();
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            Hide
+        )
+        .context("failed to re-enter alternate screen")?;
+        enable_raw_mode().context("failed to re-enable raw mode")?;
+        self.terminal
+            .clear()
+            .context("failed to redraw after suspend")?;
+        result
+    }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            Show,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
     }
 }
 
 fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     let root = frame.area();
+    let input_lines = state.input.split('\n').count() as u16;
+    let composer_height = input_lines.clamp(1, 5) + 2;
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),
-            Constraint::Min(8),
-            Constraint::Length(4),
+            Constraint::Min(6),
+            Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
         .split(root);
 
-    render_brand(frame, vertical[0], state);
+    render_conversation(frame, vertical[0], state);
+    render_composer(frame, vertical[1], state);
+    render_footer(frame, vertical[2], state);
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(50), Constraint::Length(34)])
-        .split(vertical[1]);
-    render_conversation(frame, body[0], state);
-    render_sidebar(frame, body[1], state);
-    render_input(frame, vertical[2], state);
-    render_status(frame, vertical[3], state);
-
+    if !state.suggestions.is_empty() {
+        render_suggestions(frame, vertical[1], state);
+    }
     if state.show_help {
-        render_help_modal(frame, centered_rect(74, 70, root));
+        render_help_modal(frame, centered_rect(74, 70, root), &state.theme);
     }
     if state.show_palette {
         render_command_palette(frame, centered_rect(82, 68, root), state);
     }
 }
 
-fn render_brand(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
-    let title = vec![
-        Line::from(vec![
-            Span::styled("智谱", Style::default().fg(Color::Cyan).bold()),
-            Span::styled(" @zcode", Style::default().fg(Color::Magenta).bold()),
-            Span::styled("  // RUST FALLBACK TUI", Style::default().fg(Color::Green)),
-        ]),
-        Line::from(Span::styled(
-            "╾─ signal: online   route: prompt/local/shell/mcp   shell: ! <cmd>   palette: Ctrl+P ─╼",
-            Style::default().fg(Color::Green),
-        )),
-        Line::from(Span::styled(
-            "╾─ official Linux package missed @zcode/tui; this layer keeps the terminal alive ─╼",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(vec![
-            Span::styled("mode ", Style::default().fg(Color::DarkGray)),
-            Span::styled(display_mode(&state.config), Style::default().fg(Color::Yellow)),
-            Span::styled("  cwd ", Style::default().fg(Color::DarkGray)),
-            Span::styled(display_cwd(&state.config), Style::default().fg(Color::Yellow)),
-        ]),
-    ];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
-        .title(Line::from(" ZCODE // TERMINAL BUS ").green().bold());
-    frame.render_widget(
-        Paragraph::new(title)
-            .block(block)
-            .alignment(Alignment::Center),
-        area,
-    );
-}
-
 fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
-    let items = state
-        .log
-        .iter()
-        .flat_map(|entry| log_to_items(entry, area.width.saturating_sub(6) as usize))
-        .collect::<Vec<_>>();
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height,
+    };
+    let width = inner.width as usize;
+    let mut items: Vec<ListItem<'static>> = Vec::new();
+    for (index, entry) in state.log.iter().enumerate() {
+        if index > 0 {
+            items.push(ListItem::new(Line::default()));
+        }
+        items.extend(log_to_items(entry, width, &state.theme));
+    }
     let total = items.len() as u16;
-    let height = area.height.saturating_sub(2);
-    let max_scroll = total.saturating_sub(height);
+    let max_scroll = total.saturating_sub(inner.height);
     if state.scroll > max_scroll {
         state.scroll = max_scroll;
     }
+    // scroll counts lines back from the bottom; 0 follows the tail.
+    let offset = max_scroll.saturating_sub(state.scroll);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
-        .title(Line::from(" TRANSCRIPT ").green().bold());
-    let list = List::new(items).block(block).highlight_symbol(">> ");
     frame.render_stateful_widget(
-        list,
-        area,
-        &mut ratatui::widgets::ListState::default().with_offset(state.scroll as usize),
+        List::new(items),
+        inner,
+        &mut ListState::default().with_offset(offset as usize),
     );
 }
 
-fn log_to_items(entry: &LogLine, width: usize) -> Vec<ListItem<'static>> {
-    let mut items = Vec::new();
-    let label = format!("[{}] ", entry.kind.label());
-    let wrapped = wrap_text(&entry.text, width.saturating_sub(label.len()).max(10));
-
-    for (index, line) in wrapped.into_iter().enumerate() {
-        let prefix = if index == 0 {
-            label.clone()
-        } else {
-            " ".repeat(label.len())
-        };
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(prefix, Style::default().fg(entry.kind.color()).bold()),
-            Span::raw(line),
-        ])));
+fn log_to_items(entry: &LogLine, width: usize, theme: &Theme) -> Vec<ListItem<'static>> {
+    let mut items: Vec<ListItem<'static>> = Vec::new();
+    match entry.kind {
+        LogKind::Banner => {
+            // Codex-style rounded welcome box.
+            let content: Vec<&str> = entry.text.lines().collect();
+            let inner = content
+                .iter()
+                .map(|line| line.width())
+                .max()
+                .unwrap_or(0)
+                .min(width.saturating_sub(4));
+            items.push(ListItem::new(Line::from(Span::styled(
+                format!("╭{}╮", "─".repeat(inner + 2)),
+                theme.frame(),
+            ))));
+            for raw in &content {
+                let mut spans = vec![Span::styled("│ ".to_string(), theme.frame())];
+                spans.extend(banner_spans(raw, theme));
+                let pad = inner.saturating_sub(raw.width());
+                spans.push(Span::raw(" ".repeat(pad)));
+                spans.push(Span::styled(" │".to_string(), theme.frame()));
+                items.push(ListItem::new(Line::from(spans)));
+            }
+            items.push(ListItem::new(Line::from(Span::styled(
+                format!("╰{}╯", "─".repeat(inner + 2)),
+                theme.frame(),
+            ))));
+        }
+        LogKind::Logo => {
+            for raw in entry.text.lines() {
+                let style = if raw.contains('█') || raw.contains('╚') {
+                    theme.accent().bold()
+                } else {
+                    theme.dim()
+                };
+                items.push(ListItem::new(Line::from(Span::styled(
+                    raw.to_string(),
+                    style,
+                ))));
+            }
+        }
+        LogKind::Tip => {
+            for (index, raw) in entry.text.lines().enumerate() {
+                let mut spans = Vec::new();
+                let mut rest = raw;
+                if index == 0 {
+                    if let Some(body) = raw.strip_prefix("Tip:") {
+                        spans.push(Span::styled("Tip:".to_string(), theme.text().bold()));
+                        rest = body;
+                    }
+                }
+                spans.extend(spans_with_links(
+                    rest,
+                    theme.text(),
+                    theme.accent().underlined(),
+                ));
+                items.push(ListItem::new(Line::from(spans)));
+            }
+        }
+        LogKind::User => {
+            // Codex-style elevated band with a `›` prompt marker.
+            items.push(ListItem::new(Line::default()).style(theme.band()));
+            let content_width = width.saturating_sub(3).max(10);
+            for (index, piece) in wrap_display(&entry.text, content_width)
+                .into_iter()
+                .enumerate()
+            {
+                let prefix = if index == 0 {
+                    Span::styled(" › ".to_string(), theme.accent().bold())
+                } else {
+                    Span::raw("   ".to_string())
+                };
+                items.push(
+                    ListItem::new(Line::from(vec![prefix, Span::styled(piece, theme.text())]))
+                        .style(theme.band()),
+                );
+            }
+            items.push(ListItem::new(Line::default()).style(theme.band()));
+        }
+        LogKind::Assistant => {
+            let content_width = width.saturating_sub(2).max(10);
+            for (index, styled) in markdown_lines(&entry.text, content_width)
+                .into_iter()
+                .enumerate()
+            {
+                let mut spans = Vec::new();
+                if index == 0 {
+                    spans.push(Span::styled("• ".to_string(), theme.dim()));
+                } else if styled.kind == MdLineKind::Quote {
+                    spans.push(Span::styled("> ".to_string(), theme.good()));
+                } else {
+                    spans.push(Span::raw("  ".to_string()));
+                }
+                if styled.kind == MdLineKind::DiffBlock {
+                    // Colored ```diff fences, like /diff output.
+                    let raw: String = styled.spans.iter().map(|span| span.text.as_str()).collect();
+                    let style = match diff_line_role(&raw) {
+                        DiffRole::Add => theme.good(),
+                        DiffRole::Remove => theme.bad(),
+                        DiffRole::Hunk => theme.accent(),
+                        DiffRole::Meta => theme.dim().bold(),
+                        DiffRole::Context => theme.text(),
+                    };
+                    spans.push(Span::styled(raw, style));
+                    items.push(ListItem::new(Line::from(spans)));
+                    continue;
+                }
+                for span in styled.spans {
+                    let mut style = md_style(theme, styled.kind, span.role);
+                    if let Some((r, g, b)) = span.color {
+                        if !theme.plain {
+                            style = style.fg(Color::Rgb(r, g, b));
+                        }
+                    }
+                    spans.push(Span::styled(span.text, style));
+                }
+                items.push(ListItem::new(Line::from(spans)));
+            }
+        }
+        LogKind::Diff => {
+            let content_width = width.saturating_sub(2).max(10);
+            for raw in entry.text.lines() {
+                let style = match diff_line_role(raw) {
+                    DiffRole::Add => theme.good(),
+                    DiffRole::Remove => theme.bad(),
+                    DiffRole::Hunk => theme.accent(),
+                    DiffRole::Meta => theme.dim().bold(),
+                    DiffRole::Context => theme.text(),
+                };
+                for piece in wrap_display(raw, content_width) {
+                    items.push(ListItem::new(Line::from(vec![
+                        Span::raw("  ".to_string()),
+                        Span::styled(piece, style),
+                    ])));
+                }
+            }
+        }
+        LogKind::Tool | LogKind::System | LogKind::Error => {
+            let (marker, style) = match entry.kind {
+                LogKind::Tool => ("• ", theme.accent_dim()),
+                LogKind::Error => ("✗ ", theme.bad()),
+                _ => ("• ", theme.dim()),
+            };
+            let content_width = width.saturating_sub(2).max(10);
+            for (index, piece) in wrap_display(&entry.text, content_width)
+                .into_iter()
+                .enumerate()
+            {
+                let prefix = if index == 0 {
+                    Span::styled(marker.to_string(), style)
+                } else {
+                    Span::raw("  ".to_string())
+                };
+                items.push(ListItem::new(Line::from(vec![
+                    prefix,
+                    Span::styled(piece, style),
+                ])));
+            }
+        }
     }
-
     if items.is_empty() {
-        items.push(ListItem::new(Line::from(Span::styled(
-            label,
-            Style::default().fg(entry.kind.color()).bold(),
-        ))));
+        items.push(ListItem::new(Line::default()));
     }
-
     items
 }
 
-fn render_sidebar(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
-    let mut commands = vec![Line::from(vec![Span::styled(
-        "ROUTES",
-        Style::default().fg(Color::Cyan).bold(),
-    )])];
-    for item in command_catalog().iter().take(12) {
-        commands.push(Line::from(vec![
-            Span::styled(
-                format!("{:<14}", item.command),
-                Style::default().fg(Color::Green),
-            ),
-            Span::styled(
-                format!(" -> {}", item.route),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-    }
-    commands.extend([
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "HOTKEYS",
-            Style::default().fg(Color::Magenta).bold(),
-        )]),
-        Line::from("Ctrl+P: palette"),
-        Line::from("Ctrl+X: leader"),
-        Line::from("Tab: slash complete"),
-        Line::from("Ctrl+G: editor"),
-        Line::from("Ctrl+J: newline"),
-        Line::from("Up/Down: history"),
-        Line::from("PgUp/PgDn: scroll"),
-        Line::from("Ctrl+L: clear log"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "SESSION",
-            Style::default().fg(Color::Green).bold(),
-        )]),
-        Line::from(format!("messages: {}", state.log.len())),
-        Line::from(format!("history: {}", state.history.len())),
-        Line::from(format!("status: {}", state.status)),
-        Line::from(format!(
-            "leader: {}",
-            if state.leader_pending {
-                "armed"
+fn md_style(theme: &Theme, kind: MdLineKind, role: SpanRole) -> Style {
+    match kind {
+        MdLineKind::Heading => theme.text().bold(),
+        MdLineKind::CodeBlock => {
+            if role == SpanRole::Marker {
+                theme.dim()
             } else {
-                "idle"
+                theme.code()
             }
-        )),
-    ]);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Line::from(" CONTROL MATRIX ").cyan().bold());
-    frame.render_widget(
-        Paragraph::new(Text::from(commands))
-            .block(block)
-            .wrap(Wrap { trim: true }),
-        area,
-    );
+        }
+        MdLineKind::DiffBlock => theme.text(),
+        MdLineKind::Quote => theme.good(),
+        MdLineKind::Rule => theme.frame(),
+        MdLineKind::Text => match role {
+            SpanRole::Normal => theme.text(),
+            SpanRole::Strong => theme.text().bold(),
+            SpanRole::Emph => theme.text().italic(),
+            // Codex renders inline code as colored text, no background box.
+            SpanRole::Code => theme.accent(),
+            SpanRole::Link => theme.accent().underlined(),
+            SpanRole::Marker => theme.dim(),
+        },
+    }
 }
 
-fn render_input(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta))
-        .title(
-            Line::from(" PROMPT // Enter send // ! shell // Ctrl+J newline ")
-                .magenta()
-                .bold(),
-        );
-    let text = Paragraph::new(state.input.as_str())
-        .block(block)
-        .wrap(Wrap { trim: false });
-    frame.render_widget(text, area);
+/// Style spans for one banner-box line: `>_ brand (versions)` on the first
+/// row, `key: value   /hint` rows below.
+fn banner_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
+    if line.is_empty() {
+        return Vec::new();
+    }
+    if let Some(rest) = line.strip_prefix(">_ ") {
+        let mut spans = vec![Span::styled(">_ ".to_string(), theme.accent().bold())];
+        match rest.split_once(" (") {
+            Some((name, tail)) => {
+                spans.push(Span::styled(name.to_string(), theme.text().bold()));
+                spans.push(Span::styled(format!(" ({tail}"), theme.dim()));
+            }
+            None => spans.push(Span::styled(rest.to_string(), theme.text().bold())),
+        }
+        return spans;
+    }
+    if let Some((key, value)) = line.split_once(": ") {
+        let mut spans = vec![Span::styled(format!("{key}: "), theme.dim())];
+        match value.split_once("   /") {
+            Some((data, hint)) => {
+                spans.push(Span::styled(data.to_string(), theme.text()));
+                spans.push(Span::styled(format!("   /{hint}"), theme.dim()));
+            }
+            None => spans.push(Span::styled(value.to_string(), theme.text())),
+        }
+        return spans;
+    }
+    vec![Span::styled(line.to_string(), theme.text())]
+}
 
-    let lines = state.input.lines().collect::<Vec<_>>();
-    let last_line = lines.last().copied().unwrap_or("");
-    let cursor_x = area.x.saturating_add(1).saturating_add(
-        last_line
-            .chars()
-            .count()
-            .min(area.width.saturating_sub(3) as usize) as u16,
-    );
-    let cursor_y = area.y.saturating_add(1).saturating_add(
-        lines
-            .len()
-            .saturating_sub(1)
-            .min(area.height.saturating_sub(3) as usize) as u16,
-    );
+/// Split a line into plain spans and accent-styled URL spans.
+fn spans_with_links(text: &str, base: Style, link: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while let Some(pos) = rest.find("https://").or_else(|| rest.find("http://")) {
+        if pos > 0 {
+            spans.push(Span::styled(rest[..pos].to_string(), base));
+        }
+        let tail = &rest[pos..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '（' | '）' | '('))
+            .unwrap_or(tail.len());
+        spans.push(Span::styled(tail[..end].to_string(), link));
+        rest = &tail[end..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest.to_string(), base));
+    }
+    spans
+}
+
+fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let t = &state.theme;
+    // Elevated band instead of a border, like the Codex composer.
+    frame.render_widget(Paragraph::new("").style(t.band()), area);
+
+    let mut lines: Vec<Line> = vec![Line::default()];
+    if state.input.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(" › ".to_string(), t.accent().bold()),
+            Span::styled(
+                "describe a task   /commands   @files   !shell".to_string(),
+                t.dim(),
+            ),
+        ]));
+    } else {
+        for (index, raw) in state.input.split('\n').enumerate() {
+            let prefix = if index == 0 {
+                Span::styled(" › ".to_string(), t.accent().bold())
+            } else {
+                Span::raw("   ".to_string())
+            };
+            lines.push(Line::from(vec![
+                prefix,
+                Span::styled(raw.to_string(), t.text()),
+            ]));
+        }
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)).style(t.band()), area);
+
+    let mut line = 0usize;
+    let mut column = 0usize;
+    for ch in state.input.chars().take(state.cursor) {
+        if ch == '\n' {
+            line += 1;
+            column = 0;
+        } else {
+            // Display columns, not chars: CJK characters occupy two cells.
+            column += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    let cursor_x = area
+        .x
+        .saturating_add(3)
+        .saturating_add(column.min(area.width.saturating_sub(4) as usize) as u16);
+    let cursor_y = area
+        .y
+        .saturating_add(1)
+        .saturating_add(line.min(area.height.saturating_sub(2) as usize) as u16);
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
-fn render_status(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
-    let text = format!(
-        " {} | Ctrl+P palette | Ctrl+X leader | ? help | scroll:{} | bin:{} ",
-        state.status, state.scroll, state.zcode_bin
-    );
+fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let t = &state.theme;
+    let left = if let Some(job) = &state.job {
+        let frame_symbol = SPINNER_FRAMES[state.tick % SPINNER_FRAMES.len()];
+        let queued = if state.queued.is_empty() {
+            String::new()
+        } else {
+            format!("   queued {}", state.queued.len())
+        };
+        Line::from(vec![
+            Span::styled(format!(" {frame_symbol} "), t.accent()),
+            Span::styled(
+                format!(
+                    "{} · {:.0}s   Esc to interrupt{queued}",
+                    job.label,
+                    job.started.elapsed().as_secs_f32()
+                ),
+                t.dim(),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(format!(" {} ", state.status), t.accent_dim()),
+            Span::styled(
+                "  ⏎ send   ^J newline   ^P commands   ? help   ^C quit".to_string(),
+                t.dim(),
+            ),
+        ])
+    };
+    frame.render_widget(Paragraph::new(left), area);
     frame.render_widget(
-        Paragraph::new(text)
-            .style(Style::default().bg(Color::Black).fg(Color::Green))
-            .alignment(Alignment::Left),
+        Paragraph::new(Line::from(Span::styled(
+            format!("auth {} ", state.auth_label),
+            t.dim(),
+        )))
+        .alignment(Alignment::Right),
         area,
+    );
+}
+
+fn render_suggestions(frame: &mut Frame<'_>, input_area: Rect, state: &UiState) {
+    let t = &state.theme;
+    let height = (state.suggestions.len() as u16).min(SUGGESTION_LIMIT as u16) + 2;
+    let area = Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(height),
+        width: input_area.width,
+        height,
+    };
+    let items = state
+        .suggestions
+        .iter()
+        .map(|suggestion| {
+            ListItem::new(Line::from(Span::styled(
+                suggestion.display.clone(),
+                t.text(),
+            )))
+        })
+        .collect::<Vec<_>>();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(t.frame())
+        .title(Line::from(Span::styled(
+            " Tab accepts ".to_string(),
+            t.dim(),
+        )));
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(t.selection())
+        .highlight_symbol("› ");
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(
+        list,
+        area,
+        &mut ListState::default().with_selected(Some(state.suggestion_index)),
     );
 }
 
 fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
-    let rows = if state.input.trim_start().starts_with('/') {
+    let t = &state.theme;
+    let rows = if state.input.starts_with('/') {
         let suggestions = slash_suggestions(&state.input, 18);
         if suggestions.is_empty() {
             command_palette_rows()
@@ -713,7 +1806,7 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
                 .into_iter()
                 .map(|item| {
                     format!(
-                        "{:<18} {:<5} {}",
+                        "{:<18} {:<7} {}",
                         item.command,
                         format!("[{}]", item.route),
                         item.summary
@@ -727,31 +1820,27 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
 
     let items = rows
         .into_iter()
-        .map(|row| {
-            ListItem::new(Line::from(Span::styled(
-                row,
-                Style::default().fg(Color::Green),
-            )))
-        })
+        .map(|row| ListItem::new(Line::from(Span::styled(row, t.text()))))
         .collect::<Vec<_>>();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta))
-        .title(
-            Line::from(" COMMAND PALETTE // Ctrl+P close // Tab complete ")
-                .magenta()
-                .bold(),
-        );
+        .border_type(BorderType::Rounded)
+        .border_style(t.frame())
+        .title(Line::from(Span::styled(
+            " commands · Ctrl+P closes ".to_string(),
+            t.dim(),
+        )));
     frame.render_widget(Clear, area);
     frame.render_widget(List::new(items).block(block), area);
 }
 
-fn render_help_modal(frame: &mut Frame<'_>, area: Rect) {
+fn render_help_modal(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta))
-        .title(Line::from(" Help ").magenta().bold());
-    let help = Paragraph::new(help_text())
+        .border_type(BorderType::Rounded)
+        .border_style(theme.frame())
+        .title(Line::from(Span::styled(" help ".to_string(), theme.dim())));
+    let help = Paragraph::new(Text::styled(help_text(), theme.text()))
         .block(block)
         .wrap(Wrap { trim: false });
     frame.render_widget(Clear, area);
@@ -775,27 +1864,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
-}
-
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let mut lines = Vec::new();
-    for raw_line in text.lines() {
-        let chars = raw_line.chars().collect::<Vec<_>>();
-        if chars.len() <= width {
-            lines.push(raw_line.to_string());
-            continue;
-        }
-        let mut start = 0;
-        while start < chars.len() {
-            let end = (start + width).min(chars.len());
-            lines.push(chars[start..end].iter().collect());
-            start = end;
-        }
-    }
-    lines
 }
 
 fn display_mode(config: &AppConfig) -> &str {
