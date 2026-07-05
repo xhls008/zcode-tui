@@ -33,7 +33,8 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   引用绿色，语义绿/红只用于 diff 与错误；
   `--no-color` 或 `NO_COLOR` 时退化为无色。
 - **语法高亮**：围栏代码块按语言用 syntect 着色（Codex 同款方案，
-  base16-ocean 主题）；` ```diff ` 围栏按 +绿/−红/@@蓝 渲染。
+  base16-ocean 主题）+ dim 行号 gutter；` ```diff ` 围栏按
+  +绿/−红/@@蓝 渲染（+/- 是 diff 专属语义，普通代码块只有行号）。
 - **启动欢迎框**：Codex 风圆角信息框，显示内核/TUI 版本、目录、
   mode、auth 及对应的切换命令提示。
 - **官方更新检测**：启动时后台读取 `/opt/ZCode` 的 electron-updater

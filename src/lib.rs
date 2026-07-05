@@ -1478,8 +1478,18 @@ fn code_theme() -> &'static syntect::highlighting::Theme {
     })
 }
 
-/// Render one fenced code block: `diff` fences get DiffBlock lines, known
-/// languages are syntax-highlighted with syntect, everything else is plain.
+/// A dim, right-aligned line-number gutter span, like a code editor's.
+fn gutter_span(line_no: usize, width: usize) -> StyledSpan {
+    StyledSpan {
+        text: format!("{line_no:>width$} "),
+        role: SpanRole::Marker,
+        color: None,
+    }
+}
+
+/// Render one fenced code block: `diff` fences get DiffBlock lines (kept raw
+/// for their +/- coloring), everything else gets a line-number gutter plus
+/// syntect highlighting when the language is known.
 fn render_code_block(lang: &str, code: &str, out: &mut Vec<StyledLine>) {
     if lang.eq_ignore_ascii_case("diff") {
         for line in code.lines() {
@@ -1491,6 +1501,10 @@ fn render_code_block(lang: &str, code: &str, out: &mut Vec<StyledLine>) {
         return;
     }
 
+    // Gutter width tracks the largest line number in this block.
+    let total = code.lines().count().max(1);
+    let gutter_width = total.to_string().len();
+
     let set = syntax_set();
     let syntax = if lang.is_empty() {
         None
@@ -1498,9 +1512,12 @@ fn render_code_block(lang: &str, code: &str, out: &mut Vec<StyledLine>) {
         set.find_syntax_by_token(lang)
     };
     let Some(syntax) = syntax else {
-        for line in code.lines() {
+        for (index, line) in code.lines().enumerate() {
             out.push(StyledLine {
-                spans: vec![StyledSpan::new(line.to_string(), SpanRole::Code)],
+                spans: vec![
+                    gutter_span(index + 1, gutter_width),
+                    StyledSpan::new(line.to_string(), SpanRole::Code),
+                ],
                 kind: MdLineKind::CodeBlock,
             });
         }
@@ -1508,26 +1525,24 @@ fn render_code_block(lang: &str, code: &str, out: &mut Vec<StyledLine>) {
     };
 
     let mut highlighter = syntect::easy::HighlightLines::new(syntax, code_theme());
-    for line in code.lines() {
+    for (index, line) in code.lines().enumerate() {
         let with_newline = format!("{line}\n");
-        let spans = match highlighter.highlight_line(&with_newline, set) {
-            Ok(ranges) => ranges
-                .into_iter()
-                .filter_map(|(style, piece)| {
-                    let piece = piece.trim_end_matches('\n');
-                    if piece.is_empty() {
-                        return None;
-                    }
-                    let fg = style.foreground;
-                    Some(StyledSpan {
-                        text: piece.to_string(),
-                        role: SpanRole::Code,
-                        color: Some((fg.r, fg.g, fg.b)),
-                    })
+        let mut spans = vec![gutter_span(index + 1, gutter_width)];
+        match highlighter.highlight_line(&with_newline, set) {
+            Ok(ranges) => spans.extend(ranges.into_iter().filter_map(|(style, piece)| {
+                let piece = piece.trim_end_matches('\n');
+                if piece.is_empty() {
+                    return None;
+                }
+                let fg = style.foreground;
+                Some(StyledSpan {
+                    text: piece.to_string(),
+                    role: SpanRole::Code,
+                    color: Some((fg.r, fg.g, fg.b)),
                 })
-                .collect(),
-            Err(_) => vec![StyledSpan::new(line.to_string(), SpanRole::Code)],
-        };
+            })),
+            Err(_) => spans.push(StyledSpan::new(line.to_string(), SpanRole::Code)),
+        }
         out.push(StyledLine {
             spans,
             kind: MdLineKind::CodeBlock,

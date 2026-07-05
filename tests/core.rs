@@ -611,7 +611,7 @@ fn markdown_renders_headings_emphasis_and_code() {
     use zcode_tui::{markdown_lines, MdLineKind, SpanRole};
 
     let lines = markdown_lines(
-        "# Title\n\n**bold** and `code`\n\n```rust\nfn x() {}\n```",
+        "# Title\n\n**bold** and `code`\n\n```rust\nfn x() {}\nfn y() {}\n```",
         0,
     );
 
@@ -630,6 +630,15 @@ fn markdown_renders_headings_emphasis_and_code() {
         .iter()
         .filter(|line| line.kind == MdLineKind::CodeBlock)
         .collect();
+    // Each source line opens with a dim, numeric line-number gutter (the
+    // `· rust` language label also uses a Marker span, so filter by digits).
+    let gutters: Vec<&str> = code
+        .iter()
+        .filter_map(|line| line.spans.first())
+        .filter(|span| span.role == SpanRole::Marker && span.text.trim().parse::<u32>().is_ok())
+        .map(|span| span.text.as_str())
+        .collect();
+    assert_eq!(gutters, vec!["1 ", "2 "]);
     let joined: Vec<String> = code
         .iter()
         .map(|line| {

@@ -4,6 +4,22 @@
 构建 x86_64-musl 静态 Linux 二进制（无需 Rust 工具链即可使用），连同
 SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版本段。
 
+## [0.3.1] - 2026-07-05
+
+### 修复
+
+- 代码块渲染加行号 gutter(dim 右对齐,像编辑器):所有非 diff 围栏代码块
+  每行前显示行号;` ```diff ` 围栏保持 +/- 着色语义不变。
+  （注:普通代码块没有 +/- 标记是设计使然——+/- 只对 diff 有意义,
+  见 `/diff` 与 ` ```diff ` 围栏。）
+
+### 已知限制(非本版引入)
+
+- headless 内核**不逐 token 流式**输出正文:stdout 与 db 的 text 行都是
+  整块在生成结束时落库(2026-07-05 复测)。运行期间的实时反馈仅限工具
+  调用 chip 与 reasoning;纯问答(不调工具)在生成完成前只有 spinner。
+  真正的 token 级流式需要接入内核 `app-server` 协议(评估中)。
+
 ## [0.3.0] - 2026-07-04
 
 日用舒适度批(openspec 变更 session-picker-and-ui-comfort):
