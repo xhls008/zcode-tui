@@ -5,13 +5,13 @@ use zcode_tui::{
     build_prompt_command, build_prompt_command_with_attachments, classify_input,
     command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
     detect_auth_status_with, env_is_headless, extract_file_mentions, file_suggestions,
-    fold_preview, format_context_watermark, handle_local_command, history_search, latest_reasoning,
-    latest_session_for_dir, leader_action_for_key, list_recent_sessions, live_tool_chips,
-    load_mcp_config, login_command, logout_command, mask_secret, open_kernel_db_ro, parse_cli_args,
-    parse_hex_color, parse_part_data, parse_prompt_summary, parse_ui_config, recent_input_history,
-    relative_age, save_mcp_config, slash_suggestions, strip_ansi, user_mcp_config_path_from,
-    AppConfig, AuthStatus, InputAction, LeaderAction, McpServer, PartEvent, ToolChipStatus,
-    KNOWN_DB_MIGRATIONS,
+    fold_preview, format_context_watermark, handle_local_command, history_search,
+    latest_assistant_text, latest_reasoning, latest_session_for_dir, leader_action_for_key,
+    list_recent_sessions, live_tool_chips, load_mcp_config, login_command, logout_command,
+    mask_secret, open_kernel_db_ro, parse_cli_args, parse_hex_color, parse_part_data,
+    parse_prompt_summary, parse_ui_config, recent_input_history, relative_age, save_mcp_config,
+    slash_suggestions, strip_ansi, user_mcp_config_path_from, AppConfig, AuthStatus, InputAction,
+    LeaderAction, McpServer, PartEvent, ToolChipStatus, KNOWN_DB_MIGRATIONS,
 };
 
 #[test]
@@ -848,7 +848,8 @@ fn fake_kernel_db(dir: &std::path::Path) -> PathBuf {
         "CREATE TABLE schema_migration (id TEXT PRIMARY KEY);
          CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_updated INTEGER);
          CREATE TABLE input_history (id TEXT PRIMARY KEY, text TEXT);
-         CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+         CREATE TABLE message (id TEXT PRIMARY KEY, data TEXT);
+         CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, message_id TEXT, data TEXT);
          CREATE TABLE tool_usage (id TEXT PRIMARY KEY, session_id TEXT, tool_name TEXT, \
           status TEXT, duration_ms INTEGER, cancelled_by_user INTEGER);",
     )
@@ -946,14 +947,25 @@ fn db_session_resolution_and_live_queries() {
 
     writer
         .execute_batch(
-            "INSERT INTO part VALUES ('p1', 'sess_new', \
+            "INSERT INTO message VALUES ('m_user', '{\"role\":\"user\"}');
+             INSERT INTO message VALUES ('m_asst', '{\"role\":\"assistant\"}');
+             INSERT INTO part VALUES ('p1', 'sess_new', 'm_asst', \
               '{\"type\":\"reasoning\",\"text\":\"  \\nScanning the repo\\nmore\"}');
-             INSERT INTO part VALUES ('p2', 'sess_new', '{\"type\":\"unknown-future\"}');",
+             INSERT INTO part VALUES ('p2', 'sess_new', 'm_asst', '{\"type\":\"unknown-future\"}');
+             INSERT INTO part VALUES ('p3', 'sess_new', 'm_user', \
+              '{\"type\":\"text\",\"text\":\"my prompt echo\"}');
+             INSERT INTO part VALUES ('p4', 'sess_new', 'm_asst', \
+              '{\"type\":\"text\",\"text\":\"the answer forming\"}');",
         )
         .unwrap();
     assert_eq!(
         latest_reasoning(&ro, "sess_new", baseline).unwrap(),
         Some("Scanning the repo".to_string())
+    );
+    // Only the assistant text part is returned; the user's echo is excluded.
+    assert_eq!(
+        latest_assistant_text(&ro, "sess_new", baseline).unwrap(),
+        Some("the answer forming".to_string())
     );
 }
 

@@ -2345,6 +2345,33 @@ pub fn latest_reasoning(
     Ok(None)
 }
 
+/// The newest ASSISTANT text part past the baseline — the answer forming.
+/// Joins to `message` so the user's own prompt echo (a `user` text part) is
+/// excluded. In multi-step turns each step's text lands progressively; a
+/// single-step pure-text turn only appears at the very end (kernel writes
+/// body text whole, not per token). Run-only: never enters the transcript.
+pub fn latest_assistant_text(
+    conn: &Connection,
+    session_id: &str,
+    baseline: DbBaseline,
+) -> Result<Option<String>> {
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT p.data FROM part p JOIN message m ON m.id = p.message_id \
+             WHERE p.session_id = ?1 AND p.rowid > ?2 \
+             AND json_extract(m.data, '$.role') = 'assistant' \
+             AND json_extract(p.data, '$.type') = 'text' \
+             ORDER BY p.rowid DESC LIMIT 1",
+            rusqlite::params![session_id, baseline.part_rowid],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(text.and_then(|data| match parse_part_data(&data) {
+        Some(PartEvent::Text(body)) if !body.trim().is_empty() => Some(body),
+        _ => None,
+    }))
+}
+
 // ---- prompt --json summary ------------------------------------------------
 
 /// End-of-run summary object printed by `zcode --prompt --json` (one block,

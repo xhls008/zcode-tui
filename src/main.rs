@@ -30,14 +30,14 @@ use zcode_tui::{
     classify_input, command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
     detect_auth_status, diff_line_role, env_is_headless, file_suggestions, fold_preview,
     format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
-    is_newer_version, kernel_db_path_from, latest_reasoning, latest_session_for_dir,
-    leader_action_for_key, list_recent_sessions, live_tool_chips, load_ui_config, login_command,
-    markdown_lines, open_kernel_db_ro, parse_cli_args, parse_prompt_summary, parse_stream_event,
-    parse_update_feed, parse_update_feed_url, prompt_command_for, recent_input_history,
-    relative_age, run_command, shorten_home, slash_suggestions, spawn_streaming_command,
-    wrap_display, AppConfig, AuthStatus, DbBaseline, DiffRole, InputAction, JobEvent, LeaderAction,
-    LiveToolChip, MdLineKind, SessionRow, SpanRole, StreamEvent, StreamingJob, ToolChipStatus,
-    UiConfig, UpdateFeed,
+    is_newer_version, kernel_db_path_from, latest_assistant_text, latest_reasoning,
+    latest_session_for_dir, leader_action_for_key, list_recent_sessions, live_tool_chips,
+    load_ui_config, login_command, markdown_lines, open_kernel_db_ro, parse_cli_args,
+    parse_prompt_summary, parse_stream_event, parse_update_feed, parse_update_feed_url,
+    prompt_command_for, recent_input_history, relative_age, run_command, shorten_home,
+    slash_suggestions, spawn_streaming_command, wrap_display, AppConfig, AuthStatus, DbBaseline,
+    DiffRole, InputAction, JobEvent, LeaderAction, LiveToolChip, MdLineKind, SessionRow, SpanRole,
+    StreamEvent, StreamingJob, ToolChipStatus, UiConfig, UpdateFeed,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -476,6 +476,8 @@ struct LiveProgress {
     baseline: DbBaseline,
     chips: Vec<LiveToolChip>,
     reasoning: Option<String>,
+    /// Latest assistant text as it forms (progressive in multi-step turns).
+    text: Option<String>,
 }
 
 struct ActiveJob {
@@ -1178,6 +1180,7 @@ impl UiState {
             baseline: db_baseline(&conn),
             chips: Vec::new(),
             reasoning: None,
+            text: None,
         })
     }
 
@@ -1211,6 +1214,9 @@ impl UiState {
         }
         if let Ok(Some(reasoning)) = latest_reasoning(&conn, &session_id, live.baseline) {
             live.reasoning = Some(reasoning);
+        }
+        if let Ok(text) = latest_assistant_text(&conn, &session_id, live.baseline) {
+            live.text = text;
         }
     }
 
@@ -1909,8 +1915,12 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     }
 }
 
-/// Run-only work panel above the composer: tool chips plus the newest
-/// reasoning line, gone the moment the job finalizes.
+/// Max lines of forming assistant text shown in the run-only work panel.
+const LIVE_TEXT_TAIL: usize = 4;
+
+/// Run-only work panel above the composer: tool chips, the newest reasoning
+/// line, and the tail of the assistant text as it forms — all gone the
+/// moment the job finalizes (the authoritative reply lands in the transcript).
 fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
     let Some(active) = &state.job else {
         return Vec::new();
@@ -1954,6 +1964,19 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
     }
     if let Some(reasoning) = &live.reasoning {
         lines.push(Line::from(Span::styled(format!(" {reasoning}"), t.dim())));
+    }
+    // The answer forming, tail-first so the newest content stays in view.
+    if let Some(text) = &live.text {
+        let tail: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .rev()
+            .take(LIVE_TEXT_TAIL)
+            .collect();
+        for line in tail.into_iter().rev() {
+            let clipped: String = line.chars().take(120).collect();
+            lines.push(Line::from(Span::styled(format!(" {clipped}"), t.text())));
+        }
     }
     lines
 }
