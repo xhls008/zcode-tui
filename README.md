@@ -10,6 +10,15 @@ Kimi 有 TUI，Codex 有 TUI，Claude Code 有 TUI。ZCode 都发布了，Linux 
 
 这不是 ZCode 官方 TUI，也不伪装成官方实现。它是一个实用的终端壳：普通输入走官方 `zcode --prompt`，常用 slash 命令、MCP 配置、shell escape、命令面板和编辑器工作流在本地补齐。
 
+## 项目主题
+
+官方 Linux 包把 `tui` 命令写进 help，却没有把 terminal TUI runtime 一起交付。
+这个项目的主题很简单：**官方不干，那就自己造**。
+
+它不追求复刻桌面端，也不等一个不知道何时补齐的 `@zcode/tui`。目标是给 SSH、
+tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界面：少一点发布会式
+想象，多一点能跑、能补全、能流式输出、能接住日常工作的工程实现。
+
 ## 功能
 
 设计参考了 Claude Code、Codex CLI、Gemini CLI、OpenCode、Crush 的使用习惯，
@@ -290,8 +299,9 @@ ZCODE_FORCE_SYSTEM_NODE      wrapper：置 1 强制用系统 Node 运行内核
 未知键静默忽略，配置永远不会阻止启动）：
 
 ```text
-# 主题 token 覆盖（十六进制颜色）：accent accent_dim text dim good bad
-# frame code_bg band_bg brand brand_dim
+# 主题 token 覆盖。默认是 GLM 蓝 + 冷灰终端风；官方不提供 TUI 主题，
+# 这里就把颜色控制权留给终端用户。
+# 可配置 token：accent accent_dim text dim good bad frame code_bg band_bg brand brand_dim
 accent = #6088ff
 # 关闭鼠标捕获
 mouse = off
