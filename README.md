@@ -2,7 +2,7 @@
 
 [中文](README.md) | [English](README.en.md) | [Releases](https://github.com/xhls008/zcode-tui/releases) | [Design](docs/2026-07-04-design.md)
 
-![zcode-tui terminal-first fallback TUI](assets/zcode-tui-terminal-first.png)
+![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
 
 `zcode-tui` 是一个 **Rust 写的 ZCode 终端 TUI fallback**，专门兜住官方 Linux
 包缺少 `@zcode/tui` 的尴尬空洞。它面向 SSH、tmux、无桌面服务器和纯键盘

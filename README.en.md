@@ -2,7 +2,7 @@
 
 [Chinese](README.md) | [English](README.en.md) | [Releases](https://github.com/xhls008/zcode-tui/releases) | [Design](docs/2026-07-04-design.md)
 
-![zcode-tui terminal-first fallback TUI](assets/zcode-tui-terminal-first.png)
+![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
 
 `zcode-tui` is a Rust terminal-first fallback TUI for ZCode on Linux. It exists
 for the gap where the official Linux package exposes a `tui` command, but does
