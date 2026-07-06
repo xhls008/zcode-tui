@@ -1,14 +1,15 @@
 # zcode-tui
 
-![ZCode 发布了，TUI 呢？](assets/zcode-no-tui-satire.png)
+[中文](README.md) | [English](README.en.md) | [Releases](https://github.com/xhls008/zcode-tui/releases) | [Design](docs/2026-07-04-design.md)
 
-看到 ZCode 发布了，兴冲冲下载 Linux beta，结果包里主打的是桌面版；直接运行 `zcode`，想要一个像 Codex、Claude Code、Kimi Code 那样能在终端里干活的 TUI，结果没有。CLI help 里写着 `tui`，真敲 `zcode tui` 又提示缺 `@zcode/tui`。这体验就像菜单上写着牛肉面，端上来一碗热水，还问你是不是已经闻到香味了。
+![zcode-tui terminal-first fallback TUI](assets/zcode-tui-terminal-first.png)
 
-![菜单写着牛肉面，端上来一碗热水](assets/beef-noodle-hot-water-satire.png)
+`zcode-tui` 是一个 **Rust 写的 ZCode 终端 TUI fallback**，专门兜住官方 Linux
+包缺少 `@zcode/tui` 的尴尬空洞。它面向 SSH、tmux、无桌面服务器和纯键盘
+工作流：普通输入走官方 `zcode --prompt`，常用 slash 命令、MCP 配置、
+shell escape、命令面板、会话选择、流式输出和编辑器工作流在本地补齐。
 
-Kimi 有 TUI，Codex 有 TUI，Claude Code 有 TUI。ZCode 都发布了，Linux 用户想在终端里直接开干，竟然还要自己补一层。那就补：这个项目是一个 **Rust 写的 ZCode 终端 TUI fallback**，专门兜住官方 Linux 包缺少 `@zcode/tui` 的尴尬空洞。
-
-这不是 ZCode 官方 TUI，也不伪装成官方实现。它是一个实用的终端壳：普通输入走官方 `zcode --prompt`，常用 slash 命令、MCP 配置、shell escape、命令面板和编辑器工作流在本地补齐。
+这不是 ZCode 官方 TUI，也不伪装成官方实现。它是一个实用的终端壳。
 
 ## 项目主题
 
@@ -323,8 +324,6 @@ mouse = off
 
 这个 fallback 没有重建 ZCode 缺失的官方 `@zcode/tui` 包，也没有 ZCode 官方 TUI 可能拥有的内部实时会话模型。它做的是一件朴素但有用的事：读输入、分发 slash 命令、调用官方 CLI 路径、展示输出。
 
-朴素归朴素，至少不会让 Linux 用户看到 `tui` 两个字后只能对着桌面版发呆。
-
 ## 开发
 
 ```bash
@@ -332,6 +331,23 @@ cargo fmt
 cargo test
 cargo clippy --all-targets --all-features
 ```
+
+## 背景与吐槽
+
+看到 ZCode 发布了，兴冲冲下载 Linux beta，结果包里主打的是桌面版；直接运行
+`zcode`，想要一个像 Codex、Claude Code、Kimi Code 那样能在终端里干活的
+TUI，结果没有。CLI help 里写着 `tui`，真敲 `zcode tui` 又提示缺 `@zcode/tui`。
+
+![ZCode 发布了，TUI 呢？](assets/zcode-no-tui-satire.png)
+
+Kimi 有 TUI，Codex 有 TUI，Claude Code 有 TUI。ZCode 都发布了，Linux 用户
+想在终端里直接开干，竟然还要自己补一层。那就补。
+
+这体验就像菜单上写着牛肉面，端上来一碗热水，还问你是不是已经闻到香味了。
+
+![菜单写着牛肉面，端上来一碗热水](assets/beef-noodle-hot-water-satire.png)
+
+朴素归朴素，至少不会让 Linux 用户看到 `tui` 两个字后只能对着桌面版发呆。
 
 ## License
 
