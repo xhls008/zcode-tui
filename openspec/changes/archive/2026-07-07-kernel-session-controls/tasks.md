@@ -12,7 +12,7 @@
 - [x] 2.1 UiState 加 `interaction: Option<PendingInteraction>`(request 数据 + 最新信封 id + 选中项)与按 requestId 的已应答集合;`pump_app_turn` 分派 ServerRequest:新 requestId 弹浮层,重发只更新信封 id,已应答静默丢弃——单测(纯逻辑部分):去重状态机
 - [x] 2.2 浮层渲染(复用 session-picker 覆盖层模式):prompt/question 文案 + options 列表(label + description),↑↓ 选择、Enter 应答、Esc 拒绝;浮层打开时流式渲染继续
 - [x] 2.3 Enter 应答:发 encode_interaction_reply(最新信封 id),关浮层,记入已应答;按 1.4 结论补 approve 后续动作(如需要:setMode + 续跑)
-- [ ] 2.4 Esc 拒绝:按 1.4 结论应答拒绝值;无协议级拒绝则关浮层 + session/stop 走既有取消/drain 路径——pty 冒烟:plan 模式写文件 prompt → 浮层出现(pyte screen_seen)→ Esc 后回合不挂起
+- [x] 2.4 Esc 拒绝:按 1.4 结论应答拒绝值;无协议级拒绝则关浮层 + session/stop 走既有取消/drain 路径——pty 冒烟:plan 模式写文件 prompt → 浮层出现(pyte screen_seen)→ Esc 后回合不挂起
 
 ## 3. 会话控制命令(main.rs + lib.rs 参数构造)
 
@@ -22,15 +22,15 @@
 - [x] 3.4 `/think`:在 available 档位间切换发 setThoughtLevel;回显以推送为准
 - [x] 3.5 `/compact`:发 compact,状态栏 compacting,完成后水位刷新;≥80% 水位提示文案加 /compact 选项
 - [x] 3.6 /mode 与 Shift+Tab:app-server 会话活跃时改发 setMode(即刻生效),否则保持既有 CLI 参数行为;slash 补全与 palette 收录新命令
-- [ ] 3.7 pty 冒烟:app-server 下 Shift+Tab 切 plan → 状态栏回显(screen_seen);/compact 后水位变化
+- [x] 3.7 pty 冒烟:app-server 下 Shift+Tab 切 plan → 状态栏回显(screen_seen);/compact 后水位变化
 
 ## 4. Steer 中途转向(main.rs)
 
 - [x] 4.1 handle_key Enter 分支:`app_turn.is_some()` 时非空输入走 session/steer(User 条目落 transcript 标注转向);app_connect/app_draining 期间保持排队——单测:路由条件
 - [x] 4.2 steer 错误响应(按请求 id 关联)→ 提示 + 该输入退回排队,回合不中断
-- [ ] 4.3 pty 冒烟:流式回合中输入第二条指令 → 不出现 "queued",转向输入落 transcript
+- [x] 4.3 pty 冒烟:流式回合中输入第二条指令 → 不出现 "queued",转向输入落 transcript
 
 ## 5. 收尾
 
 - [x] 5.1 README(命令表 + 环境变量段)与 CHANGELOG 更新;/help 文案
-- [ ] 5.2 全量门禁:cargo fmt --check / clippy -D warnings / cargo test / pty 冒烟 30+ 项全绿;./install.sh 部署
+- [x] 5.2 全量门禁:cargo fmt --check / clippy -D warnings / cargo test / pty 冒烟 30+ 项全绿;./install.sh 部署
