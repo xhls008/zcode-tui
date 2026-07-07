@@ -163,7 +163,9 @@ bash install.sh --no-build
 ```
 
 它会把 release 二进制装到 `~/.local/bin/zcode-tui`，并生成 `~/.local/bin/zcode`
-wrapper（带管理标记，重复运行幂等；已存在的非托管 wrapper 会先备份）。
+wrapper（带管理标记，重复运行幂等；已存在的非托管 wrapper 会先备份）。托管
+wrapper 默认给 fallback TUI 打开 app-server 真流式；需要回到经典 `--prompt`
+路径时可 `ZCODE_TUI_APP_SERVER=0 zcode`。
 其他用法：
 
 ```bash
@@ -317,7 +319,8 @@ ZCODE_TUI_APP_SERVER         置 1/true/on 启用试验性真流式（走 zcode
                              app-server，逐 token 流式；失败无缝降级回
                              --prompt）。工具权限确认浮层、/model /think
                              /compact、/mode 即刻切换与 steer 中途转向
-                             都跑在这条路径上。默认关闭
+                             都跑在这条路径上。直接运行 zcode-tui 时默认关闭；
+                             install.sh 生成的 zcode wrapper 默认打开（设 0 关闭）
 ZCODE_API_KEY 等             /auth 检测的 API key 环境变量链
 ZCODE_TUI_NO_MOUSE           置 1 关闭鼠标捕获
 ZCODE_TUI_SKYLINE            欢迎页 ZCODE logo 渲染：默认探测终端图形协议

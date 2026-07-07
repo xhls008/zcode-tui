@@ -171,7 +171,10 @@ APP_DIR="$(find_app_dir)" || APP_DIR=""
 
 if [ -z "$APP_DIR" ]; then
     if $wants_tui && [ -x "$FALLBACK_TUI" ]; then
-        exec env ZCODE_TUI_ZCODE_BIN="$0" "$FALLBACK_TUI" "$@"
+        exec env \
+            ZCODE_TUI_ZCODE_BIN="$0" \
+            ZCODE_TUI_APP_SERVER="${ZCODE_TUI_APP_SERVER:-1}" \
+            "$FALLBACK_TUI" "$@"
     fi
     echo "zcode: ZCode CLI kernel not found (checked \$ZCODE_APP, /opt/ZCode, ~/.local/opt/zcode/*/opt/ZCode)" >&2
     exit 127
@@ -216,7 +219,10 @@ if $wants_tui && [ -x "$FALLBACK_TUI" ]; then
     # terminal over; a broken import means the package still lacks it.
     if ! (cd "$(dirname "$ZCODE_CJS")" &&
         run_node --input-type=module -e "import('@zcode/tui').then(()=>process.exit(0),()=>process.exit(3))" >/dev/null 2>&1); then
-        exec env ZCODE_TUI_ZCODE_BIN="$0" "$FALLBACK_TUI" "$@"
+        exec env \
+            ZCODE_TUI_ZCODE_BIN="$0" \
+            ZCODE_TUI_APP_SERVER="${ZCODE_TUI_APP_SERVER:-1}" \
+            "$FALLBACK_TUI" "$@"
     fi
 fi
 

@@ -125,6 +125,9 @@ bash install.sh --no-build
 
 The installer builds the release binary, installs it to
 `~/.local/bin/zcode-tui`, and installs a managed `~/.local/bin/zcode` wrapper.
+The managed wrapper enables app-server true streaming for the fallback TUI by
+default; use `ZCODE_TUI_APP_SERVER=0 zcode` to force the classic `--prompt`
+path.
 
 Manual build:
 
