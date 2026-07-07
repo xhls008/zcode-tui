@@ -8,13 +8,17 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ### 新增(内核会话控制面,openspec 变更 kernel-session-controls)
 
-- **工具权限确认**:app-server 路径接住内核的服务器→客户端请求
-  `interaction/requestUserInput`(字符串信封 id,同 requestId 退避重发,
-  全部 2026-07-07 实测钉死)。plan 模式下被门禁的工具弹**确认浮层**
-  (↑↓ 选项、Enter 应答、Esc 拒绝=停止回合);plan_approval 批准后 TUI
-  自动 setMode(build) 并队列续跑提示(实测内核不自行翻模式/续跑)。
-  **同时修复**:此前这类请求被解码层当垃圾行丢弃,plan 模式回合挂到
-  600s 兜底。
+- **工具权限确认**:app-server 路径接住内核的**两种**服务器→客户端请求
+  (字符串信封 id,同 requestId 退避重发,全部 2026-07-07 实测钉死):
+  `interaction/requestUserInput`(plan 审批,answers 形状应答)与
+  `interaction/requestPermission`(**build 模式下有副作用的工具如 Write**,
+  应答为所选 option 的 response 原样——内核 schema strict)。确认浮层
+  ↑↓ 选项、Enter 应答、Esc 拒绝(permission 走协议级 deny、回合继续;
+  plan 审批无拒绝项则 session/stop);plan_approval 批准后 TUI 自动
+  setMode(build) 并队列续跑提示(实测内核不自行翻模式/续跑);permission
+  批准后工具在**同一回合**内继续执行。**同时修复**:此前这类请求被解码层
+  当垃圾行丢弃——**流式路径默认(build)模式下任何写文件的回合都会挂到
+  600s 兜底**,plan 模式同理。
 - **/model**:浮层列出内核上报的可用模型(state 推送的
   `model.available[]`),Enter 发 `session/setModel`;当前模型带 ● 标记。
 - **/think**:在内核上报的思考级别间循环(`session/setThoughtLevel`,

@@ -47,7 +47,7 @@ use zcode_tui::{
     AppServerConn, AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, DbBaseline,
     DiffRole, InputAction, InteractionRequest, JobEvent, LeaderAction, LiveToolChip, MdLineKind,
     SessionControls, SessionRow, SkylineMode, SpanRole, StreamEvent, StreamingJob, ToolChipStatus,
-    TurnDelta, UiConfig, UpdateFeed, INTERACTION_METHOD, SKYLINE_LOGO_W,
+    TurnDelta, UiConfig, UpdateFeed, SKYLINE_LOGO_W,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -2039,19 +2039,17 @@ impl UiState {
         }
     }
 
-    /// Dispatch a server→client request. Only the interaction (permission)
-    /// method is understood; anything else stays unanswered — the kernel's
-    /// retry keeps it alive for a future, more capable client.
+    /// Dispatch a server→client request. Both interaction methods (user
+    /// input / tool permission) are understood; anything else stays
+    /// unanswered — the kernel's retry keeps it alive for a future, more
+    /// capable client.
     fn on_server_request(
         &mut self,
         id: serde_json::Value,
         method: &str,
         params: &serde_json::Value,
     ) {
-        if method != INTERACTION_METHOD {
-            return;
-        }
-        let Some(request) = parse_interaction_request(params) else {
+        let Some(request) = parse_interaction_request(method, params) else {
             return;
         };
         if self.interaction_done.contains(&request.request_id) {
@@ -2231,32 +2229,24 @@ impl UiState {
         None
     }
 
-    /// Answer the pending interaction with the selected option (any further
-    /// questions get their first option — observed payloads carry exactly
-    /// one). Replying stops the kernel's re-send loop; the turn then
-    /// finalizes through the normal event flow.
-    fn answer_interaction(&mut self) {
+    /// Answer the pending interaction with the option at `selected`.
+    /// Replying stops the kernel's re-send loop; a permission approval lets
+    /// the gated tool run within the SAME turn, a plan approval ends the
+    /// turn (continuation handled below).
+    fn answer_interaction_with(&mut self, selected: usize) {
         let Some(pending) = self.interaction.take() else {
             return;
         };
         let request = pending.request;
-        let answers: Vec<(String, String)> = request
-            .questions
-            .iter()
-            .enumerate()
-            .map(|(index, question)| {
-                let pick = if index == 0 {
-                    pending.selected.min(question.options.len() - 1)
-                } else {
-                    0
-                };
-                (
-                    question.header.clone(),
-                    question.options[pick].value.clone(),
-                )
-            })
-            .collect();
-        let line = encode_interaction_reply(&pending.envelope_id, &request.request_id, &answers);
+        let Some(line) = encode_interaction_reply(&pending.envelope_id, &request, selected) else {
+            // Malformed selection/payload: leave open (kernel keeps retrying).
+            self.interaction = Some(PendingInteraction {
+                request,
+                envelope_id: pending.envelope_id,
+                selected: 0,
+            });
+            return;
+        };
         let sent = self
             .app_conn
             .as_mut()
@@ -2265,7 +2255,12 @@ impl UiState {
         match sent {
             Ok(()) => {
                 self.interaction_done.insert(request.request_id.clone());
-                let value = answers.first().map(|(_, v)| v.clone()).unwrap_or_default();
+                let value = request
+                    .questions
+                    .first()
+                    .and_then(|q| q.options.get(selected))
+                    .map(|o| o.value.clone())
+                    .unwrap_or_default();
                 self.push_system(&format!("{}: {}", request.tool_name, value));
                 self.status = format!("answered ({value})");
                 // plan_approval + approve: the kernel neither flips the mode
@@ -2291,10 +2286,21 @@ impl UiState {
         }
     }
 
-    /// Esc on the approval overlay. The protocol offers no decline option
-    /// (observed options carry only "approve"), so declining stops the turn —
-    /// the existing cancel path sends session/stop and drains the tail.
+    fn answer_interaction(&mut self) {
+        if let Some(pending) = &self.interaction {
+            self.answer_interaction_with(pending.selected);
+        }
+    }
+
+    /// Esc on the approval overlay. Permission requests carry a protocol-
+    /// level `deny` option — answer it and let the turn continue (the model
+    /// reacts to the denial). Plan approvals offer no decline option, so
+    /// declining stops the turn (session/stop + drain).
     fn decline_interaction(&mut self) {
+        if let Some(deny) = self.interaction.as_ref().and_then(|p| p.request.deny_index) {
+            self.answer_interaction_with(deny);
+            return;
+        }
         let Some(pending) = self.interaction.take() else {
             return;
         };

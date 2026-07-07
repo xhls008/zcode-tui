@@ -418,6 +418,30 @@ check("s15: steer marker in transcript", "steering the running turn" in plain)
 check("s15: input not queued", not screen_seen(raw, "queued ("))
 check("s15: turn completed after steer", screen_seen(raw, "done ("))
 
+# ---- scenario 16: build-mode Write approval (permission request) ----
+# Default (build) mode gates side-effect tools behind
+# interaction/requestPermission (options with ready-made response objects).
+# Enter approves "Allow once" and the Write must land within the SAME turn.
+print("== scenario 16: build-mode Write approval (app-server) ==", flush=True)
+wperm_dir = tempfile.mkdtemp(prefix="zcode-smoke-wperm-")
+out = run_pty(
+    {"ZCODE_TUI_APP_SERVER": "1"}, wperm_dir,
+    [
+        (1.5, b"Create a file named w.txt containing hi. Just do it."),
+        (0.5, b"\r"),
+        (60.0, b"\r"),     # Enter: Allow once
+        (60.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=130,
+)
+plain = strip_ansi(out)
+raw = run_pty.last_raw
+check("s16: permission overlay with options", screen_seen(raw, "Allow once"))
+check("s16: approved and turn completed", screen_seen(raw, "done ("))
+check("s16: write landed after approval",
+      os.path.exists(os.path.join(wperm_dir, "w.txt")))
+
 failed = [name for name, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} checks passed", flush=True)
 sys.exit(1 if failed else 0)

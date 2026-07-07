@@ -1285,7 +1285,7 @@ fn decode_recognizes_server_requests_with_string_ids() {
 
 #[test]
 fn interaction_request_parses_pinned_payload_and_tolerates_gaps() {
-    use zcode_tui::parse_interaction_request;
+    use zcode_tui::{parse_interaction_request, INTERACTION_METHOD};
     // The exact payload shape captured live 2026-07-07 (kernel 0.15.0).
     let params = serde_json::json!({
         "input": {"plan": "Create the file `x.txt` with `hello`."},
@@ -1306,7 +1306,7 @@ fn interaction_request_parses_pinned_payload_and_tolerates_gaps() {
         "toolName": "ExitPlanMode",
         "turnId": "turn_3"
     });
-    let request = parse_interaction_request(&params).unwrap();
+    let request = parse_interaction_request(INTERACTION_METHOD, &params).unwrap();
     assert_eq!(request.request_id, "perm_3357106e");
     assert_eq!(request.tool_name, "ExitPlanMode");
     assert_eq!(request.interaction, "plan_approval");
@@ -1319,33 +1319,103 @@ fn interaction_request_parses_pinned_payload_and_tolerates_gaps() {
     assert_eq!(question.header, "Plan");
     assert_eq!(question.options[0].value, "approve");
     assert_eq!(question.options[0].label, "Approve");
+    // No protocol-level decline on plan approvals.
+    assert!(request.deny_index.is_none());
     // Missing requestId or questions/options -> None (leave unanswered; the
-    // kernel's retry keeps it alive for a client that understands it).
-    assert!(parse_interaction_request(&serde_json::json!({"questions": []})).is_none());
+    // kernel's retry keeps it alive for a client that understands it). An
+    // unknown method is never parsed.
+    let m = INTERACTION_METHOD;
+    assert!(parse_interaction_request(m, &serde_json::json!({"questions": []})).is_none());
     assert!(
-        parse_interaction_request(&serde_json::json!({"requestId": "p", "questions": []}))
+        parse_interaction_request(m, &serde_json::json!({"requestId": "p", "questions": []}))
             .is_none()
     );
     assert!(parse_interaction_request(
+        m,
         &serde_json::json!({"requestId": "p", "questions": [{"header": "H", "options": []}]})
     )
     .is_none());
+    assert!(parse_interaction_request("interaction/other", &params).is_none());
 }
 
 #[test]
 fn interaction_reply_echoes_envelope_id_verbatim() {
-    use zcode_tui::encode_interaction_reply;
-    let line = encode_interaction_reply(
-        &serde_json::json!("server-3"),
-        "perm_9",
-        &[("Plan".to_string(), "approve".to_string())],
-    );
+    use zcode_tui::{encode_interaction_reply, parse_interaction_request, INTERACTION_METHOD};
+    let params = serde_json::json!({
+        "prompt": "Tool ExitPlanMode requires user interaction",
+        "questions": [{
+            "header": "Plan",
+            "options": [{"label": "Approve", "value": "approve"}],
+            "question": "Review this implementation plan."
+        }],
+        "requestId": "perm_9",
+        "toolName": "ExitPlanMode"
+    });
+    let request = parse_interaction_request(INTERACTION_METHOD, &params).unwrap();
+    let line = encode_interaction_reply(&serde_json::json!("server-3"), &request, 0).unwrap();
     let v: serde_json::Value = serde_json::from_str(&line).unwrap();
     // The kernel keys the reply on its own envelope id — echoed as a STRING.
     assert_eq!(v["id"], "server-3");
     assert_eq!(v["result"]["requestId"], "perm_9");
     assert_eq!(v["result"]["answers"]["Plan"], "approve");
     assert!(!line.contains('\n'));
+    // Out-of-bounds selection -> None (never sends a malformed reply).
+    assert!(encode_interaction_reply(&serde_json::json!("server-3"), &request, 5).is_none());
+}
+
+#[test]
+fn permission_request_parses_options_and_replies_response_verbatim() {
+    use zcode_tui::{encode_interaction_reply, parse_interaction_request, PERMISSION_METHOD};
+    // Shape captured live 2026-07-07: a build-mode Write triggers
+    // interaction/requestPermission with flat options carrying ready-made
+    // response objects; the kernel's reply schema is STRICT — the result must
+    // be the chosen option's `response` verbatim, nothing added.
+    let params = serde_json::json!({
+        "input": {"file_path": "/tmp/w.txt", "content": "hi"},
+        "reason": "Tool has side effects and requires approval",
+        "requestId": "perm_6ca1a00c",
+        "riskLevel": "medium",
+        "sessionId": "sess_1",
+        "options": [
+            {"kind": "allow_once", "name": "Allow once", "optionId": "allow_once",
+             "response": {"decision": "allow", "reason": "Approved once"}},
+            {"description": "Do not ask again for matching requests in this project",
+             "kind": "allow_always", "name": "Always allow in this project",
+             "optionId": "allow_project",
+             "response": {"decision": "allow", "permissionUpdates": [], "reason": "ok"}},
+            {"kind": "deny", "name": "Deny", "optionId": "deny",
+             "response": {"decision": "deny", "reason": "Denied"}}
+        ],
+        "toolCallId": "call_d798",
+        "toolName": "Write",
+        "turnId": "turn_1096"
+    });
+    let request = parse_interaction_request(PERMISSION_METHOD, &params).unwrap();
+    assert_eq!(request.request_id, "perm_6ca1a00c");
+    assert_eq!(request.tool_name, "Write");
+    assert_eq!(request.interaction, "permission");
+    assert_eq!(request.questions.len(), 1);
+    let question = &request.questions[0];
+    assert_eq!(question.options.len(), 3);
+    assert_eq!(question.options[0].label, "Allow once");
+    // The Write target shows in the condensed question line.
+    assert!(question.question.contains("Write"));
+    assert!(question.question.contains("w.txt"));
+    // Esc answers the protocol-level deny option.
+    assert_eq!(request.deny_index, Some(2));
+    // Approve reply: result == the option's response object, nothing more.
+    let line = encode_interaction_reply(&serde_json::json!("server-1"), &request, 0).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["id"], "server-1");
+    assert_eq!(
+        v["result"],
+        serde_json::json!({"decision": "allow", "reason": "Approved once"})
+    );
+    assert!(v["result"].get("requestId").is_none());
+    // Deny reply mirrors the deny option's response.
+    let line = encode_interaction_reply(&serde_json::json!("server-2"), &request, 2).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["result"]["decision"], "deny");
 }
 
 #[test]

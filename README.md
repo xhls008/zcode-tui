@@ -76,9 +76,18 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   补齐上面 db 轮询对单轮无中间态的空缺。默认关闭；任一环节失败（起不动 /
   握手超时 / schema 不符 / 断连）→ 本进程永久无缝降级回 `--prompt` + 一条
   dim 提示，当前 prompt 用 `--prompt` 重试一次，用户永不卡死。
+- **工具权限确认（app-server 路径）**：build 模式下有副作用的工具（写文件等）
+  与 plan 模式的计划审批会弹**确认浮层**（↑↓ 选项 / Enter 应答 / Esc 拒绝），
+  批准后工具同回合继续执行；plan 计划批准后自动切 build 并续跑。
+  edit/plan/build 模式的权限门禁在流式路径上**真正生效**（不再是 headless
+  一律 yolo）。
+- **会话控制（app-server 路径）**：`/model` 浮层切换模型、`/think` 循环思考
+  级别、`/compact` 原地压缩上下文保住会话、`/mode`/Shift+Tab 即刻切换活跃
+  会话的权限模式；**流式回合进行中直接输入文本＝转向（steer）当前回合**，
+  不用取消重来。
 - **上下文水位**：prompt 通道用 `--json` 总结对象作为权威结果（response 走
   markdown 渲染，解析失败自动降级纯文本），状态栏常驻 `ctx 9k/200k (4%)`
-  用量显示，≥80% 提示 `/new`。
+  用量显示，≥80% 提示 `/compact` 或 `/new`。
 - **实时补全菜单**：输入 `/` 即弹出建议（前缀 > 子串 > 子序列模糊匹配），
   上下键选择、`Tab`/`Enter` 接受、`Esc` 关闭。
 - **`@文件` 提及**：输入 `@` 补全项目内路径（跳过 .git/target/node_modules）；
@@ -306,7 +315,9 @@ ZCODE_TUI_IDE_CMD            覆盖 /ide 启动的 IDE 命令
 ZCODE_TUI_NO_UPDATE_CHECK    置 1 关闭启动时的官方更新检测
 ZCODE_TUI_APP_SERVER         置 1/true/on 启用试验性真流式（走 zcode
                              app-server，逐 token 流式；失败无缝降级回
-                             --prompt）。默认关闭
+                             --prompt）。工具权限确认浮层、/model /think
+                             /compact、/mode 即刻切换与 steer 中途转向
+                             都跑在这条路径上。默认关闭
 ZCODE_API_KEY 等             /auth 检测的 API key 环境变量链
 ZCODE_TUI_NO_MOUSE           置 1 关闭鼠标捕获
 ZCODE_TUI_SKYLINE            欢迎页 ZCODE logo 渲染：默认探测终端图形协议

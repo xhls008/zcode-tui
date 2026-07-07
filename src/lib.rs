@@ -3096,15 +3096,34 @@ pub fn decode_app_message(line: &str) -> Option<AppServerMessage> {
     }
 }
 
-/// The method name of the kernel's user-interaction (permission) request.
+/// The kernel's user-input interaction request (plan approval): questions
+/// with options, answered as `{requestId, answers:{header:value}}`.
 pub const INTERACTION_METHOD: &str = "interaction/requestUserInput";
+/// The kernel's tool-permission request (gated side-effect tools, e.g. Write
+/// in build mode): flat options each carrying a ready-made `response` object,
+/// answered by echoing the chosen option's `response` VERBATIM (the kernel's
+/// result schema is strict — adding any key, even requestId, is rejected).
+pub const PERMISSION_METHOD: &str = "interaction/requestPermission";
 
-/// One selectable option of an interaction question.
+/// How the reply's `result` must be built — the two interaction methods use
+/// incompatible result schemas (both pinned live 2026-07-07).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionReply {
+    /// requestUserInput: `{"requestId":…, "answers":{<header>:<value>}}`.
+    Answers,
+    /// requestPermission: the chosen option's `response` object verbatim.
+    Permission,
+}
+
+/// One selectable option of an interaction request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractionOption {
     pub label: String,
+    /// Answer value (requestUserInput) or optionId (requestPermission).
     pub value: String,
     pub description: String,
+    /// requestPermission only: the pre-baked reply `result` for this option.
+    pub response: Option<serde_json::Value>,
 }
 
 /// One question of an interaction request. `header` doubles as the answer key
@@ -3116,36 +3135,52 @@ pub struct InteractionQuestion {
     pub options: Vec<InteractionOption>,
 }
 
-/// A parsed `interaction/requestUserInput` (kernel 0.15.0, pinned 2026-07-07):
-/// the kernel re-sends the same `request_id` under fresh envelope ids with
+/// A parsed interaction request (kernel 0.15.0, pinned 2026-07-07): the
+/// kernel re-sends the same `request_id` under fresh envelope ids with
 /// backoff until answered, so consumers must dedupe on `request_id`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InteractionRequest {
     pub request_id: String,
-    /// Top-line prompt, e.g. "Tool ExitPlanMode requires user interaction".
+    /// Top line, e.g. "Tool ExitPlanMode requires user interaction" or the
+    /// permission reason ("Tool has side effects and requires approval").
     pub prompt: String,
-    /// `schema.interaction`, e.g. "plan_approval".
+    /// `schema.interaction` (e.g. "plan_approval"), or "permission".
     pub interaction: String,
     pub tool_name: String,
     /// `input.plan` — the plan text under review (plan_approval).
     pub plan: Option<String>,
     pub questions: Vec<InteractionQuestion>,
+    pub reply: InteractionReply,
+    /// Index of a protocol-level decline option (permission `kind:"deny"`),
+    /// answered on Esc. None -> declining falls back to stopping the turn.
+    pub deny_index: Option<usize>,
 }
 
-/// Parse the params of an `interaction/requestUserInput` server request.
-/// Requires `requestId` and at least one question with at least one option
-/// (nothing to answer otherwise) — anything less returns None and the caller
-/// leaves the request unanswered (the kernel's retry keeps it alive for a
-/// future, more capable client).
-pub fn parse_interaction_request(params: &serde_json::Value) -> Option<InteractionRequest> {
+fn str_at(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Parse a server→client interaction request by method. Requires `requestId`
+/// and at least one answerable option — anything less returns None and the
+/// caller leaves the request unanswered (the kernel's retry keeps it alive
+/// for a future, more capable client).
+pub fn parse_interaction_request(
+    method: &str,
+    params: &serde_json::Value,
+) -> Option<InteractionRequest> {
+    match method {
+        INTERACTION_METHOD => parse_user_input_request(params),
+        PERMISSION_METHOD => parse_permission_request(params),
+        _ => None,
+    }
+}
+
+fn parse_user_input_request(params: &serde_json::Value) -> Option<InteractionRequest> {
     let request_id = params.get("requestId")?.as_str()?.to_string();
-    let str_at = |value: &serde_json::Value, key: &str| {
-        value
-            .get(key)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string()
-    };
     let questions: Vec<InteractionQuestion> = params
         .get("questions")?
         .as_array()?
@@ -3168,6 +3203,7 @@ pub fn parse_interaction_request(params: &serde_json::Value) -> Option<Interacti
                         },
                         value,
                         description: str_at(o, "description"),
+                        response: None,
                     })
                 })
                 .collect();
@@ -3198,26 +3234,111 @@ pub fn parse_interaction_request(params: &serde_json::Value) -> Option<Interacti
             .and_then(|v| v.as_str())
             .map(str::to_string),
         questions,
+        reply: InteractionReply::Answers,
+        deny_index: None,
     })
 }
 
-/// Encode the reply to a server→client interaction request as one compact
-/// JSON line. The envelope `id` is echoed back verbatim (string or number);
-/// `answers` maps each question's header to the chosen option value.
+fn parse_permission_request(params: &serde_json::Value) -> Option<InteractionRequest> {
+    let request_id = params.get("requestId")?.as_str()?.to_string();
+    let tool_name = str_at(params, "toolName");
+    let options: Vec<InteractionOption> = params
+        .get("options")?
+        .as_array()?
+        .iter()
+        .filter_map(|o| {
+            let option_id = o.get("optionId")?.as_str()?.to_string();
+            Some(InteractionOption {
+                label: {
+                    let name = str_at(o, "name");
+                    if name.is_empty() {
+                        option_id.clone()
+                    } else {
+                        name
+                    }
+                },
+                value: option_id,
+                description: str_at(o, "description"),
+                response: Some(o.get("response")?.clone()),
+            })
+        })
+        .collect();
+    if options.is_empty() {
+        return None;
+    }
+    let deny_index = params
+        .get("options")
+        .and_then(|v| v.as_array())
+        .and_then(|list| {
+            list.iter()
+                .position(|o| o.get("kind").and_then(|k| k.as_str()) == Some("deny"))
+        });
+    // What the tool wants to do, condensed: "Write  w.txt · hi (risk medium)".
+    let summary = params
+        .get("input")
+        .map(|input| tool_input_summary(&input.to_string()))
+        .unwrap_or_default();
+    let risk = str_at(params, "riskLevel");
+    let mut question = tool_name.clone();
+    if !summary.is_empty() {
+        question.push_str(&format!("  {summary}"));
+    }
+    if !risk.is_empty() {
+        question.push_str(&format!("  (risk {risk})"));
+    }
+    Some(InteractionRequest {
+        request_id,
+        prompt: str_at(params, "reason"),
+        interaction: "permission".to_string(),
+        tool_name,
+        plan: None,
+        questions: vec![InteractionQuestion {
+            header: String::new(),
+            question,
+            options,
+        }],
+        reply: InteractionReply::Permission,
+        deny_index,
+    })
+}
+
+/// Encode the reply for `selected` (an index into the first question's
+/// options) as one compact JSON line; the envelope `id` is echoed back
+/// verbatim (string or number). Returns None if `selected` is out of bounds
+/// or the option lacks its reply payload.
 pub fn encode_interaction_reply(
     envelope_id: &serde_json::Value,
-    request_id: &str,
-    answers: &[(String, String)],
-) -> String {
-    let mut map = serde_json::Map::new();
-    for (header, value) in answers {
-        map.insert(header.clone(), serde_json::Value::String(value.clone()));
-    }
-    serde_json::json!({
-        "id": envelope_id,
-        "result": { "requestId": request_id, "answers": serde_json::Value::Object(map) }
-    })
-    .to_string()
+    request: &InteractionRequest,
+    selected: usize,
+) -> Option<String> {
+    let result = match request.reply {
+        InteractionReply::Answers => {
+            // The selection answers the first question; any further questions
+            // get their first option (observed payloads carry exactly one).
+            let mut answers = serde_json::Map::new();
+            for (index, question) in request.questions.iter().enumerate() {
+                let pick = if index == 0 { selected } else { 0 };
+                let option = question.options.get(pick)?;
+                answers.insert(
+                    question.header.clone(),
+                    serde_json::Value::String(option.value.clone()),
+                );
+            }
+            serde_json::json!({
+                "requestId": request.request_id,
+                "answers": serde_json::Value::Object(answers),
+            })
+        }
+        // Strict kernel schema: the option's response object and NOTHING else.
+        InteractionReply::Permission => request
+            .questions
+            .first()?
+            .options
+            .get(selected)?
+            .response
+            .clone()?,
+    };
+    Some(serde_json::json!({ "id": envelope_id, "result": result }).to_string())
 }
 
 /// A compact one-line summary of a tool's JSON input, for the chip header:
