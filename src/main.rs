@@ -103,8 +103,7 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
     // Probe for a graphics protocol now that the alt-screen is active and
     // before the event loop reads stdin (ratatui-image queries via stdio).
     state.init_graphics_logo();
-    state.push_banner();
-    state.push_unauth_screen_if_needed();
+    state.push_startup_frame();
     let probe = spawn_startup_probe(zcode_bin.to_string());
 
     for prompt in state.config.initial_prompts.clone() {
@@ -778,14 +777,34 @@ impl UiState {
         self.auth_label = self.auth_status.short_label();
     }
 
+    /// Startup skeleton: a Kimi/Claude-style welcome card. Configured launches
+    /// keep the logo compact inside the card; unauthenticated launches append
+    /// the larger login guidance below it.
+    fn push_startup_frame(&mut self) {
+        self.push_banner();
+        if !self.auth_status.is_configured() {
+            self.push_unauth_screen_if_needed();
+        }
+    }
+
+    fn push_brand_logo_if_missing(&mut self) {
+        if self
+            .log
+            .iter()
+            .any(|entry| matches!(entry.kind, LogKind::Brand | LogKind::Logo))
+        {
+            return;
+        }
+        self.log.push(LogLine::new(LogKind::Brand, ZCODE_WORDMARK));
+    }
+
     /// Codex-style unauthenticated welcome: purple wordmark over the
-    /// skyline strip, then the three browser-free ways in. Startup only —
-    /// once configured, later launches never show it.
+    /// skyline strip, then the three browser-free ways in.
     fn push_unauth_screen_if_needed(&mut self) {
         if self.auth_status.is_configured() {
             return;
         }
-        self.log.push(LogLine::new(LogKind::Brand, ZCODE_WORDMARK));
+        self.push_brand_logo_if_missing();
         let headline = match &self.auth_status {
             AuthStatus::Partial { evidence } => format!(
                 "partially configured: {evidence} found, but the kernel still needs \
@@ -1183,7 +1202,7 @@ impl UiState {
         self.log.clear();
         self.unfolded.clear();
         self.scroll = 0;
-        self.push_banner();
+        self.push_startup_frame();
     }
 
     // ---- submit + jobs ---------------------------------------------------
@@ -2704,7 +2723,7 @@ impl UiState {
             "fresh".to_string()
         };
         format!(
-            ">_ 智谱 ZCODE ({version})\n\ndirectory: {cwd}\nmode: {}   /mode to change\nsession: {session}   /new to reset\nauth: {}   /login to sign in",
+            "╭───╮  Welcome to ZCODE! ({version})\n│ Z │  ZhiPU terminal TUI   /help for shortcuts\n╰───╯\n\ndirectory: {cwd}\nmode: {}   /mode to change\nsession: {session}   /new to reset\nauth: {}   /login to sign in",
             display_mode(&self.config),
             self.auth_label
         )
@@ -2852,33 +2871,47 @@ impl UiState {
             return;
         }
         let tip = build_update_tip(installed, feed, report.feed_base.as_deref());
-        let insert_at = banner_pos.map(|pos| pos + 1).unwrap_or(self.log.len());
-        self.log
-            .insert(insert_at, LogLine::new(LogKind::Logo, ZCODE_WORDMARK));
-        self.log
-            .insert(insert_at + 1, LogLine::new(LogKind::Tip, &tip));
-        // The probe can land mid-turn: two entries were just inserted near the
-        // top, so every live index that pointed at or past `insert_at` must
-        // shift by 2 — otherwise streamed text lands in the wrong entry (and a
-        // later remove() could delete the wrong one).
-        const INSERTED: usize = 2;
+        let logo_at = banner_pos.map(|pos| pos + 1).unwrap_or(self.log.len());
+        // Unauthenticated startup already shows a Brand logo after the banner.
+        // Reuse that slot for the update Logo, then insert only the Tip. Normal
+        // configured startup has only the compact avatar in the banner, so the
+        // update case inserts the big Logo + Tip here.
+        let (shift_at, inserted) = if matches!(
+            self.log.get(logo_at).map(|entry| entry.kind),
+            Some(LogKind::Brand | LogKind::Logo)
+        ) {
+            self.log[logo_at] = LogLine::new(LogKind::Logo, ZCODE_WORDMARK);
+            self.log
+                .insert(logo_at + 1, LogLine::new(LogKind::Tip, &tip));
+            (logo_at + 1, 1)
+        } else {
+            self.log
+                .insert(logo_at, LogLine::new(LogKind::Logo, ZCODE_WORDMARK));
+            self.log
+                .insert(logo_at + 1, LogLine::new(LogKind::Tip, &tip));
+            (logo_at, 2)
+        };
+        // The probe can land mid-turn: entries were just inserted near the top,
+        // so every live index that pointed at or past the insertion point must
+        // shift — otherwise streamed text lands in the wrong entry (and a later
+        // remove() could delete the wrong one).
         if let Some(turn) = &mut self.app_turn {
             if let Some(ti) = turn.text_index {
-                if ti >= insert_at {
-                    turn.text_index = Some(ti + INSERTED);
+                if ti >= shift_at {
+                    turn.text_index = Some(ti + inserted);
                 }
             }
         }
         if let Some(active) = &mut self.job {
-            if active.log_index >= insert_at {
-                active.log_index += INSERTED;
+            if active.log_index >= shift_at {
+                active.log_index += inserted;
             }
         }
         if !self.unfolded.is_empty() {
             self.unfolded = self
                 .unfolded
                 .iter()
-                .map(|&i| if i >= insert_at { i + INSERTED } else { i })
+                .map(|&i| if i >= shift_at { i + inserted } else { i })
                 .collect();
         }
         self.status = format!("update available: ZCode {}", feed.version);
@@ -3540,11 +3573,40 @@ fn md_style(theme: &Theme, kind: MdLineKind, role: SpanRole) -> Style {
     }
 }
 
-/// Style spans for one banner-box line: `>_ brand (versions)` on the first
-/// row, `key: value   /hint` rows below.
+/// Style spans for one banner-box line: compact logo/title rows first, then
+/// `key: value   /hint` rows below.
 fn banner_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
     if line.is_empty() {
         return Vec::new();
+    }
+    if let Some(rest) = line.strip_prefix("╭───╮  ") {
+        let mut spans = vec![Span::styled("╭───╮  ".to_string(), theme.brand_dim())];
+        match rest.split_once(" (") {
+            Some((name, tail)) => {
+                spans.push(Span::styled(name.to_string(), theme.accent().bold()));
+                spans.push(Span::styled(format!(" ({tail}"), theme.dim()));
+            }
+            None => spans.push(Span::styled(rest.to_string(), theme.accent().bold())),
+        }
+        return spans;
+    }
+    if let Some(rest) = line.strip_prefix("│ Z │  ") {
+        let mut spans = vec![
+            Span::styled("│ ".to_string(), theme.brand_dim()),
+            Span::styled("Z".to_string(), theme.brand().bold()),
+            Span::styled(" │  ".to_string(), theme.brand_dim()),
+        ];
+        match rest.split_once("   /") {
+            Some((name, hint)) => {
+                spans.push(Span::styled(name.to_string(), theme.text()));
+                spans.push(Span::styled(format!("   /{hint}"), theme.dim()));
+            }
+            None => spans.push(Span::styled(rest.to_string(), theme.text())),
+        }
+        return spans;
+    }
+    if line == "╰───╯" {
+        return vec![Span::styled(line.to_string(), theme.brand_dim())];
     }
     if let Some(rest) = line.strip_prefix(">_ ") {
         let mut spans = vec![Span::styled(">_ ".to_string(), theme.accent().bold())];

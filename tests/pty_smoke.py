@@ -113,6 +113,20 @@ def check(name, cond, detail=""):
           flush=True)
 
 
+# ---- scenario 0: configured startup shows compact Z avatar ----
+print("== scenario 0: startup compact Z avatar ==", flush=True)
+out = run_pty(
+    {}, SPIKE,
+    [
+        (1.5, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=15,
+)
+plain = strip_ansi(out)
+check("s0: startup welcome card shown", "Welcome to ZCODE" in plain)
+check("s0: startup compact Z avatar shown", "│ Z │" in plain)
+
 # ---- scenario 1: live tool chips + summary render + watermark + cancel ----
 print("== scenario 1: real prompt with live progress ==", flush=True)
 out = run_pty(
