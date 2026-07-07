@@ -2723,7 +2723,7 @@ impl UiState {
             "fresh".to_string()
         };
         format!(
-            "╭───╮  Welcome to ZCODE! ({version})\n│ Z │  ZhiPU terminal TUI   /help for shortcuts\n╰───╯\n\ndirectory: {cwd}\nmode: {}   /mode to change\nsession: {session}   /new to reset\nauth: {}   /login to sign in",
+            "╭─────╮  Welcome to ZCODE! ({version})\n│▀▀ ╱│  ZhiPU terminal TUI   /help for shortcuts\n│  ╱ │\n│╱ ▄▄│\n╰─────╯\n\ndirectory: {cwd}\nmode: {}   /mode to change\nsession: {session}   /new to reset\nauth: {}   /login to sign in",
             display_mode(&self.config),
             self.auth_label
         )
@@ -3579,8 +3579,12 @@ fn banner_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
     if line.is_empty() {
         return Vec::new();
     }
-    if let Some(rest) = line.strip_prefix("╭───╮  ") {
-        let mut spans = vec![Span::styled("╭───╮  ".to_string(), theme.brand_dim())];
+    if let Some(rest) = line.strip_prefix("╭─────╮  Welcome to ZCODE!") {
+        let mut spans = vec![
+            Span::styled("╭─────╮".to_string(), official_icon_frame(theme)),
+            Span::raw("  ".to_string()),
+        ];
+        let rest = format!("Welcome to ZCODE!{rest}");
         match rest.split_once(" (") {
             Some((name, tail)) => {
                 spans.push(Span::styled(name.to_string(), theme.accent().bold()));
@@ -3590,11 +3594,12 @@ fn banner_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
         }
         return spans;
     }
-    if let Some(rest) = line.strip_prefix("│ Z │  ") {
+    if let Some(rest) = line.strip_prefix("│▀▀ ╱│  ") {
         let mut spans = vec![
-            Span::styled("│ ".to_string(), theme.brand_dim()),
-            Span::styled("Z".to_string(), theme.brand().bold()),
-            Span::styled(" │  ".to_string(), theme.brand_dim()),
+            Span::styled("│".to_string(), official_icon_frame(theme)),
+            Span::styled("▀▀ ╱".to_string(), official_icon_mark(theme).bold()),
+            Span::styled("│".to_string(), official_icon_frame(theme)),
+            Span::raw("  ".to_string()),
         ];
         match rest.split_once("   /") {
             Some((name, hint)) => {
@@ -3605,8 +3610,22 @@ fn banner_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
         }
         return spans;
     }
-    if line == "╰───╯" {
-        return vec![Span::styled(line.to_string(), theme.brand_dim())];
+    if line == "│  ╱ │" {
+        return vec![
+            Span::styled("│".to_string(), official_icon_frame(theme)),
+            Span::styled("  ╱ ".to_string(), official_icon_mark(theme).bold()),
+            Span::styled("│".to_string(), official_icon_frame(theme)),
+        ];
+    }
+    if line == "│╱ ▄▄│" {
+        return vec![
+            Span::styled("│".to_string(), official_icon_frame(theme)),
+            Span::styled("╱ ▄▄".to_string(), official_icon_mark(theme).bold()),
+            Span::styled("│".to_string(), official_icon_frame(theme)),
+        ];
+    }
+    if line == "╰─────╯" {
+        return vec![Span::styled(line.to_string(), official_icon_frame(theme))];
     }
     if let Some(rest) = line.strip_prefix(">_ ") {
         let mut spans = vec![Span::styled(">_ ".to_string(), theme.accent().bold())];
@@ -3631,6 +3650,26 @@ fn banner_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
         return spans;
     }
     vec![Span::styled(line.to_string(), theme.text())]
+}
+
+fn official_icon_frame(theme: &Theme) -> Style {
+    if theme.plain {
+        Style::default()
+    } else {
+        Style::default()
+            .fg(Color::Rgb(78, 84, 96))
+            .bg(Color::Rgb(7, 9, 12))
+    }
+}
+
+fn official_icon_mark(theme: &Theme) -> Style {
+    if theme.plain {
+        Style::default()
+    } else {
+        Style::default()
+            .fg(Color::Rgb(245, 247, 250))
+            .bg(Color::Rgb(7, 9, 12))
+    }
 }
 
 /// Split a line into plain spans and accent-styled URL spans.
