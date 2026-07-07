@@ -464,9 +464,8 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
     match parts[0].as_str() {
         "exit" | "quit" => Ok(InputAction::Quit),
         "help" | "clear" | "editor" | "login" | "logout" | "auth" | "status" | "diff" | "ide"
-        | "sessions" | "mode" | "resume" | "new" | "model" | "think" | "compact" => {
-            Ok(InputAction::Local(parts))
-        }
+        | "sessions" | "mode" | "resume" | "new" | "model" | "think" | "compact" | "usage"
+        | "update" => Ok(InputAction::Local(parts)),
         "skills" => {
             let mut local = parts;
             if local.len() == 1 {
@@ -606,6 +605,16 @@ pub fn command_catalog() -> &'static [CommandSpec] {
         CommandSpec {
             command: "/think",
             summary: "cycle the thought level (app-server streaming path)",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/usage",
+            summary: "session + 7d/30d token usage (app-server streaming path)",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/update",
+            summary: "update the ZCode kernel from the official feed",
             route: "local",
         },
         CommandSpec {
@@ -1418,6 +1427,8 @@ pub fn help_text() -> &'static str {
   /model                       switch the session model (app-server path)
   /think                       cycle the thought level (app-server path)
   /compact                     compact the session context in place
+  /usage [7d|30d]              show session and period token usage
+  /update                      update the ZCode kernel from the official feed
   /resume [sess_id]            resume latest (bare) or a specific session
   /sessions                    pick a recent session from a list
   /new                         start a fresh session; context resets
@@ -2038,6 +2049,9 @@ pub fn shorten_home(path: &str, home: Option<&str>) -> String {
 pub struct UpdateFeed {
     pub version: String,
     pub deb_file: Option<String>,
+    /// The deb entry's sha512, base64-encoded as published in the feed —
+    /// verified before /update ever hands the file to dpkg.
+    pub deb_sha512: Option<String>,
     pub release_name: Option<String>,
 }
 
@@ -2058,6 +2072,10 @@ pub fn parse_update_feed_url(app_update_yml: &str) -> Option<String> {
 pub fn parse_update_feed(yaml: &str) -> Option<UpdateFeed> {
     let mut version = None;
     let mut deb_file = None;
+    let mut deb_sha512 = None;
+    // Armed after the deb's `- url:` line: the NEXT `sha512:` belongs to that
+    // files[] entry (electron-updater lists url/sha512/size per file).
+    let mut in_deb_entry = false;
     let mut release_name = None;
     for line in yaml.lines() {
         let trimmed = line.trim();
@@ -2066,15 +2084,22 @@ pub fn parse_update_feed(yaml: &str) -> Option<UpdateFeed> {
                 version = Some(value.trim().to_string());
             }
         }
-        if deb_file.is_none() {
-            let value = trimmed
-                .strip_prefix("- url:")
-                .or_else(|| trimmed.strip_prefix("url:"));
-            if let Some(value) = value {
-                let value = value.trim();
-                if value.ends_with(".deb") {
-                    deb_file = Some(value.to_string());
-                }
+        if let Some(value) = trimmed
+            .strip_prefix("- url:")
+            .or_else(|| trimmed.strip_prefix("url:"))
+        {
+            let value = value.trim();
+            if deb_file.is_none() && value.ends_with(".deb") {
+                deb_file = Some(value.to_string());
+                in_deb_entry = true;
+            } else {
+                in_deb_entry = false;
+            }
+        }
+        if in_deb_entry && deb_sha512.is_none() {
+            if let Some(value) = trimmed.strip_prefix("sha512:") {
+                deb_sha512 = Some(value.trim().to_string());
+                in_deb_entry = false;
             }
         }
         if release_name.is_none() {
@@ -2086,6 +2111,7 @@ pub fn parse_update_feed(yaml: &str) -> Option<UpdateFeed> {
     version.map(|version| UpdateFeed {
         version,
         deb_file,
+        deb_sha512,
         release_name,
     })
 }
@@ -2818,7 +2844,7 @@ pub fn load_ui_config() -> UiConfig {
         .unwrap_or_default()
 }
 
-// ---- app-server protocol client (experimental, ZCODE_TUI_APP_SERVER=1) ----
+// ---- app-server protocol client (default-on, ZCODE_TUI_APP_SERVER=0 opts out) ----
 //
 // The kernel's `app-server` is a newline-delimited JSON stdio protocol
 // (envelope {id, method, params}, NOT JSON-RPC — a `jsonrpc` key is
@@ -2891,6 +2917,241 @@ pub fn app_compact_params(session_id: &str) -> serde_json::Value {
 /// `session/steer` — inject input into the RUNNING turn (same shape as send).
 pub fn app_steer_params(session_id: &str, content: &str) -> serde_json::Value {
     serde_json::json!({ "sessionId": session_id, "content": content })
+}
+
+/// `session/resume` — reopen an existing session; the result is shaped like
+/// `session/create`'s (verified live: messages/projection/session/todos).
+pub fn app_resume_params(session_id: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id })
+}
+
+/// `session/usage` — per-session token breakdown.
+pub fn app_usage_params(session_id: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id })
+}
+
+/// `usage/stats` — period aggregate; kernel zod enum pins range to 7d|30d.
+pub fn usage_stats_params(range: &str) -> serde_json::Value {
+    serde_json::json!({ "range": range })
+}
+
+/// Parse a `session/list` result (`sessions[]{sessionId,title,workspace,
+/// updatedAt,status,…}`) into picker rows: current-`cwd` sessions first,
+/// then by recency — mirroring the db-backed `list_recent_sessions` order.
+/// Sessions still `running` get a marker suffix so the picker can show it.
+pub fn parse_session_list(result: &serde_json::Value, cwd: &str) -> Vec<SessionRow> {
+    let Some(sessions) = result.get("sessions").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(bool, SessionRow)> = sessions
+        .iter()
+        .filter_map(|s| {
+            let id = s.get("sessionId")?.as_str()?.to_string();
+            let directory = s
+                .pointer("/workspace/workspacePath")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let mut title = s
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if title.is_empty() {
+                title = directory.rsplit('/').next().unwrap_or_default().to_string();
+            }
+            if s.get("status").and_then(|v| v.as_str()) == Some("running") {
+                title.push_str("  · running");
+            }
+            let time_updated = s
+                .get("updatedAt")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            Some((
+                directory == cwd,
+                SessionRow {
+                    id,
+                    title,
+                    directory,
+                    time_updated,
+                },
+            ))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.time_updated.cmp(&a.1.time_updated)));
+    rows.into_iter().map(|(_, row)| row).collect()
+}
+
+/// Outcome of a `session/steer` request. The SUCCESS envelope's result is a
+/// discriminated union (kernel `FKr`): `{kind:"queued",…}` means the input
+/// entered the running turn; `{kind:"rejected", reason}` means it did NOT —
+/// treating an ok envelope as success silently loses rejected input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SteerOutcome {
+    Queued,
+    Rejected(String),
+    /// Unrecognized result shape (older/newer kernel): assume queued rather
+    /// than double-submitting the input.
+    Unknown,
+}
+
+pub fn parse_steer_result(result: &serde_json::Value) -> SteerOutcome {
+    match result.get("kind").and_then(|v| v.as_str()) {
+        Some("queued") => SteerOutcome::Queued,
+        Some("rejected") => SteerOutcome::Rejected(
+            result
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("rejected")
+                .to_string(),
+        ),
+        _ => SteerOutcome::Unknown,
+    }
+}
+
+/// A kernel-reported slash command (`session/create`/`resume` result's
+/// `slashCommands[]`), merged into `/` completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelCommand {
+    pub name: String,
+    pub description: String,
+    pub input_hint: String,
+}
+
+pub fn parse_kernel_slash_commands(result: &serde_json::Value) -> Vec<KernelCommand> {
+    result
+        .get("slashCommands")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|c| {
+                    let name = c.get("name")?.as_str()?.to_string();
+                    Some(KernelCommand {
+                        name,
+                        description: c
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        input_hint: c
+                            .get("inputHint")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// An owned suggestion row: the local catalog merged with kernel-reported
+/// commands (local implementations win on name collisions).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashEntry {
+    pub command: String,
+    pub summary: String,
+    pub route: String,
+}
+
+/// `/` completion over local + kernel commands. Local entries keep their
+/// catalog order and priority; kernel commands come after, deduped by base
+/// name (`/goal …` vs local `/goal`), showing their inputHint as the command
+/// when it adds information.
+pub fn slash_suggestions_merged(
+    input: &str,
+    limit: usize,
+    kernel: &[KernelCommand],
+) -> Vec<SlashEntry> {
+    let query = input.trim();
+    if query.is_empty() || !query.starts_with('/') || limit == 0 {
+        return Vec::new();
+    }
+    let bare = query.trim_start_matches('/');
+    let local_names: std::collections::HashSet<&str> = command_catalog()
+        .iter()
+        .filter_map(|item| item.command.strip_prefix('/'))
+        .map(|rest| rest.split_whitespace().next().unwrap_or(rest))
+        .collect();
+    let mut catalog: Vec<SlashEntry> = command_catalog()
+        .iter()
+        .map(|item| SlashEntry {
+            command: item.command.to_string(),
+            summary: item.summary.to_string(),
+            route: item.route.to_string(),
+        })
+        .collect();
+    for command in kernel {
+        if local_names.contains(command.name.as_str()) {
+            continue;
+        }
+        let display = if command.input_hint.starts_with('/') {
+            command.input_hint.clone()
+        } else {
+            format!("/{}", command.name)
+        };
+        catalog.push(SlashEntry {
+            command: display,
+            summary: command.description.clone(),
+            route: "zcode".to_string(),
+        });
+    }
+    let mut scored: Vec<(u8, usize, SlashEntry)> = Vec::new();
+    for (index, item) in catalog.into_iter().enumerate() {
+        let rank = if item.command.starts_with(query) {
+            0
+        } else if !bare.is_empty() && item.command.contains(bare) {
+            1
+        } else if is_subsequence(query, &item.command) {
+            2
+        } else {
+            continue;
+        };
+        scored.push((rank, index, item));
+    }
+    scored.sort_by_key(|a| (a.0, a.1));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, item)| item)
+        .collect()
+}
+
+/// One kernel TODO item (create/resume result's `todos[]` or a state push).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoItem {
+    pub text: String,
+    pub done: bool,
+}
+
+/// Extract todos from a create/resume result or a `state.updated` patch.
+/// Tolerates both `{content|text|title, status|completed}` item shapes; an
+/// absent list -> empty (caller keeps its previous list only on pushes that
+/// carry no `todos` key at all — an empty array is an explicit clear).
+pub fn parse_todos(value: &serde_json::Value) -> Option<Vec<TodoItem>> {
+    let list = value
+        .get("todos")
+        .or_else(|| value.pointer("/patch/todos"))?
+        .as_array()?;
+    Some(
+        list.iter()
+            .filter_map(|t| {
+                let text = t
+                    .get("content")
+                    .or_else(|| t.get("text"))
+                    .or_else(|| t.get("title"))?
+                    .as_str()?
+                    .to_string();
+                let done = t
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.eq_ignore_ascii_case("completed") || s.eq_ignore_ascii_case("done"))
+                    .or_else(|| t.get("completed").and_then(serde_json::Value::as_bool))
+                    .unwrap_or(false);
+                Some(TodoItem { text, done })
+            })
+            .collect(),
+    )
 }
 
 /// One selectable model from the state push's `model.available[]`.
@@ -3599,13 +3860,22 @@ impl std::fmt::Display for AppServerUnavailable {
     }
 }
 
-/// Whether the experimental app-server path is opted in.
+/// Whether prompts take the app-server streaming path. ON by default since
+/// the graduation (streaming-graduation change): the path is a functional
+/// superset of `--prompt` (true streaming + permission approval + session
+/// controls + steer) and seamlessly downgrades on any failure. Only an
+/// explicit opt-out disables it; `=1/true/on` stays accepted for the scripts
+/// and wrappers written while it was opt-in.
 pub fn app_server_enabled<F>(env_lookup: F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
-    env_lookup("ZCODE_TUI_APP_SERVER")
-        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on"))
+    !env_lookup("ZCODE_TUI_APP_SERVER").is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        )
+    })
 }
 
 /// A long-lived connection to `zcode app-server`: one child process (own

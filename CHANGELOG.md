@@ -6,6 +6,33 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-07
+
+### 新增(流式毕业,openspec 变更 streaming-graduation)
+
+- **app-server 默认开启**:流式路径(真流式+权限确认+会话控制+steer)已是
+  `--prompt` 的功能超集,二进制默认走它;`ZCODE_TUI_APP_SERVER=0/off/false`
+  显式退回经典路径,`=1` 老写法继续有效。降级纪律不变:任一环节失败永久
+  无缝回落 `--prompt`。
+- **流式路径 /resume 修复**(真 bug):`--resume`、`/resume`、`/sessions`
+  选择此前在流式下被无声忽略(永远新建会话)。现握手改发
+  `session/resume {sessionId}`(实测返回含历史 messages/todos),续接提示
+  显示历史条数;resume 失败自动回退新建,不阻塞 prompt。
+- **/sessions 协议数据源**:连接活跃时用 `session/list` 填充选择器
+  (running 会话带标注),替代流式下的 db 轮询;db 保留为经典路径回退。
+- **steer 被拒不再丢输入**:steer 成功信封的 result 是
+  `queued|rejected` union(内核 FKr,实测钉死);rejected(如
+  turn_not_steerable)按 reason 提示并退回排队。
+- **/update 内核自更新**:官方 feed 检查 → 版本比较(dpkg 语义)→ 下载
+  deb → **sha512 校验(不过不装)** → 免密 sudo 可用则 `dpkg -i`,否则给
+  免 root 解包指引;更新 Tip 首行引导 /update。
+- **/usage [7d|30d]**:`session/usage`(会话 token 细分)+
+  `usage/stats`(周期汇总,含缓存命中率与会话数)。
+- **TODO 清单**:内核 todos(create/resume 结果与 state 推送)非空时显示在
+  工作区(✓/· 状态,超 6 条折叠计数)。
+- **内核 slash 命令并入补全**:create/resume 上报的 `slashCommands[]`
+  (名称/描述/inputHint)合入 `/` 补全,本地实现优先、同名去重。
+
 ### 新增(内核会话控制面,openspec 变更 kernel-session-controls)
 
 - **工具权限确认**:app-server 路径接住内核的**两种**服务器→客户端请求

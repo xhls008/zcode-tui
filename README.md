@@ -70,12 +70,13 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   内核边跑边写），工作区实时显示工具 chip（运行中 spinner → 完成 ✓ + 耗时 /
   失败 ✗）、最新 reasoning、以及**正在成形的助手正文**（多步回合里逐步落库）；
   仅运行时显示、结束即清场；schema 不识别或库缺失时整组自动降级。
-- **真流式（试验，`ZCODE_TUI_APP_SERVER=1`）**：接内核 `zcode app-server`
+- **真流式（默认开启）**：接内核 `zcode app-server`
   协议（`session/create → subscribe → send`），助手正文经 `session/event`
   的 `text_delta` 逐 token 增量渲染进 transcript——**单轮纯问答也真流式**，
-  补齐上面 db 轮询对单轮无中间态的空缺。默认关闭；任一环节失败（起不动 /
+  补齐上面 db 轮询对单轮无中间态的空缺。任一环节失败（起不动 /
   握手超时 / schema 不符 / 断连）→ 本进程永久无缝降级回 `--prompt` + 一条
-  dim 提示，当前 prompt 用 `--prompt` 重试一次，用户永不卡死。
+  dim 提示，当前 prompt 用 `--prompt` 重试一次，用户永不卡死；需要经典
+  `--prompt` 路径时设 `ZCODE_TUI_APP_SERVER=0`。
 - **工具权限确认（app-server 路径）**：build 模式下有副作用的工具（写文件等）
   与 plan 模式的计划审批会弹**确认浮层**（↑↓ 选项 / Enter 应答 / Esc 拒绝），
   批准后工具同回合继续执行；plan 计划批准后自动切 build 并续跑。
@@ -164,7 +165,7 @@ bash install.sh --no-build
 
 它会把 release 二进制装到 `~/.local/bin/zcode-tui`，并生成 `~/.local/bin/zcode`
 wrapper（带管理标记，重复运行幂等；已存在的非托管 wrapper 会先备份）。托管
-wrapper 默认给 fallback TUI 打开 app-server 真流式；需要回到经典 `--prompt`
+wrapper 默认沿用 fallback TUI 的 app-server 真流式；需要回到经典 `--prompt`
 路径时可 `ZCODE_TUI_APP_SERVER=0 zcode`。
 其他用法：
 
@@ -270,6 +271,8 @@ text                         通过 zcode --prompt 发送 prompt
 /think                       循环思考级别 enabled/disabled（app-server）
 /compact                     原地压缩会话上下文、保住会话（app-server 会话
                              直连内核 compact；否则转发 CLI）
+/usage [7d|30d]              显示当前会话与周期 token 用量（app-server）
+/update                      从官方 feed 更新 ZCode 内核（下载 + sha512 校验）
 /resume [sess_id]            恢复最近（不带参数）或指定会话
 /sessions                    浮层选择最近会话并接续
 /new                         重开会话，上下文重置
@@ -315,12 +318,11 @@ ZCODE_TUI_LOGIN_CMD          覆盖 /login 执行的命令
 ZCODE_TUI_LOGOUT_CMD         覆盖 /logout 执行的命令
 ZCODE_TUI_IDE_CMD            覆盖 /ide 启动的 IDE 命令
 ZCODE_TUI_NO_UPDATE_CHECK    置 1 关闭启动时的官方更新检测
-ZCODE_TUI_APP_SERVER         置 1/true/on 启用试验性真流式（走 zcode
-                             app-server，逐 token 流式；失败无缝降级回
-                             --prompt）。工具权限确认浮层、/model /think
-                             /compact、/mode 即刻切换与 steer 中途转向
-                             都跑在这条路径上。直接运行 zcode-tui 时默认关闭；
-                             install.sh 生成的 zcode wrapper 默认打开（设 0 关闭）
+ZCODE_TUI_APP_SERVER         默认启用真流式（走 zcode app-server，逐 token
+                             流式；失败无缝降级回 --prompt）。工具权限确认
+                             浮层、/model /think /compact、/mode 即刻切换与
+                             steer 中途转向都跑在这条路径上。设 0/off/false/no
+                             关闭；1/true/on 继续兼容旧 wrapper
 ZCODE_API_KEY 等             /auth 检测的 API key 环境变量链
 ZCODE_TUI_NO_MOUSE           置 1 关闭鼠标捕获
 ZCODE_TUI_SKYLINE            欢迎页 ZCODE logo 渲染：默认探测终端图形协议

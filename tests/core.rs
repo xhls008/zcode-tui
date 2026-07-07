@@ -229,6 +229,8 @@ fn command_palette_exposes_common_commands() {
     assert!(rows.iter().any(|row| row.contains("/goal")));
     assert!(rows.iter().any(|row| row.contains("/skills list")));
     assert!(rows.iter().any(|row| row.contains("/login")));
+    assert!(rows.iter().any(|row| row.contains("/usage")));
+    assert!(rows.iter().any(|row| row.contains("/update")));
     assert!(rows.iter().any(|row| row.contains("! <cmd>")));
 }
 
@@ -1448,6 +1450,130 @@ fn session_control_params_match_pinned_schemas() {
 }
 
 #[test]
+fn session_lifecycle_params_and_list_parsing() {
+    use zcode_tui::{app_resume_params, app_usage_params, parse_session_list, usage_stats_params};
+    assert_eq!(
+        app_resume_params("sess_1"),
+        serde_json::json!({"sessionId": "sess_1"})
+    );
+    assert_eq!(
+        app_usage_params("sess_1"),
+        serde_json::json!({"sessionId": "sess_1"})
+    );
+    assert_eq!(usage_stats_params("7d"), serde_json::json!({"range": "7d"}));
+    // session/list result shape captured live 2026-07-07 (kernel 0.15.0).
+    let result = serde_json::json!({"sessions": [
+        {"sessionId": "sess_old", "title": "Other project", "status": "idle",
+         "updatedAt": 100, "workspace": {"workspacePath": "/elsewhere"}},
+        {"sessionId": "sess_here", "title": "Create w.txt file", "status": "idle",
+         "updatedAt": 50, "workspace": {"workspacePath": "/proj"}},
+        {"sessionId": "sess_run", "title": "Busy one", "status": "running",
+         "updatedAt": 200, "workspace": {"workspacePath": "/elsewhere"}},
+        {"sessionId": "sess_untitled", "status": "idle",
+         "updatedAt": 10, "workspace": {"workspacePath": "/elsewhere/deep/dir"}}
+    ]});
+    let rows = parse_session_list(&result, "/proj");
+    // Current-cwd session first, then by recency; running sessions marked.
+    assert_eq!(rows[0].id, "sess_here");
+    assert_eq!(rows[1].id, "sess_run");
+    assert!(rows[1].title.contains("running"));
+    assert_eq!(rows[2].id, "sess_old");
+    // Missing title falls back to the directory tail.
+    assert_eq!(rows[3].title, "dir");
+    // Absent/foreign shapes -> empty, never panic.
+    assert!(parse_session_list(&serde_json::json!({}), "/proj").is_empty());
+}
+
+#[test]
+fn steer_result_union_is_classified() {
+    use zcode_tui::{parse_steer_result, SteerOutcome};
+    // Kernel FKr union, pinned 2026-07-07: an OK envelope can still carry a
+    // rejection — result.kind decides whether the input actually landed.
+    let queued = serde_json::json!({"kind": "queued", "pendingInputId": "in_1",
+                                    "queueLength": 1, "turnId": "turn_1"});
+    assert_eq!(parse_steer_result(&queued), SteerOutcome::Queued);
+    let rejected = serde_json::json!({"kind": "rejected", "reason": "turn_not_steerable"});
+    assert_eq!(
+        parse_steer_result(&rejected),
+        SteerOutcome::Rejected("turn_not_steerable".to_string())
+    );
+    // Unknown shapes assume queued-ish (never double-submit).
+    assert_eq!(
+        parse_steer_result(&serde_json::json!({"accepted": true})),
+        SteerOutcome::Unknown
+    );
+}
+
+#[test]
+fn kernel_slash_commands_merge_into_suggestions() {
+    use zcode_tui::{parse_kernel_slash_commands, slash_suggestions_merged};
+    // create/resume result shape captured live (slashCommands[]).
+    let result = serde_json::json!({"slashCommands": [
+        {"name": "goal", "description": "Show or set the current session goal.",
+         "inputHint": "/goal [pause|resume|clear]", "source": "builtin"},
+        {"name": "review", "description": "Review code changes.",
+         "inputHint": "/review [target]", "source": "builtin"}
+    ]});
+    let kernel = parse_kernel_slash_commands(&result);
+    assert_eq!(kernel.len(), 2);
+    // /goal exists locally -> kernel duplicate dropped; /review is new.
+    let entries = slash_suggestions_merged("/re", 20, &kernel);
+    assert!(entries.iter().any(|e| e.command.starts_with("/review")));
+    let goal_entries = slash_suggestions_merged("/goal", 20, &kernel);
+    let goal_count = goal_entries
+        .iter()
+        .filter(|e| {
+            e.command == "/goal"
+                || e.command.starts_with("/goal ")
+                || e.command.starts_with("/goal\u{a0}")
+        })
+        .filter(|e| !e.command.contains("replace"))
+        .count();
+    assert_eq!(goal_count, 1, "local /goal wins, kernel duplicate dropped");
+    // Kernel entry displays its inputHint and routes to zcode.
+    let review = entries
+        .iter()
+        .find(|e| e.command.starts_with("/review"))
+        .unwrap();
+    assert_eq!(review.command, "/review [target]");
+    assert_eq!(review.route, "zcode");
+}
+
+#[test]
+fn todos_parse_from_result_and_patch() {
+    use zcode_tui::parse_todos;
+    let result = serde_json::json!({"todos": [
+        {"content": "write tests", "status": "completed"},
+        {"content": "ship it", "status": "pending"}
+    ]});
+    let todos = parse_todos(&result).unwrap();
+    assert_eq!(todos.len(), 2);
+    assert!(todos[0].done);
+    assert!(!todos[1].done);
+    // state push carries todos under the patch; empty array = explicit clear.
+    let push = serde_json::json!({"patch": {"todos": []}});
+    assert_eq!(parse_todos(&push).unwrap().len(), 0);
+    // No todos key at all -> None (caller keeps previous list).
+    assert!(parse_todos(&serde_json::json!({"patch": {"status": "running"}})).is_none());
+}
+
+#[test]
+fn update_feed_extracts_deb_sha512() {
+    use zcode_tui::parse_update_feed;
+    // Real 3.2.5 feed structure: files[] entries each carry url+sha512+size;
+    // the deb's sha512 must come from ITS entry, not the AppImage's.
+    let yaml = "version: 3.2.5\nfiles:\n  - url: ZCode-3.2.5-linux-x64.AppImage\n    sha512: APPIMAGEHASH==\n    size: 153793621\n  - url: ZCode-3.2.5-linux-x64.deb\n    sha512: DEBHASH==\n    size: 113714472\npath: ZCode-3.2.5-linux-x64.AppImage\nsha512: APPIMAGEHASH==\nreleaseName: Release v3.2.5\n";
+    let feed = parse_update_feed(yaml).unwrap();
+    assert_eq!(feed.version, "3.2.5");
+    assert_eq!(feed.deb_file.as_deref(), Some("ZCode-3.2.5-linux-x64.deb"));
+    assert_eq!(feed.deb_sha512.as_deref(), Some("DEBHASH=="));
+    // A feed without a deb entry parses with both None.
+    let feed = parse_update_feed("version: 9.9.9\npath: x.AppImage\n").unwrap();
+    assert!(feed.deb_file.is_none());
+    assert!(feed.deb_sha512.is_none());
+}
+
+#[test]
 fn state_controls_extracted_from_mode_changed_patch() {
     use zcode_tui::app_state_controls;
     // Shape captured live from a `reason:"mode_changed"` push (kernel 0.15.0).
@@ -1579,14 +1705,22 @@ fn tool_input_summary_condenses_json_args() {
 }
 
 #[test]
-fn app_server_opt_in_switch() {
+fn app_server_default_on_with_explicit_opt_out() {
     use zcode_tui::app_server_enabled;
+    // Graduated: ON by default (unset), and legacy opt-in values still work.
+    assert!(app_server_enabled(|_: &str| None));
     assert!(app_server_enabled(
         |k| (k == "ZCODE_TUI_APP_SERVER").then(|| "1".to_string())
     ));
     assert!(app_server_enabled(|_| Some("on".to_string())));
-    assert!(!app_server_enabled(|_| None));
+    assert!(app_server_enabled(|_| Some("true".to_string())));
+    // Explicit opt-out values (case-insensitive, whitespace-tolerant).
     assert!(!app_server_enabled(|_| Some("0".to_string())));
+    assert!(!app_server_enabled(|_| Some("off".to_string())));
+    assert!(!app_server_enabled(|_| Some("FALSE".to_string())));
+    assert!(!app_server_enabled(|_| Some(" no ".to_string())));
+    // Unknown junk keeps the default (on), same as unset.
+    assert!(app_server_enabled(|_| Some("maybe".to_string())));
 }
 
 #[test]

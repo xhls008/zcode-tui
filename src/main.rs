@@ -30,24 +30,26 @@ use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::StatefulImage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zcode_tui::{
-    app_compact_params, app_create_params, app_send_params, app_server_enabled,
+    app_compact_params, app_create_params, app_resume_params, app_send_params, app_server_enabled,
     app_session_id_from_result, app_set_mode_params, app_set_model_params, app_set_thought_params,
     app_state_controls, app_state_is_turn_end, app_state_turn_error, app_state_watermark,
-    app_steer_params, app_stop_params, app_subscribe_params, classify_input, command_palette_rows,
-    context_watermark_warn, db_baseline, db_schema_supported, detect_auth_status, diff_line_role,
-    encode_interaction_reply, env_is_headless, file_suggestions, fold_preview,
-    format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
-    is_newer_version, kernel_db_path_from, latest_assistant_text, latest_reasoning,
-    latest_session_for_dir, leader_action_for_key, list_recent_sessions, live_tool_chips,
-    load_ui_config, login_command, markdown_lines, open_kernel_db_ro, parse_cli_args,
-    parse_interaction_request, parse_prompt_summary, parse_stream_event, parse_update_feed,
-    parse_update_feed_url, prompt_command_for, recent_input_history, relative_age, run_command,
-    shorten_home, skyline_braille, skyline_graphics_wanted, skyline_lines, skyline_mode,
-    slash_suggestions, spawn_streaming_command, tool_input_summary, wrap_display, AppConfig,
-    AppServerConn, AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, DbBaseline,
-    DiffRole, InputAction, InteractionRequest, JobEvent, LeaderAction, LiveToolChip, MdLineKind,
-    SessionControls, SessionRow, SkylineMode, SpanRole, StreamEvent, StreamingJob, ToolChipStatus,
-    TurnDelta, UiConfig, UpdateFeed, SKYLINE_LOGO_W,
+    app_steer_params, app_stop_params, app_subscribe_params, app_usage_params, classify_input,
+    command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
+    detect_auth_status, diff_line_role, encode_interaction_reply, env_is_headless,
+    file_suggestions, fold_preview, format_context_watermark, git_diff_command,
+    handle_local_command, help_text, history_search, is_newer_version, kernel_db_path_from,
+    latest_assistant_text, latest_reasoning, latest_session_for_dir, leader_action_for_key,
+    list_recent_sessions, live_tool_chips, load_ui_config, login_command, markdown_lines,
+    open_kernel_db_ro, parse_cli_args, parse_interaction_request, parse_kernel_slash_commands,
+    parse_prompt_summary, parse_session_list, parse_steer_result, parse_stream_event, parse_todos,
+    parse_update_feed, parse_update_feed_url, prompt_command_for, recent_input_history,
+    relative_age, run_command, shorten_home, skyline_braille, skyline_graphics_wanted,
+    skyline_lines, skyline_mode, slash_suggestions_merged, spawn_streaming_command,
+    tool_input_summary, usage_stats_params, wrap_display, AppConfig, AppServerConn,
+    AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, DbBaseline, DiffRole,
+    InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction, LiveToolChip,
+    MdLineKind, SessionControls, SessionRow, SkylineMode, SpanRole, SteerOutcome, StreamEvent,
+    StreamingJob, TodoItem, ToolChipStatus, TurnDelta, UiConfig, UpdateFeed, SKYLINE_LOGO_W,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -307,15 +309,15 @@ fn spawn_startup_probe(zcode_bin: String) -> std::sync::mpsc::Receiver<StartupRe
 
 fn build_update_tip(installed: &str, feed: &UpdateFeed, feed_base: Option<&str>) -> String {
     let mut lines = vec![format!(
-        "Tip: 官方 ZCode {} 已发布，本机 {installed}。更新说明: https://zcode.z.ai/en/changelog",
+        "Tip: 官方 ZCode {} 已发布，本机 {installed}。输入 /update 一步升级（下载+sha512 校验+安装）。",
         feed.version
     )];
+    lines.push("更新说明: https://zcode.z.ai/en/changelog".to_string());
     match (feed_base, &feed.deb_file) {
         (Some(base), Some(file)) => {
-            lines.push(format!("下载: {base}{file}"));
-            lines.push(format!("安装: sudo apt install ./{file} 后无需其他改动"));
+            lines.push(format!("手动下载: {base}{file}"));
         }
-        _ => lines.push("下载: https://zcode.z.ai".to_string()),
+        _ => lines.push("手动下载: https://zcode.z.ai".to_string()),
     }
     lines.join("\n")
 }
@@ -519,14 +521,14 @@ impl ActiveJob {
 
 const PERMISSION_MODES: [&str; 4] = ["build", "edit", "plan", "yolo"];
 
-/// State of the experimental app-server streaming path for this process.
+/// State of the app-server streaming path for this process.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AppMode {
-    /// `ZCODE_TUI_APP_SERVER` not set: always the classic `--prompt` path.
+    /// Explicit opt-out: always use the classic `--prompt` path.
     Off,
-    /// Opted in and healthy: prompts stream through the app-server.
+    /// Healthy: prompts stream through the app-server.
     Ready,
-    /// Opted in but a failure permanently downgraded this run to `--prompt`.
+    /// A failure permanently downgraded this run to `--prompt`.
     Downgraded,
 }
 
@@ -567,6 +569,9 @@ struct AppConnect {
 /// Which handshake response the connect state is waiting on (matched by id).
 enum ConnectPhase {
     Create(u64),
+    /// `session/resume` of a picked/`--resume` session; an error falls back
+    /// to Create (fresh session) instead of downgrading.
+    Resume(u64),
     Subscribe(u64),
 }
 
@@ -575,6 +580,7 @@ enum ConnectPhase {
 #[derive(Clone, Copy)]
 enum ConnectStage {
     Create,
+    Resume,
     Subscribe,
 }
 
@@ -626,7 +632,7 @@ struct UiState {
     /// for long foldable cells).
     unfolded: HashSet<usize>,
     mouse_enabled: bool,
-    /// Experimental app-server streaming path (opt-in, seamless fallback).
+    /// App-server streaming path (default-on, seamless fallback).
     app_mode: AppMode,
     app_conn: Option<AppServerConn>,
     /// Kernel session reused across prompts once created (session continuity).
@@ -659,6 +665,12 @@ struct UiState {
     /// pushed by the kernel via `state.updated` — authoritative echo for
     /// /model, /think and Shift+Tab on the app-server path.
     controls: SessionControls,
+    /// Kernel-reported slash commands (create/resume result), merged into
+    /// `/` completion after the local catalog.
+    kernel_commands: Vec<KernelCommand>,
+    /// Kernel TODO list (create/resume result + state pushes); rendered in
+    /// the work panel while non-empty.
+    todos: Vec<TodoItem>,
     /// In-flight fire-and-forget control requests (setMode/setModel/…), by
     /// request id, so an error response can name the command it failed.
     control_requests: std::collections::HashMap<u64, ControlReq>,
@@ -678,6 +690,9 @@ struct PendingInteraction {
 enum ControlReq {
     Command(&'static str),
     Steer(String),
+    /// A /usage sub-request; the tag ("session" | "stats") picks the
+    /// formatter when the result arrives.
+    Usage(&'static str),
 }
 
 impl UiState {
@@ -737,6 +752,8 @@ impl UiState {
             interaction: None,
             interaction_done: HashSet::new(),
             controls: SessionControls::default(),
+            kernel_commands: Vec::new(),
+            todos: Vec::new(),
             control_requests: std::collections::HashMap::new(),
         }
     }
@@ -930,19 +947,20 @@ impl UiState {
         }
 
         if self.input.starts_with('/') && !self.input.contains('\n') {
-            self.suggestions = slash_suggestions(&self.input, SUGGESTION_LIMIT)
-                .into_iter()
-                .map(|item| Suggestion {
-                    insert: format!("{} ", item.command),
-                    display: format!(
-                        "{:<18} {:<7} {}",
-                        item.command,
-                        format!("[{}]", item.route),
-                        item.summary
-                    ),
-                    token_start: None,
-                })
-                .collect();
+            self.suggestions =
+                slash_suggestions_merged(&self.input, SUGGESTION_LIMIT, &self.kernel_commands)
+                    .into_iter()
+                    .map(|item| Suggestion {
+                        insert: format!("{} ", item.command),
+                        display: format!(
+                            "{:<18} {:<7} {}",
+                            item.command,
+                            format!("[{}]", item.route),
+                            item.summary
+                        ),
+                        token_start: None,
+                    })
+                    .collect();
             return;
         }
 
@@ -1304,6 +1322,14 @@ impl UiState {
                 self.compact_session();
                 return None;
             }
+            Some("usage") => {
+                self.show_usage(command.get(1).map(String::as_str));
+                return None;
+            }
+            Some("update") => {
+                self.update_kernel();
+                return None;
+            }
             Some("resume") => {
                 self.set_resume(command.get(1).map(String::as_str));
                 return None;
@@ -1411,16 +1437,26 @@ impl UiState {
                 let send_id = conn.send("session/send", app_send_params(&session_id, prompt))?;
                 self.begin_app_turn(send_id);
             }
-            // First prompt of the run: kick off the create+subscribe handshake
-            // WITHOUT blocking the UI thread. The prompt is sent once the
-            // handshake completes (driven by `pump_app_connect`), so a slow or
-            // hung app-server can never freeze the terminal — Esc still cancels.
+            // First prompt of the run: kick off the (resume|create)+subscribe
+            // handshake WITHOUT blocking the UI thread. The prompt is sent
+            // once the handshake completes (driven by `pump_app_connect`), so
+            // a slow or hung app-server can never freeze the terminal — Esc
+            // still cancels. A pending `--resume`//sessions selection resumes
+            // that session instead of silently opening a fresh one.
             None => {
                 let workspace = self.app_workspace();
+                let resume = self.config.resume.clone();
                 let conn = self.app_conn.as_mut().expect("app_conn set above");
-                let create_id = conn.send("session/create", app_create_params(&workspace))?;
+                let phase = match resume {
+                    Some(session_id) => ConnectPhase::Resume(
+                        conn.send("session/resume", app_resume_params(&session_id))?,
+                    ),
+                    None => ConnectPhase::Create(
+                        conn.send("session/create", app_create_params(&workspace))?,
+                    ),
+                };
                 self.app_connect = Some(AppConnect {
-                    phase: ConnectPhase::Create(create_id),
+                    phase,
                     prompt: prompt.to_string(),
                     started: Instant::now(),
                 });
@@ -1428,6 +1464,19 @@ impl UiState {
             }
         }
         Ok(())
+    }
+
+    /// Absorb the extras a `session/create`/`resume` result carries beyond
+    /// the sessionId: the kernel's slash-command list (into completion) and
+    /// the TODO state (into the work panel).
+    fn absorb_session_result(&mut self, result: &serde_json::Value) {
+        let commands = parse_kernel_slash_commands(result);
+        if !commands.is_empty() {
+            self.kernel_commands = commands;
+        }
+        if let Some(todos) = parse_todos(result) {
+            self.todos = todos;
+        }
     }
 
     /// The canonical workspace path handed to `session/create`.
@@ -1475,6 +1524,7 @@ impl UiState {
             let waiting = match &self.app_connect {
                 Some(connect) => match &connect.phase {
                     ConnectPhase::Create(want) => (ConnectStage::Create, *want),
+                    ConnectPhase::Resume(want) => (ConnectStage::Resume, *want),
                     ConnectPhase::Subscribe(want) => (ConnectStage::Subscribe, *want),
                 },
                 None => return,
@@ -1484,18 +1534,57 @@ impl UiState {
                 continue; // stale/unmatched response id
             }
             if let Some(why) = error {
+                // A failed resume (session gone/foreign) is not fatal: note it
+                // and redo the handshake with a fresh session. Anything else
+                // downgrades as before.
+                if matches!(stage, ConnectStage::Resume) {
+                    self.config.resume = None;
+                    self.push_system(&format!("resume failed ({why}); starting a fresh session"));
+                    let workspace = self.app_workspace();
+                    let conn = self.app_conn.as_mut().expect("alive checked above");
+                    match conn.send("session/create", app_create_params(&workspace)) {
+                        Ok(create_id) => {
+                            if let Some(connect) = &mut self.app_connect {
+                                connect.phase = ConnectPhase::Create(create_id);
+                            }
+                            continue;
+                        }
+                        Err(err) => {
+                            self.app_connect_failed(err);
+                            return;
+                        }
+                    }
+                }
                 self.app_connect_failed(AppServerUnavailable::Protocol(why));
                 return;
             }
             match stage {
-                ConnectStage::Create => {
+                ConnectStage::Create | ConnectStage::Resume => {
                     let result = result.unwrap_or(serde_json::Value::Null);
                     let Some(session_id) = app_session_id_from_result(&result) else {
                         self.app_connect_failed(AppServerUnavailable::Protocol(
-                            "session/create missing session.sessionId".to_string(),
+                            "session create/resume missing session.sessionId".to_string(),
                         ));
                         return;
                     };
+                    // The result also carries the kernel's command list and
+                    // TODO state (same shape for create and resume).
+                    self.absorb_session_result(&result);
+                    if matches!(stage, ConnectStage::Resume) {
+                        // One-shot: the picked session is now live; later
+                        // prompts reuse app_session, /new clears both.
+                        self.config.resume = None;
+                        self.session_active = true;
+                        let count = result
+                            .get("messages")
+                            .and_then(|m| m.as_array())
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        self.push_system(&format!(
+                            "resumed {session_id} ({count} messages of history)"
+                        ));
+                        self.refresh_banner();
+                    }
                     let conn = self.app_conn.as_mut().expect("alive checked above");
                     match conn.send("session/subscribe", app_subscribe_params(&session_id)) {
                         Ok(sub_id) => {
@@ -1661,6 +1750,79 @@ impl UiState {
         self.start_job(full, LogKind::System, "! shell");
     }
 
+    /// /update — self-update the ZCode kernel from the official feed: fetch
+    /// latest-linux.yml, compare versions (dpkg semantics), download the deb,
+    /// verify its sha512 against the feed (base64), then install via
+    /// passwordless sudo or print the no-root unpack path. Runs as a shell
+    /// job: streaming output in the transcript, Esc cancels the download.
+    fn update_kernel(&mut self) {
+        let candidates = [
+            env::var("ZCODE_APP")
+                .ok()
+                .map(|app| format!("{app}/resources/app-update.yml")),
+            Some("/opt/ZCode/resources/app-update.yml".to_string()),
+        ];
+        let feed_url = candidates.into_iter().flatten().find_map(|path| {
+            fs::read_to_string(&path)
+                .ok()
+                .as_deref()
+                .and_then(parse_update_feed_url)
+        });
+        let Some(feed_url) = feed_url else {
+            self.push_error(
+                "no app-update.yml found (is the ZCode desktop package installed?); \
+                 set ZCODE_APP to its app directory",
+            );
+            return;
+        };
+        // Everything network/versioned happens inside the job so the UI never
+        // blocks: yml fetch, version compare (dpkg --compare-versions), deb
+        // download, sha512 check, install. The awk mirrors parse_update_feed:
+        // the sha512 belongs to the files[] entry whose url is the .deb.
+        let script = format!(
+            r#"set -eu
+FEED='{feed_url}'
+echo "feed: $FEED"
+YML=$(curl -fsSL --max-time 15 "$FEED")
+VER=$(printf '%s' "$YML" | sed -n 's/^version:[[:space:]]*//p' | head -1)
+DEB=$(printf '%s' "$YML" | sed -n 's/^[[:space:]]*-\{{0,1}}[[:space:]]*url:[[:space:]]*//p' | grep '\.deb$' | head -1)
+SHA=$(printf '%s' "$YML" | awk '/url:.*\.deb$/{{f=1;next}} f&&/sha512:/{{sub(/^[[:space:]]*sha512:[[:space:]]*/,"");print;exit}}')
+INSTALLED=$(dpkg-query -W -f='${{Version}}' zcode 2>/dev/null | cut -d- -f1 || echo 0)
+echo "installed: $INSTALLED   latest: $VER"
+if ! dpkg --compare-versions "$VER" gt "$INSTALLED"; then
+  echo "already up to date"
+  exit 0
+fi
+[ -n "$DEB" ] && [ -n "$SHA" ] || {{ echo "feed carries no deb entry/sha512 - aborting"; exit 1; }}
+BASE=${{FEED%latest-linux.yml}}
+TMP=$(mktemp -d /tmp/zcode-update.XXXXXX)
+echo "downloading $BASE$DEB"
+curl -fSL --retry 3 --retry-delay 2 -o "$TMP/$DEB" "$BASE$DEB"
+echo "verifying sha512"
+ACTUAL=$(openssl dgst -sha512 -binary "$TMP/$DEB" | base64 -w0)
+if [ "$ACTUAL" != "$SHA" ]; then
+  echo "sha512 MISMATCH - download corrupt, aborting (file removed)"
+  rm -f "$TMP/$DEB"
+  exit 1
+fi
+echo "sha512 ok"
+if sudo -n true 2>/dev/null; then
+  echo "installing $VER (do not cancel)"
+  sudo -n dpkg -i "$TMP/$DEB"
+  rm -f "$TMP/$DEB"
+  echo "installed $VER - restart zcode-tui to use the new kernel"
+else
+  echo "no passwordless sudo; finish manually:"
+  echo "  sudo dpkg -i $TMP/$DEB"
+  echo "or unpack without root:"
+  echo "  dpkg-deb -x $TMP/$DEB ~/.local/opt/zcode/$VER/"
+fi"#
+        );
+        self.push_system("checking the official update feed…");
+        let full = vec!["sh".to_string(), "-c".to_string(), script];
+        self.start_job(full, LogKind::System, "/update");
+    }
+
     fn start_job(&mut self, command: Vec<String>, kind: LogKind, label: &str) {
         match spawn_streaming_command(&command) {
             Ok(job) => {
@@ -1772,6 +1934,9 @@ impl UiState {
                     if let Some(controls) = app_state_controls(&params) {
                         self.merge_controls(controls);
                     }
+                    if let Some(todos) = parse_todos(&params) {
+                        self.todos = todos;
+                    }
                     // The kernel ends a turn with a `prompt_completed` state
                     // update, not a session/event — this is the terminator.
                     if app_state_is_turn_end(&params) {
@@ -1807,9 +1972,10 @@ impl UiState {
                         return;
                     }
                 }
-                AppServerMessage::Response { id, .. } => {
-                    // Successful control command: echo comes via state push.
-                    self.control_requests.remove(&id);
+                AppServerMessage::Response { id, result, .. } => {
+                    // Successful control command; a steer's result still
+                    // needs its queued/rejected union inspected.
+                    self.on_control_ok(id, result.as_ref());
                 }
                 AppServerMessage::Other => {}
             }
@@ -2004,6 +2170,9 @@ impl UiState {
                     if let Some(controls) = app_state_controls(&params) {
                         self.merge_controls(controls);
                     }
+                    if let Some(todos) = parse_todos(&params) {
+                        self.todos = todos;
+                    }
                 }
                 AppServerMessage::ServerRequest { id, method, params } => {
                     self.on_server_request(id, &method, &params);
@@ -2015,7 +2184,9 @@ impl UiState {
                 } => {
                     self.on_control_error(id, &message);
                 }
-                AppServerMessage::Response { id, .. } => self.on_control_ok(id),
+                AppServerMessage::Response { id, result, .. } => {
+                    self.on_control_ok(id, result.as_ref())
+                }
                 AppServerMessage::Event(_) | AppServerMessage::Other => {}
             }
         }
@@ -2127,16 +2298,72 @@ impl UiState {
                 self.queued.push_back(content);
                 true
             }
+            Some(ControlReq::Usage(tag)) => {
+                self.push_error(&format!("usage {tag} failed: {message}"));
+                true
+            }
             None => false,
         }
     }
 
-    /// A control command succeeded; the substantive echo arrives via the
-    /// state push. /compact gets a direct status (no push marks completion).
-    fn on_control_ok(&mut self, id: u64) {
-        if let Some(ControlReq::Command("/compact")) = self.control_requests.remove(&id) {
-            self.status = "compacted".to_string();
+    /// A control command succeeded at the envelope level. /compact gets a
+    /// direct status (no push marks completion). A steer's OK envelope still
+    /// carries a union result — `kind:"rejected"` means the input did NOT
+    /// enter the turn and must be requeued, not silently lost.
+    fn on_control_ok(&mut self, id: u64, result: Option<&serde_json::Value>) {
+        match self.control_requests.remove(&id) {
+            Some(ControlReq::Command("/compact")) => {
+                self.status = "compacted".to_string();
+            }
+            Some(ControlReq::Steer(content)) => {
+                if let Some(SteerOutcome::Rejected(reason)) = result.map(parse_steer_result) {
+                    self.push_error(&format!("steer rejected: {reason} (input queued)"));
+                    self.queued.push_back(content);
+                }
+            }
+            Some(ControlReq::Usage(tag)) => {
+                if let Some(result) = result {
+                    let text = match tag {
+                        "session" => format_session_usage(result),
+                        _ => format_usage_stats(result),
+                    };
+                    self.push_system(&text);
+                    self.status = "usage".to_string();
+                }
+            }
+            _ => {}
         }
+    }
+
+    /// /usage [7d|30d] — session token breakdown + period aggregate, both
+    /// fetched fire-and-forget and rendered as they arrive.
+    fn show_usage(&mut self, range: Option<&str>) {
+        let Some(session_id) = self.app_session.clone() else {
+            self.push_system(
+                "/usage needs an active app-server session (send a prompt first; \
+                 classic --prompt path shows ctx in the footer instead)",
+            );
+            return;
+        };
+        let range = match range {
+            None | Some("7d") => "7d",
+            Some("30d") => "30d",
+            Some(other) => {
+                self.push_error(&format!("unknown range: {other} (use 7d or 30d)"));
+                return;
+            }
+        };
+        self.send_control(
+            "session/usage",
+            app_usage_params(&session_id),
+            ControlReq::Usage("session"),
+        );
+        self.send_control(
+            "usage/stats",
+            usage_stats_params(range),
+            ControlReq::Usage("stats"),
+        );
+        self.status = "fetching usage…".to_string();
     }
 
     fn pump_job(&mut self) {
@@ -2357,7 +2584,7 @@ impl UiState {
         if self.app_session.is_none() {
             self.push_system(
                 "/model needs an active app-server session \
-                 (ZCODE_TUI_APP_SERVER=1, complete one prompt first)",
+                 (complete one streaming prompt first; ZCODE_TUI_APP_SERVER=0 disables it)",
             );
             return;
         }
@@ -2400,7 +2627,7 @@ impl UiState {
         let Some(session_id) = self.app_session.clone() else {
             self.push_system(
                 "/think needs an active app-server session \
-                 (ZCODE_TUI_APP_SERVER=1, complete one prompt first)",
+                 (complete one streaming prompt first; ZCODE_TUI_APP_SERVER=0 disables it)",
             );
             return;
         };
@@ -2538,6 +2765,33 @@ impl UiState {
     }
 
     fn open_session_picker(&mut self) {
+        // A live app-server connection is the authoritative source
+        // (session/list, verified live); the kernel db stays the fallback for
+        // the classic path or when the protocol call fails.
+        if self.app_conn.as_ref().is_some_and(AppServerConn::is_alive) && !self.is_busy() {
+            let cwd = self.app_workspace();
+            let listed = self
+                .app_conn
+                .as_mut()
+                .expect("alive checked above")
+                .request_blocking(
+                    "session/list",
+                    serde_json::json!({}),
+                    Duration::from_secs(3),
+                );
+            if let Ok(result) = listed {
+                let rows = parse_session_list(&result, &cwd);
+                if !rows.is_empty() {
+                    self.session_picker = Some((rows, 0));
+                    self.show_palette = false;
+                    self.show_help = false;
+                    self.status =
+                        "pick a session: ↑↓ select · Enter resume · Esc close".to_string();
+                    return;
+                }
+            }
+            // Fall through to the db source on error/empty.
+        }
         let DbState::Enabled(path) = &self.db_state else {
             self.push_system(
                 "session list unavailable: kernel db not readable (missing or schema changed)",
@@ -2803,6 +3057,9 @@ impl UiState {
                 self.config.resume = Some(id.to_string());
                 self.config.continue_session = false;
                 self.session_active = false;
+                // Drop any live streaming session: the next prompt must
+                // handshake anew via session/resume, not reuse the old one.
+                self.app_session = None;
                 self.push_system(&format!("resuming {id} on the next prompt"));
             }
             Some(other) => {
@@ -3128,11 +3385,39 @@ const LIVE_TEXT_TAIL: usize = 4;
 /// moment the job finalizes (the authoritative reply lands in the transcript).
 fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
     let t = &state.theme;
+    // The kernel's TODO list persists across turns while non-empty (state
+    // pushes update or clear it) — always the panel's top section.
+    let mut todo_lines: Vec<Line<'static>> = Vec::new();
+    if !state.todos.is_empty() {
+        let done = state.todos.iter().filter(|item| item.done).count();
+        todo_lines.push(Line::from(Span::styled(
+            format!(" todos {done}/{}", state.todos.len()),
+            t.dim(),
+        )));
+        for item in state.todos.iter().take(6) {
+            let (mark, style) = if item.done {
+                ("✓", t.dim())
+            } else {
+                ("·", t.text())
+            };
+            let clipped: String = item.text.chars().take(110).collect();
+            todo_lines.push(Line::from(Span::styled(
+                format!("  {mark} {clipped}"),
+                style,
+            )));
+        }
+        if state.todos.len() > 6 {
+            todo_lines.push(Line::from(Span::styled(
+                format!("  … +{} more", state.todos.len() - 6),
+                t.dim(),
+            )));
+        }
+    }
     // App-server streaming turn: the answer streams straight into the
     // transcript, so the work panel only carries a live marker and the
     // newest reasoning, both gone when the turn finalizes.
     if let Some(turn) = &state.app_turn {
-        let mut lines = Vec::new();
+        let mut lines = todo_lines;
         let symbol = SPINNER_FRAMES[state.tick % SPINNER_FRAMES.len()];
         lines.push(Line::from(Span::styled(
             format!(" {symbol} streaming"),
@@ -3178,12 +3463,12 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
         return lines;
     }
     let Some(active) = &state.job else {
-        return Vec::new();
+        return todo_lines;
     };
     let Some(live) = &active.live else {
-        return Vec::new();
+        return todo_lines;
     };
-    let mut lines = Vec::new();
+    let mut lines = todo_lines;
     if !live.chips.is_empty() {
         let mut spans = vec![Span::raw(" ".to_string())];
         // Keep the newest chips in view when a turn runs many tools.
@@ -3233,6 +3518,51 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// `session/usage` result → readable summary (shape pinned live 2026-07-07).
+fn format_session_usage(result: &serde_json::Value) -> String {
+    let n = |key: &str| {
+        result
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    format!(
+        "session usage\n  total {}  ·  in {}  ·  out {}  ·  reasoning {}\n  \
+         model requests {}  ·  cache read {}",
+        n("totalTokens"),
+        n("inputTokens"),
+        n("outputTokens"),
+        n("reasoningTokens"),
+        n("modelRequestCount"),
+        n("cacheReadTokens"),
+    )
+}
+
+/// `usage/stats` result → readable summary.
+fn format_usage_stats(result: &serde_json::Value) -> String {
+    let range = result.get("range").and_then(|v| v.as_str()).unwrap_or("7d");
+    let s = |key: &str| {
+        result
+            .pointer(&format!("/summary/{key}"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let hit_rate = result
+        .pointer("/summary/cacheHitRate")
+        .and_then(serde_json::Value::as_f64)
+        .map(|rate| format!("{:.0}%", rate * 100.0))
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "usage over {range}\n  total {}  ·  in {}  ·  out {}\n  \
+         sessions {}  ·  cache hit {}",
+        s("totalTokens"),
+        s("inputTokens"),
+        s("outputTokens"),
+        s("totalSessions"),
+        hit_rate,
+    )
 }
 
 fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
@@ -3836,7 +4166,7 @@ fn render_suggestions(frame: &mut Frame<'_>, input_area: Rect, state: &UiState) 
 fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     let t = &state.theme;
     let rows = if state.input.starts_with('/') {
-        let suggestions = slash_suggestions(&state.input, 18);
+        let suggestions = slash_suggestions_merged(&state.input, 18, &state.kernel_commands);
         if suggestions.is_empty() {
             command_palette_rows()
         } else {

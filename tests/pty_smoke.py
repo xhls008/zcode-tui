@@ -131,8 +131,10 @@ check("s0: startup does not use the large logo", "███████" not in 
 
 # ---- scenario 1: live tool chips + summary render + watermark + cancel ----
 print("== scenario 1: real prompt with live progress ==", flush=True)
+# Classic --prompt path (db polling + --json summary): explicit opt-out now
+# that the binary defaults to the app-server streaming path.
 out = run_pty(
-    {}, SPIKE,
+    {"ZCODE_TUI_APP_SERVER": "0"}, SPIKE,
     [
         (1.5, b"Read notes.txt and data.txt, then summarize both in one sentence."),
         (0.5, b"\r"),
@@ -157,7 +159,7 @@ check(
 # ---- scenario 2: cancel path (process-group kill unchanged) ----
 print("== scenario 2: cancel mid-run ==", flush=True)
 out = run_pty(
-    {}, SPIKE,
+    {"ZCODE_TUI_APP_SERVER": "0"}, SPIKE,
     [
         (1.5, b"List every file then explain each in detail."),
         (0.5, b"\r"),
@@ -288,12 +290,12 @@ out = run_pty(
 check("s9: no panic under mouse events", "panicked" not in strip_ansi(out))
 
 # ---- scenario 10: app-server true streaming (user story: 单轮问答也流式) ----
-# Opt-in ZCODE_TUI_APP_SERVER=1: the reply must stream token-by-token straight
+# Default-on streaming: the reply must stream token-by-token straight
 # into the transcript (status bar reads "streaming (app-server)"), not land in
 # one block at the end. Needs the real kernel + model.
 print("== scenario 10: app-server streaming (opt-in) ==", flush=True)
 out = run_pty(
-    {"ZCODE_TUI_APP_SERVER": "1"}, SPIKE,
+    {}, SPIKE,
     [
         (1.5, b"List the numbers 1 through 20, one per line, nothing else."),
         (0.5, b"\r"),
@@ -328,7 +330,7 @@ with open(fake_bin, "w") as fh:
     )
 os.chmod(fake_bin, 0o755)
 out = run_pty(
-    {"ZCODE_TUI_APP_SERVER": "1", "ZCODE_TUI_ZCODE_BIN": fake_bin}, SPIKE,
+    {"ZCODE_TUI_ZCODE_BIN": fake_bin}, SPIKE,
     [
         (1.5, b"hello"),
         (0.5, b"\r"),
@@ -353,7 +355,7 @@ tool_dir = tempfile.mkdtemp(prefix="zcode-smoke-tool-")
 with open(os.path.join(tool_dir, "rows.txt"), "w") as fh:
     fh.write("".join(f"row {i}: value {i * 7}\n" for i in range(1, 31)))
 out = run_pty(
-    {"ZCODE_TUI_APP_SERVER": "1"}, tool_dir,
+    {}, tool_dir,
     [
         (1.5, b"Read rows.txt (show the full contents), then name the pattern in one sentence."),
         (0.5, b"\r"),
@@ -376,7 +378,7 @@ check("s12: turn finalized (no hang)", screen_seen(run_pty.last_raw, "done ("))
 print("== scenario 13: plan-mode approval overlay (app-server) ==", flush=True)
 perm_dir = tempfile.mkdtemp(prefix="zcode-smoke-perm-")
 out = run_pty(
-    {"ZCODE_TUI_APP_SERVER": "1"}, perm_dir,
+    {}, perm_dir,
     [
         (1.5, b"Create a file named perm.txt containing hello. Just create it."),
         (0.5, b"\r"),
@@ -396,7 +398,7 @@ check("s13: plan gating held (no file)", not os.path.exists(os.path.join(perm_di
 # ---- scenario 14: session controls — /model picker + /compact round-trip ----
 print("== scenario 14: /model + /compact (app-server) ==", flush=True)
 out = run_pty(
-    {"ZCODE_TUI_APP_SERVER": "1"}, SPIKE,
+    {}, SPIKE,
     [
         (1.5, b"Reply with exactly: ok"),
         (0.5, b"\r"),
@@ -417,7 +419,7 @@ check("s14: compact round-trip acknowledged", screen_seen(raw, "compacted"))
 # ---- scenario 15: steer — typing mid-turn steers instead of queueing ----
 print("== scenario 15: steer mid-turn (app-server) ==", flush=True)
 out = run_pty(
-    {"ZCODE_TUI_APP_SERVER": "1"}, SPIKE,
+    {}, SPIKE,
     [
         (1.5, b"Count slowly from 1 to 30, one number per line."),
         (0.5, b"\r"),
@@ -441,7 +443,7 @@ check("s15: turn completed after steer", screen_seen(raw, "done ("))
 print("== scenario 16: build-mode Write approval (app-server) ==", flush=True)
 wperm_dir = tempfile.mkdtemp(prefix="zcode-smoke-wperm-")
 out = run_pty(
-    {"ZCODE_TUI_APP_SERVER": "1"}, wperm_dir,
+    {}, wperm_dir,
     [
         (1.5, b"Create a file named w.txt containing hi. Just do it."),
         (0.5, b"\r"),
@@ -457,6 +459,81 @@ check("s16: permission overlay with options", screen_seen(raw, "Allow once"))
 check("s16: approved and turn completed", screen_seen(raw, "done ("))
 check("s16: write landed after approval",
       os.path.exists(os.path.join(wperm_dir, "w.txt")))
+
+# ---- scenario 17: streaming /sessions resume (session/resume handshake) ----
+# Earlier scenarios left sessions for SPIKE; picking one must resume it via
+# session/resume on the streaming path (was silently ignored before).
+print("== scenario 17: streaming resume via /sessions ==", flush=True)
+out = run_pty(
+    {}, SPIKE,
+    [
+        (2.5, b"/sessions"),
+        (0.8, b"\r"),      # open the picker (protocol source when idle)
+        (1.5, b"\r"),      # Enter picks the top (current-dir) session
+        (1.5, b"Reply with exactly: resumed-ok"),
+        (0.5, b"\r"),
+        (45.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=70,
+)
+plain = strip_ansi(out)
+check("s17: picker shown", "pick a session" in plain or "sessions" in plain)
+check("s17: resumed via protocol (history note)", "resumed sess_" in plain)
+check("s17: turn completed on resumed session", screen_seen(run_pty.last_raw, "done ("))
+
+# ---- scenario 18: /update aborts on sha512 mismatch (fake feed) ----
+# A local http feed advertises a newer version whose deb hash is wrong; the
+# update must download, fail verification, and abort without installing.
+print("== scenario 18: /update sha512-mismatch abort ==", flush=True)
+import functools, http.server, socketserver, threading
+feed_dir = tempfile.mkdtemp(prefix="zcode-smoke-feed-")
+with open(os.path.join(feed_dir, "latest-linux.yml"), "w") as fh:
+    fh.write("version: 99.99.99\nfiles:\n  - url: ZCode-99.99.99-linux-x64.deb\n"
+             "    sha512: REJECTTHISHASH==\nreleaseName: Release v99.99.99\n")
+with open(os.path.join(feed_dir, "ZCode-99.99.99-linux-x64.deb"), "wb") as fh:
+    fh.write(b"not a real deb")
+_handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=feed_dir)
+_httpd = socketserver.TCPServer(("127.0.0.1", 0), _handler)
+_port = _httpd.server_address[1]
+threading.Thread(target=_httpd.serve_forever, daemon=True).start()
+fake_app = tempfile.mkdtemp(prefix="zcode-smoke-app-")
+os.makedirs(os.path.join(fake_app, "resources"))
+with open(os.path.join(fake_app, "resources", "app-update.yml"), "w") as fh:
+    fh.write(f"provider: generic\nurl: http://127.0.0.1:{_port}/\n")
+out = run_pty(
+    {"ZCODE_APP": fake_app}, SPIKE,
+    [
+        (2.0, b"/update"),
+        (0.5, b"\r"),
+        (12.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=30,
+)
+_httpd.shutdown()
+plain = strip_ansi(out)
+check("s18: feed version compared", "latest: 99.99.99" in plain)
+check("s18: sha512 mismatch aborts", "sha512 MISMATCH" in plain)
+check("s18: nothing installed", "installed 99.99.99" not in plain)
+
+# ---- scenario 19: /usage (session + period stats) ----
+print("== scenario 19: /usage over the streaming session ==", flush=True)
+out = run_pty(
+    {}, SPIKE,
+    [
+        (1.5, b"Reply with exactly: ok"),
+        (0.5, b"\r"),
+        (45.0, b"/usage"),
+        (0.5, b"\r"),
+        (8.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=75,
+)
+plain = strip_ansi(out)
+check("s19: session usage rendered", "session usage" in plain and "total" in plain)
+check("s19: period stats rendered", "usage over 7d" in plain and "cache hit" in plain)
 
 failed = [name for name, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} checks passed", flush=True)
