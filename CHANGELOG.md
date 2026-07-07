@@ -6,6 +6,19 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-07
+
+### 修复(0.5.0 tag 打在修复落地之前,补丁版补上)
+
+- **流式 /resume 首次发言失败**:裸 `session/resume` 只恢复会话不恢复模型
+  运行时,续接后第一条 prompt 必报 `ZCODE_RUNTIME_MODEL_UNAVAILABLE`。
+  现随 resume 附上从内核 `~/.zcode/cli/config.json` 构造的 `runtimeModel`
+  (provider 凭证走 inline credential union,内核 strict schema 逐字段
+  实弹钉死);构造失败退回裸 resume + create 兜底。
+- **/update 的 feed 解析失效**:脚本里 sed 的花括号量词经 `format!` 转义后
+  变成无效正则,deb 文件名解析为空、更新在下载前就中止。改用 `-*`。
+- 冒烟 s15/s17 时序放宽;全套 53/53 通过(真内核 0.15.0 / 桌面包 3.2.5)。
+
 ## [0.5.0] - 2026-07-07
 
 ### 新增(流式毕业,openspec 变更 streaming-graduation)
