@@ -126,7 +126,7 @@ out = run_pty(
 plain = strip_ansi(out)
 check("s0: startup welcome card shown", "Welcome to ZCODE" in plain)
 check("s0: startup compact identity line shown", "ZhiPU terminal TUI" in plain)
-check("s0: startup official-style Z mark shown", "▀▀" in plain and "╱" in plain)
+check("s0: startup official-style Z mark shown", "██████" in plain)
 check("s0: startup does not use the large logo", "███████" not in plain)
 
 # ---- scenario 1: live tool chips + summary render + watermark + cancel ----
