@@ -29,6 +29,28 @@ results = []
 import re
 ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-B]")
 
+import pyte
+
+
+def screen_seen(raw, needle, step=2048):
+    """True if `needle` was visible on the emulated terminal screen at any
+    point while replaying `raw` (bytes) in `step`-sized chunks.
+
+    Substring checks on the raw pty stream are unreliable for STATUS BAR text:
+    ratatui diff-renders, so updating e.g. "streaming (app-server)" in place to
+    "done (8.3s)" skips unchanged cells (the shared 'e') and the byte stream
+    never carries the new text contiguously. Only a terminal emulation sees
+    what the user sees. Transcript lines are full-row writes, so plain
+    substring checks stay fine for those.
+    """
+    screen = pyte.Screen(120, 40)
+    stream = pyte.ByteStream(screen)
+    for at in range(0, len(raw), step):
+        stream.feed(raw[at : at + step])
+        if needle in "\n".join(screen.display):
+            return True
+    return False
+
 
 def strip_ansi(raw):
     """ratatui interleaves cursor-move escapes between CJK cells, so
@@ -36,16 +58,24 @@ def strip_ansi(raw):
     return ANSI.sub("", raw)
 
 
-def run_pty(env_extra, cwd, script, timeout=90):
-    """script: list of (delay_before_s, bytes_to_send). Returns full output."""
+def run_pty(env_extra, cwd, script, timeout=90, args=None):
+    """script: list of (delay_before_s, bytes_to_send). Returns full output.
+    args: extra CLI arguments for the binary (e.g. ["--mode", "plan"])."""
     env = dict(os.environ)
     env["ZCODE_TUI_NO_UPDATE_CHECK"] = "1"
     env["ZCODE_TUI_ZCODE_BIN"] = os.path.expanduser("~/.local/bin/zcode")
+    # Force the text skyline so the graphics-protocol probe is skipped: this
+    # dumb pty can neither render a graphics protocol nor answer the probe's
+    # DSR terminator, which would otherwise leave a thread blocked reading
+    # stdin for 2s and racing the event loop for scripted input. Real terminals
+    # answer DSR in ms; the true-image path can only be verified by a human in
+    # kitty/sixel/iTerm2. Scenarios may override.
+    env["ZCODE_TUI_SKYLINE"] = "braille"
     env.update(env_extra)
     master, slave = pty.openpty()
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
     proc = subprocess.Popen(
-        [BIN], stdin=slave, stdout=slave, stderr=slave,
+        [BIN] + (args or []), stdin=slave, stdout=slave, stderr=slave,
         env=env, cwd=cwd, close_fds=True,
     )
     os.close(slave)
@@ -72,6 +102,8 @@ def run_pty(env_extra, cwd, script, timeout=90):
     if proc.poll() is None:
         proc.kill()
     os.close(master)
+    # Raw bytes kept for pyte screen-state checks (see screen_seen).
+    run_pty.last_raw = buf
     return buf.decode("utf-8", errors="replace")
 
 
@@ -134,7 +166,7 @@ out = run_pty(
 )
 plain = strip_ansi(out)
 check("s3: purple wordmark shown", "178;108;196" in out)
-check("s3: skyline strip shown", "鸟巢" in plain and "天坛" in plain and "长城" in plain)
+check("s3: skyline strip shown (ZhiPU on horizon, braille or wire)", "ZhiPU" in plain)
 check("s3: not-configured headline", "not configured" in plain)
 check("s3: coding-plan login paths listed", "bigmodel-coding-plan-api-key" in plain)
 check("s3: no crash with missing db (banner rendered)", "ZCODE" in plain or "zcode" in plain)
@@ -149,7 +181,7 @@ out = run_pty(
     ],
     timeout=20,
 )
-check("s4: art still present", "鸟巢" in strip_ansi(out))
+check("s4: art still present", "ZhiPU" in strip_ansi(out))
 check("s4: no brand purple escape", "178;108;196" not in out)
 
 
@@ -238,6 +270,153 @@ out = run_pty(
     timeout=15,
 )
 check("s9: no panic under mouse events", "panicked" not in strip_ansi(out))
+
+# ---- scenario 10: app-server true streaming (user story: 单轮问答也流式) ----
+# Opt-in ZCODE_TUI_APP_SERVER=1: the reply must stream token-by-token straight
+# into the transcript (status bar reads "streaming (app-server)"), not land in
+# one block at the end. Needs the real kernel + model.
+print("== scenario 10: app-server streaming (opt-in) ==", flush=True)
+out = run_pty(
+    {"ZCODE_TUI_APP_SERVER": "1"}, SPIKE,
+    [
+        (1.5, b"List the numbers 1 through 20, one per line, nothing else."),
+        (0.5, b"\r"),
+        (100.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=120,
+)
+plain = strip_ansi(out)
+raw = run_pty.last_raw
+# Status-bar text needs the pyte screen check: ratatui's diff rendering can
+# split in-place status updates so the raw stream never carries them whole.
+check("s10: app-server path active (streaming status)", screen_seen(raw, "streaming (app-server)"))
+check("s10: turn completed", screen_seen(raw, "done ("))
+check("s10: answer rendered", "20" in plain)
+
+# ---- scenario 11: seamless downgrade when app-server is unusable ----
+# A fake `zcode` whose `app-server` subcommand exits immediately forces the
+# streaming handshake to fail; the process must downgrade once and answer via
+# --prompt. Deterministic (no model): the fake returns a --json summary.
+print("== scenario 11: app-server downgrade -> --prompt ==", flush=True)
+fake_bin = os.path.join(SPIKE, "fake-zcode")
+with open(fake_bin, "w") as fh:
+    fh.write(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  app-server) exit 0 ;;\n"
+        "  version) echo 0.15.0 ;;\n"
+        "  *) printf '%s\\n' "
+        "'{\"type\":\"result\",\"response\":\"downgrade fallback ok\",\"sessionId\":\"sess_fake\"}' ;;\n"
+        "esac\n"
+    )
+os.chmod(fake_bin, 0o755)
+out = run_pty(
+    {"ZCODE_TUI_APP_SERVER": "1", "ZCODE_TUI_ZCODE_BIN": fake_bin}, SPIKE,
+    [
+        (1.5, b"hello"),
+        (0.5, b"\r"),
+        (3.0, b"again"),
+        (0.5, b"\r"),
+        (3.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=20,
+)
+plain = strip_ansi(out)
+check("s11: downgrade notice shown", "falling back to --prompt" in plain)
+check("s11: --prompt fallback answered", "downgrade fallback ok" in plain)
+check("s11: downgrade announced once (permanent)", plain.count("falling back to --prompt") == 1)
+
+# ---- scenario 12: app-server tool chips + foldable tool output ----
+# Opt-in streaming with a tool-triggering prompt: the tool call must land in
+# the transcript as a foldable entry (name · duration + output), the long
+# output must fold with Ctrl+O, and the turn must finalize (done). Real kernel.
+print("== scenario 12: app-server tool chip + output folding ==", flush=True)
+tool_dir = tempfile.mkdtemp(prefix="zcode-smoke-tool-")
+with open(os.path.join(tool_dir, "rows.txt"), "w") as fh:
+    fh.write("".join(f"row {i}: value {i * 7}\n" for i in range(1, 31)))
+out = run_pty(
+    {"ZCODE_TUI_APP_SERVER": "1"}, tool_dir,
+    [
+        (1.5, b"Read rows.txt (show the full contents), then name the pattern in one sentence."),
+        (0.5, b"\r"),
+        (100.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=120,
+)
+plain = strip_ansi(out)
+check("s12: tool call persisted to transcript", "• Read" in plain or "• Bash" in plain)
+check("s12: long tool output folded with Ctrl+O", "Ctrl+O" in plain and "lines" in plain)
+# Status-bar text: pyte screen check (diff rendering; see screen_seen).
+check("s12: turn finalized (no hang)", screen_seen(run_pty.last_raw, "done ("))
+
+# ---- scenario 13: plan-mode permission approval overlay + Esc declines ----
+# Plan mode gates file writes behind interaction/requestUserInput. The TUI
+# must surface the approval overlay; Esc declines (session/stop) and the turn
+# must NOT hang until the 600s backstop. Real kernel; the model needs 30-100s
+# to reach the gated tool.
+print("== scenario 13: plan-mode approval overlay (app-server) ==", flush=True)
+perm_dir = tempfile.mkdtemp(prefix="zcode-smoke-perm-")
+out = run_pty(
+    {"ZCODE_TUI_APP_SERVER": "1"}, perm_dir,
+    [
+        (1.5, b"Create a file named perm.txt containing hello. Just create it."),
+        (0.5, b"\r"),
+        (120.0, b"\x1b"),   # Esc: decline the approval (or no-op if missed)
+        (6.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=145,
+    args=["--mode", "plan"],   # plan gates the write -> interaction request
+)
+plain = strip_ansi(out)
+raw = run_pty.last_raw
+check("s13: approval overlay appeared", screen_seen(raw, "Enter answers"))
+check("s13: declined without hanging", "declined" in plain and "cancelled" in plain)
+check("s13: plan gating held (no file)", not os.path.exists(os.path.join(perm_dir, "perm.txt")))
+
+# ---- scenario 14: session controls — /model picker + /compact round-trip ----
+print("== scenario 14: /model + /compact (app-server) ==", flush=True)
+out = run_pty(
+    {"ZCODE_TUI_APP_SERVER": "1"}, SPIKE,
+    [
+        (1.5, b"Reply with exactly: ok"),
+        (0.5, b"\r"),
+        (45.0, b"/model"),
+        (0.5, b"\r"),      # open the picker
+        (1.5, b"\r"),      # Enter re-selects the current model (harmless)
+        (2.0, b"/compact"),
+        (0.5, b"\r"),
+        (12.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=90,
+)
+raw = run_pty.last_raw
+check("s14: model picker listed kernel models", screen_seen(raw, "Enter selects"))
+check("s14: compact round-trip acknowledged", screen_seen(raw, "compacted"))
+
+# ---- scenario 15: steer — typing mid-turn steers instead of queueing ----
+print("== scenario 15: steer mid-turn (app-server) ==", flush=True)
+out = run_pty(
+    {"ZCODE_TUI_APP_SERVER": "1"}, SPIKE,
+    [
+        (1.5, b"Count slowly from 1 to 30, one number per line."),
+        (0.5, b"\r"),
+        (6.0, b"Stop counting and just say STEERED."),
+        (0.5, b"\r"),
+        (60.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=95,
+)
+plain = strip_ansi(out)
+raw = run_pty.last_raw
+check("s15: steer marker in transcript", "steering the running turn" in plain)
+check("s15: input not queued", not screen_seen(raw, "queued ("))
+check("s15: turn completed after steer", screen_seen(raw, "done ("))
 
 failed = [name for name, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} checks passed", flush=True)

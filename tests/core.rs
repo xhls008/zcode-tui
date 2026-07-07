@@ -435,7 +435,7 @@ fn streaming_job_delivers_all_output_with_eof_signals() {
     let mut finished = false;
     while let Ok(event) = job.receiver.recv_timeout(Duration::from_secs(10)) {
         match event {
-            JobEvent::Line(line) => lines.push(line),
+            JobEvent::Line { text, stderr } => lines.push((text, stderr)),
             JobEvent::Eof => eofs += 1,
             JobEvent::Finished { success, .. } => {
                 assert!(success);
@@ -446,8 +446,12 @@ fn streaming_job_delivers_all_output_with_eof_signals() {
 
     assert!(finished);
     assert_eq!(eofs, job.streams);
-    assert_eq!(lines.iter().filter(|l| l.as_str() == "500").count(), 1);
-    assert!(lines.iter().any(|l| l == "tail-marker"));
+    assert_eq!(lines.iter().filter(|(l, _)| l.as_str() == "500").count(), 1);
+    // Lines carry their origin stream, so structured-stdout consumers (the
+    // --prompt --json summary) can keep stderr warnings out of the parse.
+    assert!(lines
+        .iter()
+        .all(|(l, stderr)| (l == "tail-marker") == *stderr));
     assert_eq!(lines.len(), 501);
 }
 
@@ -1016,6 +1020,21 @@ fn prompt_summary_parses_real_shape_and_falls_back_on_text() {
 
     assert_eq!(parse_prompt_summary("plain text answer"), None);
     assert_eq!(parse_prompt_summary(r#"{"no_response": true}"#), None);
+
+    // Tool-using turns stream NDJSON (event objects, then the summary last).
+    // The parser must skip the event lines and pick the final summary object.
+    let ndjson = concat!(
+        r#"{"type":"tool_call","toolName":"Read"}"#,
+        "\n",
+        r#"{"type":"tool_result","content":"..."}"#,
+        "\n",
+        r#"{"sessionId":"sess_x","response":"done reading","projection":{"contextUsed":42,"contextWindow":200000}}"#,
+        "\n",
+    );
+    let summary = parse_prompt_summary(ndjson).expect("ndjson summary parses");
+    assert_eq!(summary.response, "done reading");
+    assert_eq!(summary.session_id.as_deref(), Some("sess_x"));
+    assert_eq!(summary.context_used, Some(42));
 }
 
 #[test]
@@ -1162,4 +1181,483 @@ fn ui_config_parses_colors_and_mouse_ignoring_junk() {
     assert_eq!(parse_hex_color("#12345"), None);
     assert_eq!(parse_hex_color("123456"), None);
     assert_eq!(parse_hex_color(" #A1b2C3 "), Some((0xa1, 0xb2, 0xc3)));
+}
+
+// ---- app-server protocol client -----------------------------------------
+
+#[test]
+fn app_request_envelope_has_no_jsonrpc() {
+    use zcode_tui::{app_create_params, encode_app_request};
+    let line = encode_app_request(1, "session/create", app_create_params("/proj"));
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["id"], 1);
+    assert_eq!(v["method"], "session/create");
+    assert_eq!(v["params"]["workspace"]["workspaceKey"], "/proj");
+    assert_eq!(v["params"]["workspace"]["workspacePath"], "/proj");
+    // The kernel rejects a jsonrpc field; we must never emit one.
+    assert!(v.get("jsonrpc").is_none());
+    assert!(!line.contains('\n'));
+}
+
+#[test]
+fn subscribe_params_request_continuous_delivery() {
+    use zcode_tui::{app_subscribe_params, APP_SERVER_DELIVERY_KIND};
+    let p = app_subscribe_params("sess_1");
+    assert_eq!(p["sessionId"], "sess_1");
+    assert_eq!(p["deliveryKind"], APP_SERVER_DELIVERY_KIND);
+    assert_eq!(p["deliveryKind"], "desktop-continuous");
+}
+
+#[test]
+fn decode_dispatches_response_event_and_state() {
+    use zcode_tui::{decode_app_message, AppServerEvent, AppServerMessage};
+    // Response with result.
+    let m = decode_app_message(r#"{"id":1,"result":{"session":{"sessionId":"sess_x"}}}"#).unwrap();
+    match m {
+        AppServerMessage::Response { id, result, error } => {
+            assert_eq!(id, 1);
+            assert!(error.is_none());
+            assert_eq!(
+                zcode_tui::app_session_id_from_result(&result.unwrap()).as_deref(),
+                Some("sess_x")
+            );
+        }
+        other => panic!("expected response, got {other:?}"),
+    }
+    // Response with error.
+    let m = decode_app_message(r#"{"id":2,"error":{"code":-32601,"message":"Method not found"}}"#)
+        .unwrap();
+    assert!(matches!(
+        m,
+        AppServerMessage::Response { error: Some(e), .. } if e.contains("Method not found")
+    ));
+    // session/event carrying a text delta.
+    let raw = r#"{"method":"session/event","params":{"deliveryKind":"desktop-continuous","payload":{"assistantMessageId":"msg_1","delta":"1","done":false,"kind":"text_delta"}}}"#;
+    assert_eq!(
+        decode_app_message(raw),
+        Some(AppServerMessage::Event(AppServerEvent {
+            kind: "text_delta".to_string(),
+            delta: "1".to_string(),
+            done: false,
+            ..Default::default()
+        }))
+    );
+    // state.updated is recognized as its own kind.
+    let m =
+        decode_app_message(r#"{"method":"state.updated","params":{"patch":{"status":"running"}}}"#)
+            .unwrap();
+    assert!(matches!(m, AppServerMessage::StateUpdated(_)));
+    // Unknown method -> Other; garbage -> None (skip).
+    assert_eq!(
+        decode_app_message(r#"{"method":"whatever","params":{}}"#),
+        Some(AppServerMessage::Other)
+    );
+    assert_eq!(decode_app_message("not json"), None);
+}
+
+#[test]
+fn decode_recognizes_server_requests_with_string_ids() {
+    use zcode_tui::{decode_app_message, AppServerMessage};
+    // Server→client request: method AND id together, STRING envelope id
+    // (kernel sends "server-1", "server-2", …). Was silently dropped before —
+    // which hung plan-mode turns until the 600s backstop.
+    let raw = r#"{"id":"server-1","method":"interaction/requestUserInput","params":{"requestId":"perm_1"}}"#;
+    match decode_app_message(raw).unwrap() {
+        AppServerMessage::ServerRequest { id, method, params } => {
+            assert_eq!(id, serde_json::json!("server-1"));
+            assert_eq!(method, "interaction/requestUserInput");
+            assert_eq!(params["requestId"], "perm_1");
+        }
+        other => panic!("expected server request, got {other:?}"),
+    }
+    // Numeric-id server requests dispatch the same way (id kept as raw JSON).
+    let raw = r#"{"id":7,"method":"interaction/requestUserInput","params":{}}"#;
+    assert!(matches!(
+        decode_app_message(raw).unwrap(),
+        AppServerMessage::ServerRequest { id, .. } if id == serde_json::json!(7)
+    ));
+    // Plain numeric-id responses are unaffected by the new branch.
+    assert!(matches!(
+        decode_app_message(r#"{"id":3,"result":{"accepted":true}}"#).unwrap(),
+        AppServerMessage::Response { id: 3, .. }
+    ));
+}
+
+#[test]
+fn interaction_request_parses_pinned_payload_and_tolerates_gaps() {
+    use zcode_tui::parse_interaction_request;
+    // The exact payload shape captured live 2026-07-07 (kernel 0.15.0).
+    let params = serde_json::json!({
+        "input": {"plan": "Create the file `x.txt` with `hello`."},
+        "prompt": "Tool ExitPlanMode requires user interaction",
+        "questions": [{
+            "header": "Plan",
+            "options": [{
+                "description": "Exit plan mode and start implementation.",
+                "label": "Approve",
+                "value": "approve"
+            }],
+            "question": "Review this implementation plan."
+        }],
+        "requestId": "perm_3357106e",
+        "schema": {"interaction": "plan_approval", "toolName": "ExitPlanMode"},
+        "sessionId": "sess_1",
+        "toolCallId": "call_2",
+        "toolName": "ExitPlanMode",
+        "turnId": "turn_3"
+    });
+    let request = parse_interaction_request(&params).unwrap();
+    assert_eq!(request.request_id, "perm_3357106e");
+    assert_eq!(request.tool_name, "ExitPlanMode");
+    assert_eq!(request.interaction, "plan_approval");
+    assert_eq!(
+        request.plan.as_deref(),
+        Some("Create the file `x.txt` with `hello`.")
+    );
+    assert_eq!(request.questions.len(), 1);
+    let question = &request.questions[0];
+    assert_eq!(question.header, "Plan");
+    assert_eq!(question.options[0].value, "approve");
+    assert_eq!(question.options[0].label, "Approve");
+    // Missing requestId or questions/options -> None (leave unanswered; the
+    // kernel's retry keeps it alive for a client that understands it).
+    assert!(parse_interaction_request(&serde_json::json!({"questions": []})).is_none());
+    assert!(
+        parse_interaction_request(&serde_json::json!({"requestId": "p", "questions": []}))
+            .is_none()
+    );
+    assert!(parse_interaction_request(
+        &serde_json::json!({"requestId": "p", "questions": [{"header": "H", "options": []}]})
+    )
+    .is_none());
+}
+
+#[test]
+fn interaction_reply_echoes_envelope_id_verbatim() {
+    use zcode_tui::encode_interaction_reply;
+    let line = encode_interaction_reply(
+        &serde_json::json!("server-3"),
+        "perm_9",
+        &[("Plan".to_string(), "approve".to_string())],
+    );
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    // The kernel keys the reply on its own envelope id — echoed as a STRING.
+    assert_eq!(v["id"], "server-3");
+    assert_eq!(v["result"]["requestId"], "perm_9");
+    assert_eq!(v["result"]["answers"]["Plan"], "approve");
+    assert!(!line.contains('\n'));
+}
+
+#[test]
+fn session_control_params_match_pinned_schemas() {
+    use zcode_tui::{
+        app_compact_params, app_set_mode_params, app_set_model_params, app_set_thought_params,
+        app_steer_params,
+    };
+    let p = app_set_mode_params("sess_1", "plan");
+    assert_eq!(
+        p,
+        serde_json::json!({"sessionId": "sess_1", "mode": "plan"})
+    );
+    let model_ref = serde_json::json!({"modelId": "glm-5.1", "providerId": "bigmodel"});
+    let p = app_set_model_params("sess_1", &model_ref);
+    assert_eq!(p["sessionId"], "sess_1");
+    assert_eq!(p["model"], model_ref);
+    let p = app_set_thought_params("sess_1", "disabled");
+    assert_eq!(p["sessionId"], "sess_1");
+    assert_eq!(p["thoughtLevel"], "disabled");
+    assert_eq!(
+        app_compact_params("sess_1"),
+        serde_json::json!({"sessionId": "sess_1"})
+    );
+    // steer is shaped exactly like send.
+    assert_eq!(
+        app_steer_params("sess_1", "focus on tests"),
+        serde_json::json!({"sessionId": "sess_1", "content": "focus on tests"})
+    );
+}
+
+#[test]
+fn state_controls_extracted_from_mode_changed_patch() {
+    use zcode_tui::app_state_controls;
+    // Shape captured live from a `reason:"mode_changed"` push (kernel 0.15.0).
+    let params = serde_json::json!({
+        "reason": "mode_changed",
+        "patch": {
+            "mode": {"current": "plan"},
+            "model": {
+                "available": [{
+                    "contextWindow": 200000,
+                    "label": "glm-5.1",
+                    "providerLabel": "BigModel",
+                    "ref": {"modelId": "glm-5.1", "providerId": "bigmodel"}
+                }],
+                "current": {"modelId": "glm-5.1", "providerId": "bigmodel"}
+            },
+            "permission": {"mode": "plan"},
+            "thoughtLevel": {
+                "available": [
+                    {"label": "enabled", "value": "enabled"},
+                    {"label": "disabled", "value": "disabled"}
+                ],
+                "current": "enabled",
+                "enabled": true
+            }
+        }
+    });
+    let controls = app_state_controls(&params).unwrap();
+    assert_eq!(controls.mode.as_deref(), Some("plan"));
+    assert_eq!(controls.models.len(), 1);
+    assert_eq!(controls.models[0].label, "glm-5.1");
+    assert_eq!(controls.models[0].provider, "BigModel");
+    assert_eq!(controls.models[0].reference["providerId"], "bigmodel");
+    assert_eq!(controls.model_current.as_deref(), Some("glm-5.1"));
+    assert_eq!(controls.thought_levels, vec!["enabled", "disabled"]);
+    assert_eq!(controls.thought_current.as_deref(), Some("enabled"));
+    // A patch without control keys -> None (nothing to merge).
+    assert!(app_state_controls(&serde_json::json!({"patch": {"status": "running"}})).is_none());
+    assert!(app_state_controls(&serde_json::json!({"reason": "x"})).is_none());
+}
+
+#[test]
+fn turn_accumulates_text_deltas_and_ignores_unknown() {
+    use zcode_tui::{AppServerEvent, AppServerTurn, TurnDelta};
+    let mut turn = AppServerTurn::default();
+    let ev = |kind: &str, delta: &str, done: bool| AppServerEvent {
+        kind: kind.to_string(),
+        delta: delta.to_string(),
+        done,
+        ..Default::default()
+    };
+    assert_eq!(turn.apply(&ev("text_start", "", false)), TurnDelta::None);
+    assert_eq!(turn.apply(&ev("text_delta", "1", false)), TurnDelta::Text);
+    assert_eq!(turn.apply(&ev("text_delta", "\n2", false)), TurnDelta::Text);
+    assert_eq!(
+        turn.apply(&ev("reasoning_delta", "thinking", false)),
+        TurnDelta::Reasoning
+    );
+    assert_eq!(
+        turn.apply(&ev("some_future_kind", "x", false)),
+        TurnDelta::None
+    );
+    assert_eq!(turn.apply(&ev("finish", "", true)), TurnDelta::Done);
+    assert_eq!(turn.text, "1\n2");
+    assert_eq!(turn.reasoning, "thinking");
+    assert!(turn.done);
+}
+
+#[test]
+fn turn_tracks_tool_calls_start_to_result() {
+    use zcode_tui::{decode_app_message, AppServerMessage, AppServerTurn, TurnDelta};
+    let mut turn = AppServerTurn::default();
+    let apply = |turn: &mut AppServerTurn, raw: &str| {
+        let Some(AppServerMessage::Event(ev)) = decode_app_message(raw) else {
+            panic!("expected event from {raw}");
+        };
+        turn.apply(&ev)
+    };
+    // A Read tool: start -> input delta -> full call -> result.
+    assert_eq!(
+        apply(
+            &mut turn,
+            r#"{"method":"session/event","params":{"payload":{"kind":"tool_input_start","toolCallId":"call_1","toolName":"Read","delta":"","done":false}}}"#
+        ),
+        TurnDelta::ToolStarted(0)
+    );
+    apply(
+        &mut turn,
+        r#"{"method":"session/event","params":{"payload":{"kind":"tool_input_delta","toolCallId":"call_1","delta":"{\"file_path\":\"notes.txt\"}","done":false}}}"#,
+    );
+    // The full tool_call re-sights the same id -> no new chip.
+    assert_eq!(
+        apply(
+            &mut turn,
+            r#"{"method":"session/event","params":{"payload":{"kind":"tool_call","toolCallId":"call_1","toolName":"Read","input":{},"delta":"","done":false}}}"#
+        ),
+        TurnDelta::None
+    );
+    assert_eq!(
+        apply(
+            &mut turn,
+            r#"{"method":"session/event","params":{"payload":{"kind":"result","toolCallId":"call_1","duration":41,"result":{"success":true,"content":"1\thello\n2\tworld"}}}}"#
+        ),
+        TurnDelta::ToolFinished(0)
+    );
+    assert_eq!(turn.tools.len(), 1);
+    let tool = &turn.tools[0];
+    assert_eq!(tool.name, "Read");
+    assert_eq!(tool.input, r#"{"file_path":"notes.txt"}"#);
+    assert_eq!(tool.output, "1\thello\n2\tworld");
+    assert_eq!(tool.duration_ms, Some(41));
+    assert!(tool.success && tool.finished);
+}
+
+#[test]
+fn tool_input_summary_condenses_json_args() {
+    use zcode_tui::tool_input_summary;
+    // Path values are basenamed and whitespace collapses.
+    assert_eq!(
+        tool_input_summary(r#"{"file_path":"/tmp/zcode/notes.txt"}"#),
+        "notes.txt"
+    );
+    // Non-object / non-JSON falls back to the trimmed raw text.
+    assert_eq!(tool_input_summary("  ls -la  "), "ls -la");
+    assert_eq!(tool_input_summary(""), "");
+    // Long summaries are capped with an ellipsis.
+    let long = format!(r#"{{"q":"{}"}}"#, "x".repeat(80));
+    assert!(tool_input_summary(&long).chars().count() <= 48);
+}
+
+#[test]
+fn app_server_opt_in_switch() {
+    use zcode_tui::app_server_enabled;
+    assert!(app_server_enabled(
+        |k| (k == "ZCODE_TUI_APP_SERVER").then(|| "1".to_string())
+    ));
+    assert!(app_server_enabled(|_| Some("on".to_string())));
+    assert!(!app_server_enabled(|_| None));
+    assert!(!app_server_enabled(|_| Some("0".to_string())));
+}
+
+#[test]
+fn skyline_stretches_to_fill_width_exactly() {
+    use unicode_width::UnicodeWidthStr;
+    use zcode_tui::skyline_lines;
+    for width in [70usize, 80, 100, 137] {
+        let rows = skyline_lines(width);
+        assert_eq!(rows.len(), 9, "8 silhouette rows + 1 horizon");
+        for row in &rows {
+            assert_eq!(row.width(), width, "row must fill exactly `width` columns");
+        }
+        // ZhiPU rests on the continuous horizon (last row); the nest mesh shows.
+        assert!(rows[8].contains("ZhiPU"));
+        assert!(rows.iter().any(|r| r.contains('╳')));
+    }
+    // Too narrow to lay out without overflow -> nothing (wordmark shows alone).
+    assert!(skyline_lines(20).is_empty());
+    assert!(skyline_lines(69).is_empty());
+}
+
+#[test]
+fn braille_skyline_is_fixed_logo_width_with_brand() {
+    use unicode_width::UnicodeWidthStr;
+    use zcode_tui::{skyline_braille, SKYLINE_LOGO_W};
+    let rows = skyline_braille();
+    assert_eq!(rows.len(), 8, "7 silhouette rows + 1 horizon");
+    for row in &rows {
+        assert_eq!(
+            row.width(),
+            SKYLINE_LOGO_W,
+            "every braille row is exactly the logo width so it centres under the wordmark"
+        );
+    }
+    // Brand mark rests on the horizon; silhouette uses braille dots (U+28xx).
+    assert!(rows[7].contains("ZhiPU"));
+    assert!(rows
+        .iter()
+        .any(|r| r.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c))));
+}
+
+#[test]
+fn skyline_mode_forces_and_autodetects() {
+    use zcode_tui::{skyline_mode, SkylineMode};
+    let force =
+        |val: &'static str| move |key: &str| (key == "ZCODE_TUI_SKYLINE").then(|| val.to_string());
+    assert_eq!(skyline_mode(force("wire")), SkylineMode::Wire);
+    assert_eq!(skyline_mode(force("braille")), SkylineMode::Braille);
+    assert_eq!(skyline_mode(force("off")), SkylineMode::None);
+    // auto: UTF-8 locale -> braille (default), non-UTF-8 -> wireframe.
+    let auto_utf8 = |key: &str| (key == "LANG").then(|| "en_US.UTF-8".to_string());
+    let auto_c = |key: &str| (key == "LANG").then(|| "C".to_string());
+    assert_eq!(skyline_mode(auto_utf8), SkylineMode::Braille);
+    assert_eq!(skyline_mode(auto_c), SkylineMode::Wire);
+}
+
+#[test]
+fn skyline_graphics_wanted_defaults_on_and_yields_to_text_modes() {
+    use zcode_tui::skyline_graphics_wanted;
+    let force =
+        |val: &'static str| move |key: &str| (key == "ZCODE_TUI_SKYLINE").then(|| val.to_string());
+    // Unset / auto / explicit `image` -> attempt the graphics protocol.
+    assert!(skyline_graphics_wanted(|_: &str| None));
+    assert!(skyline_graphics_wanted(force("auto")));
+    assert!(skyline_graphics_wanted(force("image")));
+    // Forcing a text/off mode opts out of the probe entirely.
+    assert!(!skyline_graphics_wanted(force("wire")));
+    assert!(!skyline_graphics_wanted(force("braille")));
+    assert!(!skyline_graphics_wanted(force("off")));
+    assert!(!skyline_graphics_wanted(force("none")));
+    assert!(!skyline_graphics_wanted(force("0")));
+    // Whitespace around a forced mode is tolerated.
+    assert!(!skyline_graphics_wanted(force("  wire  ")));
+}
+
+#[test]
+fn state_update_marks_turn_end_on_prompt_completed() {
+    use zcode_tui::app_state_is_turn_end;
+    let started = serde_json::json!({"reason":"prompt_started","patch":{"status":"running"}});
+    let completed =
+        serde_json::json!({"reason":"prompt_completed","patch":{"mode":{"current":"build"}}});
+    let status_completed = serde_json::json!({"reason":"whatever","patch":{"status":"completed"}});
+    // `idle`/`ready` are a settling state the kernel can emit *before* tokens
+    // flow on a reused session — they must NOT finalize the turn (would show
+    // "(no output)" prematurely). Only prompt_completed / status:completed do.
+    let idle = serde_json::json!({"reason":"whatever","patch":{"status":"idle"}});
+    let ready = serde_json::json!({"patch":{"status":"ready"}});
+    assert!(!app_state_is_turn_end(&started));
+    assert!(app_state_is_turn_end(&completed));
+    assert!(app_state_is_turn_end(&status_completed));
+    assert!(!app_state_is_turn_end(&idle));
+    assert!(!app_state_is_turn_end(&ready));
+}
+
+#[test]
+fn state_update_flags_abnormal_turn_end() {
+    use zcode_tui::{app_state_is_turn_end, app_state_turn_error};
+    // Abnormal terminal states end the turn (via a distinct path) rather than
+    // hanging on the 600s backstop — reported via reason or patch/status.
+    let errored = serde_json::json!({"reason":"error","patch":{"status":"running"}});
+    let aborted = serde_json::json!({"patch":{"status":"Aborted"}}); // case-insensitive
+    let failed = serde_json::json!({"reason":"failed"});
+    let running = serde_json::json!({"reason":"prompt_started","patch":{"status":"running"}});
+    assert_eq!(app_state_turn_error(&errored).as_deref(), Some("error"));
+    assert_eq!(app_state_turn_error(&aborted).as_deref(), Some("Aborted"));
+    assert_eq!(app_state_turn_error(&failed).as_deref(), Some("failed"));
+    assert!(app_state_turn_error(&running).is_none());
+    // An abnormal end is not a normal completion.
+    assert!(!app_state_is_turn_end(&errored));
+}
+
+#[test]
+fn state_watermark_found_anywhere_in_tree() {
+    use zcode_tui::app_state_watermark;
+    // Nested under an arbitrary path — the walk should still find the pair.
+    let params = serde_json::json!({
+        "patch": { "context": { "contextUsed": 1234, "contextWindow": 200000 } },
+        "reason": "turn",
+    });
+    assert_eq!(app_state_watermark(&params), Some((1234, 200000)));
+    // Alternate key names are accepted too.
+    let alt = serde_json::json!({ "usage": { "used": 10, "total": 100 } });
+    assert_eq!(app_state_watermark(&alt), Some((10, 100)));
+    // No pair / zero window -> None (caller keeps the last value).
+    assert_eq!(
+        app_state_watermark(&serde_json::json!({ "status": "running" })),
+        None
+    );
+    assert_eq!(
+        app_state_watermark(&serde_json::json!({ "used": 5, "window": 0 })),
+        None
+    );
+}
+
+#[test]
+fn unavailable_reasons_display() {
+    use zcode_tui::AppServerUnavailable;
+    assert!(AppServerUnavailable::Spawn("no bin".into())
+        .to_string()
+        .contains("did not start"));
+    assert!(AppServerUnavailable::Disconnected
+        .to_string()
+        .contains("closed"));
 }

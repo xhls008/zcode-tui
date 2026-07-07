@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -463,7 +464,9 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
     match parts[0].as_str() {
         "exit" | "quit" => Ok(InputAction::Quit),
         "help" | "clear" | "editor" | "login" | "logout" | "auth" | "status" | "diff" | "ide"
-        | "sessions" | "mode" | "resume" | "new" => Ok(InputAction::Local(parts)),
+        | "sessions" | "mode" | "resume" | "new" | "model" | "think" | "compact" => {
+            Ok(InputAction::Local(parts))
+        }
         "skills" => {
             let mut local = parts;
             if local.len() == 1 {
@@ -592,8 +595,18 @@ pub fn command_catalog() -> &'static [CommandSpec] {
         },
         CommandSpec {
             command: "/compact",
-            summary: "forward context compaction to ZCode",
-            route: "zcode",
+            summary: "compact the session context in place (keeps the session)",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/model",
+            summary: "switch the session model (app-server streaming path)",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/think",
+            summary: "cycle the thought level (app-server streaming path)",
+            route: "local",
         },
         CommandSpec {
             command: "/diff",
@@ -886,7 +899,15 @@ pub fn run_command(command: &[String]) -> Result<String> {
 
 #[derive(Debug)]
 pub enum JobEvent {
-    Line(String),
+    /// An output line tagged with its origin stream. stdout and stderr are
+    /// read by independent threads, so their lines interleave arbitrarily —
+    /// consumers that parse structured stdout (the `--prompt --json` summary)
+    /// MUST filter on `stderr`, or a stray kernel warning lands mid-JSON and
+    /// breaks the parse (seen as raw-summary leak + lost watermark).
+    Line {
+        text: String,
+        stderr: bool,
+    },
     /// One output stream (stdout or stderr) reached end-of-file; all of its
     /// lines were sent before this event.
     Eof,
@@ -941,11 +962,11 @@ pub fn spawn_streaming_command(command: &[String]) -> Result<StreamingJob> {
     let (sender, receiver) = channel();
     let mut streams = 0;
     if let Some(stdout) = child.stdout.take() {
-        spawn_line_reader(stdout, sender.clone());
+        spawn_line_reader(stdout, sender.clone(), false);
         streams += 1;
     }
     if let Some(stderr) = child.stderr.take() {
-        spawn_line_reader(stderr, sender.clone());
+        spawn_line_reader(stderr, sender.clone(), true);
         streams += 1;
     }
 
@@ -986,7 +1007,7 @@ pub fn spawn_streaming_command(command: &[String]) -> Result<StreamingJob> {
     })
 }
 
-fn spawn_line_reader<R>(reader: R, sender: Sender<JobEvent>)
+fn spawn_line_reader<R>(reader: R, sender: Sender<JobEvent>, stderr: bool)
 where
     R: Read + Send + 'static,
 {
@@ -996,7 +1017,11 @@ where
             let Ok(line) = line else {
                 break;
             };
-            if sender.send(JobEvent::Line(strip_ansi(&line))).is_err() {
+            let event = JobEvent::Line {
+                text: strip_ansi(&line),
+                stderr,
+            };
+            if sender.send(event).is_err() {
                 return;
             }
         }
@@ -1388,7 +1413,11 @@ pub fn help_text() -> &'static str {
   /diff [args]                 show git diff with coloring (e.g. /diff --staged)
   /ide [path]                  open cwd (or path) in your IDE; override with
                                ZCODE_TUI_IDE_CMD
-  /mode [build|edit|plan|yolo] show or switch permission mode
+  /mode [build|edit|plan|yolo] show or switch permission mode; applies live
+                               on the app-server streaming path
+  /model                       switch the session model (app-server path)
+  /think                       cycle the thought level (app-server path)
+  /compact                     compact the session context in place
   /resume [sess_id]            resume latest (bare) or a specific session
   /sessions                    pick a recent session from a list
   /new                         start a fresh session; context resets
@@ -1401,7 +1430,9 @@ keys:
   Ctrl+X then p/h/e/x/u/q      leader shortcuts
   Tab / Up / Down              navigate and accept suggestions
   Shift+Tab                    cycle permission mode
-  Enter                        accept selected suggestion or send
+  Enter                        accept selected suggestion or send; plain text
+                               sent mid-turn steers the running answer
+                               (app-server path; commands still queue)
   Left/Right Home/End          move the input cursor
   Ctrl+A / Ctrl+E              jump to start / end of input
   Ctrl+G                       edit prompt externally
@@ -2386,22 +2417,35 @@ pub struct PromptSummary {
 }
 
 pub fn parse_prompt_summary(output: &str) -> Option<PromptSummary> {
-    let value: serde_json::Value = serde_json::from_str(output.trim()).ok()?;
-    Some(PromptSummary {
-        response: value.get("response")?.as_str()?.to_string(),
-        session_id: value
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        context_used: value
-            .pointer("/projection/contextUsed")
-            .and_then(serde_json::Value::as_u64),
-        context_window: value
-            .pointer("/projection/contextWindow")
-            .and_then(serde_json::Value::as_u64),
-        total_tokens: value
-            .pointer("/usage/totalTokens")
-            .and_then(serde_json::Value::as_u64),
+    fn build(value: &serde_json::Value) -> Option<PromptSummary> {
+        Some(PromptSummary {
+            response: value.get("response")?.as_str()?.to_string(),
+            session_id: value
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            context_used: value
+                .pointer("/projection/contextUsed")
+                .and_then(serde_json::Value::as_u64),
+            context_window: value
+                .pointer("/projection/contextWindow")
+                .and_then(serde_json::Value::as_u64),
+            total_tokens: value
+                .pointer("/usage/totalTokens")
+                .and_then(serde_json::Value::as_u64),
+        })
+    }
+    // The common case: the whole output is one summary object.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(output.trim()) {
+        if let Some(summary) = build(&value) {
+            return Some(summary);
+        }
+    }
+    // Tool-using turns stream NDJSON (one object per line); the authoritative
+    // summary is the last line that parses to an object carrying `response`.
+    output.lines().rev().find_map(|line| {
+        let value = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
+        build(&value)
     })
 }
 
@@ -2428,6 +2472,186 @@ pub fn format_context_watermark(used: u64, window: u64) -> String {
 /// High-watermark hint threshold: suggest /new at >= 80% usage.
 pub fn context_watermark_warn(used: u64, window: u64) -> bool {
     window > 0 && used * 100 / window >= 80
+}
+
+/// A Beijing-skyline wireframe that stretches to fill `width`: four landmark
+/// motifs — 天坛 (Temple of Heaven), 鸟巢 (Bird's Nest), 长城 (Great Wall),
+/// 清华校门 (Tsinghua gate) — spread evenly over one continuous horizon with
+/// `ZhiPU` resting on it, mirroring the single-line brand mark. Pure and
+/// width-exact (every returned row has display width == `width`, all glyphs are
+/// single columns) so it can be unit-tested and re-fitted on terminal resize.
+/// Returns empty when `width` is too small to lay the motifs out without
+/// overflow — the caller then shows the wordmark alone.
+pub fn skyline_lines(width: usize) -> Vec<String> {
+    // Four Beijing landmarks in fine wireframe line-art, 8 silhouette rows each,
+    // every glyph a single column and each row left-aligned within its declared
+    // width (the layout draws onto a space-filled line, so short rows need no
+    // padding). Widths differ so the Bird's Nest and Wall read wider than the
+    // pagoda and gate, matching the real skyline's proportions.
+    #[rustfmt::skip]
+    const TIANTAN: [&str; 8] = [ // 天坛 · tiered pagoda + stepped base (13 cols)
+        "      ╷",
+        "     ╱╲",
+        "   ╭─┴─╮",
+        "   ╰┬─┬╯",
+        "  ╭┴───┴╮",
+        "  ╰─┬─┬─╯",
+        " ╭┴─────┴╮",
+        " ╘═══════╛",
+    ];
+    #[rustfmt::skip]
+    const NIAOCHAO: [&str; 8] = [ // 鸟巢 · flat woven-mesh ellipse (17 cols)
+        "",
+        "",
+        "   ╭─────────╮",
+        "  ╱╳╳╳╳╳╳╳╳╳╳╲",
+        " ╱╳╳╳╳╳╳╳╳╳╳╳╳╲",
+        " ╲╳╳╳╳╳╳╳╳╳╳╳╳╱",
+        "  ╲╳╳╳╳╳╳╳╳╳╳╱",
+        "   ╰─────────╯",
+    ];
+    #[rustfmt::skip]
+    const CHANGCHENG: [&str; 8] = [ // 长城 · watchtower + wall winding to the horizon (17 cols)
+        "  ╷ ╷ ╷",
+        " ╭┴─┴─┴╮",
+        " │ ╭─╮ │",
+        " │ │ │ │╷╷╷",
+        " │ │ │ ├┴┴┴╮",
+        " │ │ │ │   ╰─╮",
+        " │ │ │ │     ╰─╮",
+        " ╰─┴─┴─╯       ╰─",
+    ];
+    #[rustfmt::skip]
+    const XIAOMEN: [&str; 8] = [ // 清华二校门 · triple arch, tall centre, finial (13 cols)
+        "      ╷",
+        "    ╭─┴─╮",
+        "╭─────┴─────╮",
+        "│   ╭───╮   │",
+        "│╭─╮│   │╭─╮│",
+        "│││ │   │ │││",
+        "│││ │   │ │││",
+        "┴┴┴─┴───┴─┴┴┴",
+    ];
+    const MOTIFS: [&[&str]; 4] = [&TIANTAN, &NIAOCHAO, &CHANGCHENG, &XIAOMEN];
+    const WIDTHS: [usize; 4] = [13, 17, 17, 13];
+    const BRAND: &str = "ZhiPU";
+    const SILH: usize = 8; // silhouette rows above the horizon
+    let n = MOTIFS.len();
+    let motif_total: usize = WIDTHS[0] + WIDTHS[1] + WIDTHS[2] + WIDTHS[3];
+    let min_width = motif_total + (n + 1) * 2; // motifs + min 2-col gaps
+    if width < min_width {
+        return Vec::new();
+    }
+    let slack = width - motif_total;
+    let base = slack / (n + 1);
+    let extra = slack % (n + 1); // remainder spread onto the leftmost gaps
+    let gap = |i: usize| base + usize::from(i < extra);
+    // Start column of each motif (each ends at start + its own width).
+    let mut xs = Vec::with_capacity(n);
+    let mut cur = 0usize;
+    for (i, &motif_width) in WIDTHS.iter().enumerate() {
+        cur += gap(i);
+        xs.push(cur);
+        cur += motif_width;
+    }
+    let mut rows = Vec::with_capacity(SILH + 1);
+    for r in 0..SILH {
+        let mut line = vec![' '; width];
+        for (i, motif) in MOTIFS.iter().enumerate() {
+            for (j, ch) in motif[r].chars().enumerate() {
+                line[xs[i] + j] = ch;
+            }
+        }
+        rows.push(line.into_iter().collect());
+    }
+    // Continuous horizon with the brand mark resting at the centre (which, with
+    // four evenly-spread motifs, always lands in the middle gap).
+    let mut horizon = vec!['─'; width];
+    let brand_len = BRAND.chars().count();
+    let at = width / 2 - brand_len / 2;
+    for (k, ch) in BRAND.chars().enumerate() {
+        horizon[at + k] = ch;
+    }
+    rows.push(horizon.into_iter().collect());
+    rows
+}
+
+/// Fixed display width of the braille skyline and the wordmark it sits under —
+/// they render as one centred logo block (matching the reference art).
+pub const SKYLINE_LOGO_W: usize = 45;
+
+/// A higher-fidelity skyline drawn in Braille dots (2×4 sub-cells per glyph),
+/// pre-rendered at the fixed logo width so it centres under the ZCODE wordmark.
+/// Braille resolves smooth curves the box-drawing wireframe can't (the pagoda
+/// domes, the nest ellipse, the wall's winding ridge). Returns 7 silhouette rows
+/// + 1 horizon row, every row exactly `SKYLINE_LOGO_W` display columns.
+pub fn skyline_braille() -> Vec<String> {
+    // Pre-rendered (see the design prototype); every row is 45 columns wide, all
+    // glyphs single-column (braille U+28xx + box-drawing horizon).
+    const ROWS: [&str; 8] = [
+        "⠀⠀⠀⠀⠀⠀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        "⠀⠀⠀⠀⠰⠟⠿⠻⠆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣶⣄⠀⠀⠀⠀",
+        "⠀⠀⠀⣴⠞⠋⠉⠙⠳⣦⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠀⠀⠀⠀⠀",
+        "⠀⠀⢀⣀⣤⠤⠤⠤⣤⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣤⠀⣤⢠⡄⠀⠀⠀⠀⠀⠀⣿⠉⠉⢉⣽⠛⣯⡉⠉⠉⣿",
+        "⠀⠐⠛⠁⠀⠀⠀⠀⠀⠈⠛⠂⢀⣤⣴⠖⣶⠒⣶⠲⣦⣤⡀⣿⠉⠉⢹⣇⣒⣂⡤⠄⠀⠀⣿⣀⣀⣾⠃⠀⠘⣷⣀⣀⣿",
+        "⠀⠀⢀⣀⣀⣀⣀⣀⣀⣀⡀⢰⡏⠤⣿⠤⣿⠤⣿⠤⣿⠤⢹⣿⠀⣶⢸⡇⠀⠈⠉⠛⠿⣅⣿⡏⢹⣿⠀⠀⠀⣿⡏⢹⣿",
+        "⠀⠠⠤⠤⠤⠤⠤⠤⠤⠤⠤⠄⠙⠶⢿⣄⣿⣀⣿⣠⡿⠶⠋⣿⠀⣿⢸⡇⠀⠀⠀⠀⠀⢈⣿⣂⣀⣿⣀⣀⣀⣿⣀⣀⣿",
+        "────────────────────ZhiPU────────────────────",
+    ];
+    ROWS.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// How to render the welcome skyline. `Graphics` (Sixel/Kitty true image) is a
+/// planned stage-two enhancement and not produced yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkylineMode {
+    /// Braille-dot art — smoother curves; the default on capable terminals.
+    Braille,
+    /// Box-drawing wireframe — the widest-compatible fallback.
+    Wire,
+    /// Skyline suppressed (wordmark shows alone).
+    None,
+}
+
+/// Pick the skyline renderer. `ZCODE_TUI_SKYLINE=braille|wire|off` forces it;
+/// otherwise `auto` prefers the smoother Braille dots when the locale is UTF-8
+/// (they need a Unicode font) and falls back to the wireframe when it clearly
+/// is not. Set `wire` if your font renders the dots as tofu/blur.
+pub fn skyline_mode<F>(env_lookup: F) -> SkylineMode
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match env_lookup("ZCODE_TUI_SKYLINE").as_deref().map(str::trim) {
+        Some("wire") => SkylineMode::Wire,
+        Some("braille") => SkylineMode::Braille,
+        Some("off") | Some("none") | Some("0") => SkylineMode::None,
+        _ => {
+            let utf8 = ["LC_ALL", "LC_CTYPE", "LANG"]
+                .iter()
+                .find_map(|key| env_lookup(key))
+                .map(|value| value.to_lowercase().contains("utf"))
+                .unwrap_or(false);
+            if utf8 {
+                SkylineMode::Braille
+            } else {
+                SkylineMode::Wire
+            }
+        }
+    }
+}
+
+/// Whether to attempt the true graphics-protocol logo (Sixel/Kitty/iTerm2). It
+/// is the default; a terminal-capability probe decides if it actually renders,
+/// falling back to the text skyline ([`skyline_mode`]) otherwise. Forcing any
+/// text mode (`wire`/`braille`/`off`) opts out of the probe entirely.
+pub fn skyline_graphics_wanted<F>(env_lookup: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    !matches!(
+        env_lookup("ZCODE_TUI_SKYLINE").as_deref().map(str::trim),
+        Some("wire") | Some("braille") | Some("off") | Some("none") | Some("0")
+    )
 }
 
 // ---- session picker / history / folding / ui config -----------------------
@@ -2592,4 +2816,852 @@ pub fn load_ui_config() -> UiConfig {
     path.and_then(|path| fs::read_to_string(path).ok())
         .map(|content| parse_ui_config(&content))
         .unwrap_or_default()
+}
+
+// ---- app-server protocol client (experimental, ZCODE_TUI_APP_SERVER=1) ----
+//
+// The kernel's `app-server` is a newline-delimited JSON stdio protocol
+// (envelope {id, method, params}, NOT JSON-RPC — a `jsonrpc` key is
+// rejected). It is the only path to true token streaming: `--prompt`
+// buffers the kernel's internal delta stream, but app-server re-exposes it.
+//
+// Verified sequence (2026-07-06):
+//   session/create {workspace:{workspaceKey, workspacePath}}  -> session.sessionId
+//   session/subscribe {sessionId, deliveryKind:"desktop-continuous"}
+//   session/send {sessionId, content}                         -> {accepted:true}
+//   <- session/event notifications: params.payload.{kind, delta, done}
+//      kind text_delta carries the streamed body token by token.
+
+/// deliveryKind that streams events continuously (vs web-remote-replayable).
+pub const APP_SERVER_DELIVERY_KIND: &str = "desktop-continuous";
+
+/// Encode one request as a single compact JSON line (no jsonrpc field, no
+/// trailing newline — the caller frames with `\n`).
+pub fn encode_app_request(id: u64, method: &str, params: serde_json::Value) -> String {
+    serde_json::json!({ "id": id, "method": method, "params": params }).to_string()
+}
+
+pub fn app_create_params(workspace_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "workspace": { "workspaceKey": workspace_path, "workspacePath": workspace_path }
+    })
+}
+
+pub fn app_subscribe_params(session_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "sessionId": session_id,
+        "deliveryKind": APP_SERVER_DELIVERY_KIND,
+        "includeSnapshot": false
+    })
+}
+
+pub fn app_send_params(session_id: &str, content: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id, "content": content })
+}
+
+pub fn app_stop_params(session_id: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id })
+}
+
+// Session-control params (schemas pinned 2026-07-07 via zod-error probing on
+// kernel 0.15.0; setMode verified live).
+
+/// `session/setMode` — mode ∈ plan|build|edit|yolo|auto (kernel-enforced enum).
+pub fn app_set_mode_params(session_id: &str, mode: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id, "mode": mode })
+}
+
+/// `session/setModel` — `model` is sent back verbatim from the state push's
+/// `model.available[].ref` (shape `{modelId, providerId}`).
+pub fn app_set_model_params(session_id: &str, model_ref: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id, "model": model_ref })
+}
+
+/// `session/setThoughtLevel` — level values per the state push's
+/// `thoughtLevel.available[].value` (observed: enabled/disabled).
+pub fn app_set_thought_params(session_id: &str, level: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id, "thoughtLevel": level })
+}
+
+/// `session/compact` — compacts the session context in place.
+pub fn app_compact_params(session_id: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id })
+}
+
+/// `session/steer` — inject input into the RUNNING turn (same shape as send).
+pub fn app_steer_params(session_id: &str, content: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id, "content": content })
+}
+
+/// One selectable model from the state push's `model.available[]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelChoice {
+    pub label: String,
+    pub provider: String,
+    /// `available[].ref`, echoed back verbatim in `session/setModel`.
+    pub reference: serde_json::Value,
+}
+
+/// The session control surface carried by a `state.updated` patch (all fields
+/// optional — pushes are partial; the consumer merges non-empty fields).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionControls {
+    pub mode: Option<String>,
+    pub models: Vec<ModelChoice>,
+    /// Current model's `modelId`.
+    pub model_current: Option<String>,
+    pub thought_levels: Vec<String>,
+    pub thought_current: Option<String>,
+}
+
+/// Extract whatever control-surface state a `state.updated` push carries
+/// (`reason:"mode_changed"` carries the full set; others may carry parts).
+/// None when the patch has none of the control keys.
+pub fn app_state_controls(params: &serde_json::Value) -> Option<SessionControls> {
+    let patch = params.get("patch")?;
+    let controls = SessionControls {
+        mode: patch
+            .pointer("/mode/current")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        models: patch
+            .pointer("/model/available")
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|m| {
+                        Some(ModelChoice {
+                            label: m.get("label")?.as_str()?.to_string(),
+                            provider: m
+                                .get("providerLabel")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            reference: m.get("ref")?.clone(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        model_current: patch
+            .pointer("/model/current/modelId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        thought_levels: patch
+            .pointer("/thoughtLevel/available")
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|l| l.get("value").and_then(|v| v.as_str()).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        thought_current: patch
+            .pointer("/thoughtLevel/current")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    };
+    let empty = controls.mode.is_none()
+        && controls.models.is_empty()
+        && controls.model_current.is_none()
+        && controls.thought_levels.is_empty()
+        && controls.thought_current.is_none();
+    if empty {
+        None
+    } else {
+        Some(controls)
+    }
+}
+
+/// A decoded inbound line: a response to one of our requests, a session
+/// event (the token stream), a session-level state update, a server→client
+/// request (the kernel asking *us* something), or ignorable.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppServerMessage {
+    /// Response to request `id`; `error` set means the request failed.
+    Response {
+        id: u64,
+        result: Option<serde_json::Value>,
+        error: Option<String>,
+    },
+    /// `session/event` payload — the streaming turn events.
+    Event(AppServerEvent),
+    /// `state.updated` — session status/mode/model/context watermark.
+    StateUpdated(serde_json::Value),
+    /// Server→client request: carries `method` AND an envelope `id` we must
+    /// echo back in the reply. The kernel uses STRING ids here (`"server-1"`,
+    /// `"server-2"`, …) so the id is kept as raw JSON and returned verbatim
+    /// (`interaction/requestUserInput` is the permission-approval channel).
+    ServerRequest {
+        id: serde_json::Value,
+        method: String,
+        params: serde_json::Value,
+    },
+    /// A recognized-but-uninteresting line; skipped without failing.
+    Other,
+}
+
+/// One `session/event` payload. `kind` drives dispatch; the rest are set only
+/// for the kinds that carry them (tool events, `result`). Defaulted so tests
+/// and non-tool events can build it with just `kind`/`delta`/`done`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppServerEvent {
+    pub kind: String,
+    pub delta: String,
+    pub done: bool,
+    /// `toolName` (tool_input_start / tool_call / started).
+    pub tool_name: Option<String>,
+    /// `toolCallId` — correlates a tool across its start/input/result events.
+    pub tool_call_id: Option<String>,
+    /// `result.result.content` — the tool's output text (on `kind=result`).
+    pub output: Option<String>,
+    /// `result.result.success` — tool succeeded (on `kind=result`).
+    pub success: Option<bool>,
+    /// `result.duration` — tool wall time in ms (on `kind=result`).
+    pub duration_ms: Option<u64>,
+}
+
+/// Decode a single inbound protocol line. Unparseable lines -> None (skip).
+pub fn decode_app_message(line: &str) -> Option<AppServerMessage> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    // Server→client request: method AND id together (the kernel expects a
+    // reply). Must be checked before the Response branch — its envelope id is
+    // a string ("server-N"), and a u64-only path would drop it on the floor
+    // (observed: ignored interaction requests hang plan-mode turns until the
+    // 600s backstop).
+    if let (Some(method), Some(id)) = (
+        value.get("method").and_then(|m| m.as_str()),
+        value.get("id"),
+    ) {
+        return Some(AppServerMessage::ServerRequest {
+            id: id.clone(),
+            method: method.to_string(),
+            params: value
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        });
+    }
+    // Response: has an `id` and either result or error.
+    if let Some(id) = value.get("id").and_then(serde_json::Value::as_u64) {
+        let error = value.get("error").map(|err| {
+            err.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("app-server error")
+                .to_string()
+        });
+        let result = value.get("result").cloned();
+        return Some(AppServerMessage::Response { id, result, error });
+    }
+    match value.get("method").and_then(|m| m.as_str()) {
+        Some("session/event") => {
+            let payload = value.pointer("/params/payload")?;
+            let str_field = |key: &str| {
+                payload
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            };
+            Some(AppServerMessage::Event(AppServerEvent {
+                kind: payload.get("kind")?.as_str()?.to_string(),
+                delta: payload
+                    .get("delta")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                done: payload
+                    .get("done")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                tool_name: str_field("toolName"),
+                tool_call_id: str_field("toolCallId"),
+                // `result` events nest the tool output under /result/content.
+                output: payload
+                    .pointer("/result/content")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                success: payload
+                    .pointer("/result/success")
+                    .and_then(serde_json::Value::as_bool),
+                duration_ms: payload.get("duration").and_then(serde_json::Value::as_u64),
+            }))
+        }
+        Some("state.updated") => Some(AppServerMessage::StateUpdated(
+            value
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )),
+        _ => Some(AppServerMessage::Other),
+    }
+}
+
+/// The method name of the kernel's user-interaction (permission) request.
+pub const INTERACTION_METHOD: &str = "interaction/requestUserInput";
+
+/// One selectable option of an interaction question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractionOption {
+    pub label: String,
+    pub value: String,
+    pub description: String,
+}
+
+/// One question of an interaction request. `header` doubles as the answer key
+/// in the reply (`answers: {<header>: <option value>}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractionQuestion {
+    pub header: String,
+    pub question: String,
+    pub options: Vec<InteractionOption>,
+}
+
+/// A parsed `interaction/requestUserInput` (kernel 0.15.0, pinned 2026-07-07):
+/// the kernel re-sends the same `request_id` under fresh envelope ids with
+/// backoff until answered, so consumers must dedupe on `request_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractionRequest {
+    pub request_id: String,
+    /// Top-line prompt, e.g. "Tool ExitPlanMode requires user interaction".
+    pub prompt: String,
+    /// `schema.interaction`, e.g. "plan_approval".
+    pub interaction: String,
+    pub tool_name: String,
+    /// `input.plan` — the plan text under review (plan_approval).
+    pub plan: Option<String>,
+    pub questions: Vec<InteractionQuestion>,
+}
+
+/// Parse the params of an `interaction/requestUserInput` server request.
+/// Requires `requestId` and at least one question with at least one option
+/// (nothing to answer otherwise) — anything less returns None and the caller
+/// leaves the request unanswered (the kernel's retry keeps it alive for a
+/// future, more capable client).
+pub fn parse_interaction_request(params: &serde_json::Value) -> Option<InteractionRequest> {
+    let request_id = params.get("requestId")?.as_str()?.to_string();
+    let str_at = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let questions: Vec<InteractionQuestion> = params
+        .get("questions")?
+        .as_array()?
+        .iter()
+        .filter_map(|q| {
+            let options: Vec<InteractionOption> = q
+                .get("options")?
+                .as_array()?
+                .iter()
+                .filter_map(|o| {
+                    let value = o.get("value")?.as_str()?.to_string();
+                    Some(InteractionOption {
+                        label: {
+                            let label = str_at(o, "label");
+                            if label.is_empty() {
+                                value.clone()
+                            } else {
+                                label
+                            }
+                        },
+                        value,
+                        description: str_at(o, "description"),
+                    })
+                })
+                .collect();
+            if options.is_empty() {
+                return None;
+            }
+            Some(InteractionQuestion {
+                header: str_at(q, "header"),
+                question: str_at(q, "question"),
+                options,
+            })
+        })
+        .collect();
+    if questions.is_empty() {
+        return None;
+    }
+    Some(InteractionRequest {
+        request_id,
+        prompt: str_at(params, "prompt"),
+        interaction: params
+            .pointer("/schema/interaction")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        tool_name: str_at(params, "toolName"),
+        plan: params
+            .pointer("/input/plan")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        questions,
+    })
+}
+
+/// Encode the reply to a server→client interaction request as one compact
+/// JSON line. The envelope `id` is echoed back verbatim (string or number);
+/// `answers` maps each question's header to the chosen option value.
+pub fn encode_interaction_reply(
+    envelope_id: &serde_json::Value,
+    request_id: &str,
+    answers: &[(String, String)],
+) -> String {
+    let mut map = serde_json::Map::new();
+    for (header, value) in answers {
+        map.insert(header.clone(), serde_json::Value::String(value.clone()));
+    }
+    serde_json::json!({
+        "id": envelope_id,
+        "result": { "requestId": request_id, "answers": serde_json::Value::Object(map) }
+    })
+    .to_string()
+}
+
+/// A compact one-line summary of a tool's JSON input, for the chip header:
+/// `{"file_path":"/a/b/notes.txt"}` -> `notes.txt`. Joins the string values
+/// (path-basenamed), collapses whitespace, and caps at ~48 chars. Falls back to
+/// the trimmed raw input when it isn't a JSON object.
+pub fn tool_input_summary(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let raw = match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(serde_json::Value::Object(map)) => {
+            let parts: Vec<&str> = map
+                .values()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.rsplit('/').next().unwrap_or(s))
+                .filter(|s| !s.is_empty())
+                .collect();
+            if parts.is_empty() {
+                trimmed.to_string()
+            } else {
+                parts.join(" ")
+            }
+        }
+        _ => trimmed.to_string(),
+    };
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > 48 {
+        let mut out: String = collapsed.chars().take(47).collect();
+        out.push('…');
+        out
+    } else {
+        collapsed
+    }
+}
+
+/// Extract `session.sessionId` from a `session/create` result.
+pub fn app_session_id_from_result(result: &serde_json::Value) -> Option<String> {
+    result
+        .pointer("/session/sessionId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Whether a `state.updated` marks the running turn as finished. The kernel
+/// signals turn completion with `reason == "prompt_completed"` — there is no
+/// `finish` session/event — so this is the authoritative turn terminator. A
+/// status patch to the unambiguous terminal `completed` is a version-tolerant
+/// fallback. `idle`/`ready` are deliberately NOT treated as turn-end: the
+/// kernel can emit them as a settling state on a reused session *before* tokens
+/// flow, which would finalize the turn prematurely as "(no output)".
+pub fn app_state_is_turn_end(params: &serde_json::Value) -> bool {
+    if params.get("reason").and_then(|r| r.as_str()) == Some("prompt_completed") {
+        return true;
+    }
+    params.pointer("/patch/status").and_then(|s| s.as_str()) == Some("completed")
+}
+
+/// Whether a `state.updated` marks the turn as ended *abnormally* (error /
+/// failed / aborted / cancelled / interrupted), via `reason` or `patch/status`.
+/// Returns the offending word so the turn can be closed with a note instead of
+/// hanging on a false "streaming" spinner until the 600s backstop fires.
+pub fn app_state_turn_error(params: &serde_json::Value) -> Option<String> {
+    fn is_bad(s: &str) -> bool {
+        const BAD: [&str; 6] = [
+            "error",
+            "failed",
+            "aborted",
+            "cancelled",
+            "canceled",
+            "interrupted",
+        ];
+        BAD.contains(&s.to_ascii_lowercase().as_str())
+    }
+    for candidate in [
+        params.get("reason").and_then(|r| r.as_str()),
+        params.pointer("/patch/status").and_then(|s| s.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if is_bad(candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+/// Best-effort context watermark from a `state.updated` payload. The exact
+/// JSON path is not contractual and shifts across kernel builds, so this
+/// walks the tree for the first object carrying a used/window numeric pair
+/// under any known key name. Missing/zero window -> None (no watermark, no
+/// crash), which the caller treats as "leave the last value in place".
+pub fn app_state_watermark(params: &serde_json::Value) -> Option<(u64, u64)> {
+    const USED_KEYS: [&str; 4] = ["contextUsed", "used", "tokensUsed", "contextTokens"];
+    const WINDOW_KEYS: [&str; 4] = ["contextWindow", "window", "total", "maxTokens"];
+    fn walk(value: &serde_json::Value) -> Option<(u64, u64)> {
+        match value {
+            serde_json::Value::Object(map) => {
+                let used = USED_KEYS
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(serde_json::Value::as_u64));
+                let window = WINDOW_KEYS
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(serde_json::Value::as_u64));
+                if let (Some(used), Some(window)) = (used, window) {
+                    if window > 0 {
+                        return Some((used, window));
+                    }
+                }
+                map.values().find_map(walk)
+            }
+            serde_json::Value::Array(items) => items.iter().find_map(walk),
+            _ => None,
+        }
+    }
+    walk(params)
+}
+
+/// One tool invocation within a turn, correlated across its start/input/result
+/// events by `call_id`. `finished` flips when the `result` event lands.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppToolCall {
+    pub call_id: String,
+    pub name: String,
+    /// Accumulated `tool_input_delta` JSON (the arguments).
+    pub input: String,
+    /// Tool output text (`result.result.content`).
+    pub output: String,
+    pub success: bool,
+    pub duration_ms: Option<u64>,
+    pub finished: bool,
+}
+
+/// What visibly changed when a turn applied one event — lets the UI know
+/// exactly when to grow text, show a tool chip, or drop a finished tool into
+/// the transcript, without re-diffing the whole turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnDelta {
+    /// Nothing the UI needs to react to.
+    None,
+    /// Visible answer text grew.
+    Text,
+    /// Reasoning text grew (work-panel only).
+    Reasoning,
+    /// `tools[idx]` just began (show a running chip).
+    ToolStarted(usize),
+    /// `tools[idx]` just finished (persist it, foldable, to the transcript).
+    ToolFinished(usize),
+    /// The turn completed.
+    Done,
+}
+
+/// Accumulates a streaming turn from session/event deltas. Body text arrives as
+/// `text_delta` (like Anthropic content_block_delta); tool calls arrive as a
+/// start/input/result sequence correlated by `toolCallId`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppServerTurn {
+    pub text: String,
+    pub reasoning: String,
+    pub tools: Vec<AppToolCall>,
+    pub done: bool,
+}
+
+impl AppServerTurn {
+    fn tool_index(&self, call_id: &str) -> Option<usize> {
+        self.tools.iter().position(|t| t.call_id == call_id)
+    }
+
+    /// Apply one event, returning what changed so the caller can react.
+    pub fn apply(&mut self, event: &AppServerEvent) -> TurnDelta {
+        match event.kind.as_str() {
+            "text_delta" => {
+                self.text.push_str(&event.delta);
+                TurnDelta::Text
+            }
+            "reasoning_delta" => {
+                self.reasoning.push_str(&event.delta);
+                TurnDelta::Reasoning
+            }
+            // First sighting of a tool (start marker or full call) registers it.
+            "tool_input_start" | "tool_call" => {
+                let Some(call_id) = event.tool_call_id.as_deref() else {
+                    return TurnDelta::None;
+                };
+                if let Some(idx) = self.tool_index(call_id) {
+                    if let Some(name) = &event.tool_name {
+                        if !name.is_empty() {
+                            self.tools[idx].name = name.clone();
+                        }
+                    }
+                    TurnDelta::None
+                } else {
+                    self.tools.push(AppToolCall {
+                        call_id: call_id.to_string(),
+                        name: event.tool_name.clone().unwrap_or_default(),
+                        ..Default::default()
+                    });
+                    TurnDelta::ToolStarted(self.tools.len() - 1)
+                }
+            }
+            "tool_input_delta" => {
+                if let Some(call_id) = event.tool_call_id.as_deref() {
+                    if let Some(idx) = self.tool_index(call_id) {
+                        self.tools[idx].input.push_str(&event.delta);
+                    }
+                }
+                TurnDelta::None
+            }
+            "result" => {
+                let Some(call_id) = event.tool_call_id.as_deref() else {
+                    return TurnDelta::None;
+                };
+                let Some(idx) = self.tool_index(call_id) else {
+                    return TurnDelta::None;
+                };
+                let tool = &mut self.tools[idx];
+                if let Some(output) = &event.output {
+                    tool.output = output.clone();
+                }
+                tool.success = event.success.unwrap_or(true);
+                tool.duration_ms = event.duration_ms;
+                tool.finished = true;
+                TurnDelta::ToolFinished(idx)
+            }
+            "finish" => {
+                self.done = true;
+                TurnDelta::Done
+            }
+            "text_end" if event.done => {
+                self.done = true;
+                TurnDelta::Done
+            }
+            // input_end, scheduled, started, batch, tool_result, unknown: no-op.
+            _ => TurnDelta::None,
+        }
+    }
+}
+
+/// Why the app-server path was abandoned (all trigger a --prompt fallback).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppServerUnavailable {
+    Spawn(String),
+    Handshake(String),
+    Protocol(String),
+    Disconnected,
+}
+
+impl std::fmt::Display for AppServerUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn(why) => write!(f, "app-server did not start: {why}"),
+            Self::Handshake(why) => write!(f, "app-server handshake failed: {why}"),
+            Self::Protocol(why) => write!(f, "app-server protocol error: {why}"),
+            Self::Disconnected => write!(f, "app-server connection closed"),
+        }
+    }
+}
+
+/// Whether the experimental app-server path is opted in.
+pub fn app_server_enabled<F>(env_lookup: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    env_lookup("ZCODE_TUI_APP_SERVER")
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on"))
+}
+
+/// A long-lived connection to `zcode app-server`: one child process (own
+/// process group), a reader thread decoding inbound lines, and a stdin
+/// handle for requests. Requests get monotonic ids.
+pub struct AppServerConn {
+    child: Arc<Mutex<Child>>,
+    stdin: std::process::ChildStdin,
+    receiver: Receiver<AppServerMessage>,
+    /// Messages read while blocking for a specific response id are stashed
+    /// here so `poll` still delivers them afterwards (e.g. early events).
+    pending: VecDeque<AppServerMessage>,
+    next_id: u64,
+    alive: bool,
+}
+
+impl AppServerConn {
+    pub fn spawn(zcode_bin: &str) -> std::result::Result<Self, AppServerUnavailable> {
+        let mut process = Command::new(zcode_bin);
+        process
+            .arg("app-server")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            process.process_group(0);
+        }
+        let mut child = process
+            .spawn()
+            .map_err(|error| AppServerUnavailable::Spawn(error.to_string()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| AppServerUnavailable::Spawn("no stdin pipe".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AppServerUnavailable::Spawn("no stdout pipe".to_string()))?;
+        let (sender, receiver) = channel();
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                if let Some(message) = decode_app_message(&line) {
+                    if sender.send(message).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            child: Arc::new(Mutex::new(child)),
+            stdin,
+            receiver,
+            pending: VecDeque::new(),
+            next_id: 1,
+            alive: true,
+        })
+    }
+
+    fn write_request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> std::result::Result<u64, AppServerUnavailable> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let line = format!("{}\n", encode_app_request(id, method, params));
+        self.stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| self.stdin.flush())
+            .map_err(|_| {
+                self.alive = false;
+                AppServerUnavailable::Disconnected
+            })?;
+        Ok(id)
+    }
+
+    /// Fire-and-forget request; the response arrives via `poll`.
+    pub fn send(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> std::result::Result<u64, AppServerUnavailable> {
+        self.write_request(method, params)
+    }
+
+    /// Write a pre-encoded line verbatim (plus framing newline). Replies to
+    /// server→client requests echo the kernel's own envelope id — string ids
+    /// like "server-1" — so they bypass the u64 request-id counter.
+    pub fn reply(&mut self, line: &str) -> std::result::Result<(), AppServerUnavailable> {
+        self.stdin
+            .write_all(format!("{line}\n").as_bytes())
+            .and_then(|()| self.stdin.flush())
+            .map_err(|_| {
+                self.alive = false;
+                AppServerUnavailable::Disconnected
+            })
+    }
+
+    /// Send a request and block for its response, stashing any other
+    /// messages that arrive meanwhile. Used for the fast create/subscribe
+    /// handshake; the streaming turn uses `poll` instead.
+    pub fn request_blocking(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> std::result::Result<serde_json::Value, AppServerUnavailable> {
+        let want = self.write_request(method, params)?;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(AppServerUnavailable::Handshake(format!(
+                    "{method} timed out"
+                )));
+            }
+            match self.receiver.recv_timeout(remaining) {
+                Ok(AppServerMessage::Response { id, result, error }) if id == want => {
+                    return match error {
+                        Some(message) => Err(AppServerUnavailable::Protocol(message)),
+                        None => Ok(result.unwrap_or(serde_json::Value::Null)),
+                    };
+                }
+                Ok(other) => self.pending.push_back(other),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(AppServerUnavailable::Handshake(format!(
+                        "{method} timed out"
+                    )));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    self.alive = false;
+                    return Err(AppServerUnavailable::Disconnected);
+                }
+            }
+        }
+    }
+
+    /// Non-blocking: next buffered or newly-arrived message, if any.
+    pub fn poll(&mut self) -> Option<AppServerMessage> {
+        if let Some(message) = self.pending.pop_front() {
+            return Some(message);
+        }
+        match self.receiver.try_recv() {
+            Ok(message) => Some(message),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.alive = false;
+                None
+            }
+        }
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive
+    }
+
+    pub fn cancel(&self) {
+        if let Ok(mut child) = self.child.lock() {
+            #[cfg(unix)]
+            unsafe {
+                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+            }
+            let _ = child.kill();
+            // Reap the killed process so it does not linger as a <defunct>
+            // zombie for the (possibly hours-long) rest of the TUI session.
+            // After SIGKILL to the group this returns promptly.
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for AppServerConn {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }

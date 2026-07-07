@@ -4,6 +4,124 @@
 构建 x86_64-musl 静态 Linux 二进制（无需 Rust 工具链即可使用），连同
 SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版本段。
 
+## [Unreleased]
+
+### 新增(内核会话控制面,openspec 变更 kernel-session-controls)
+
+- **工具权限确认**:app-server 路径接住内核的服务器→客户端请求
+  `interaction/requestUserInput`(字符串信封 id,同 requestId 退避重发,
+  全部 2026-07-07 实测钉死)。plan 模式下被门禁的工具弹**确认浮层**
+  (↑↓ 选项、Enter 应答、Esc 拒绝=停止回合);plan_approval 批准后 TUI
+  自动 setMode(build) 并队列续跑提示(实测内核不自行翻模式/续跑)。
+  **同时修复**:此前这类请求被解码层当垃圾行丢弃,plan 模式回合挂到
+  600s 兜底。
+- **/model**:浮层列出内核上报的可用模型(state 推送的
+  `model.available[]`),Enter 发 `session/setModel`;当前模型带 ● 标记。
+- **/think**:在内核上报的思考级别间循环(`session/setThoughtLevel`,
+  字段名实测 `thoughtLevel`)。
+- **/compact**:app-server 会话直连 `session/compact` 原地压缩、保住会话;
+  高水位提示从"仅 /new"改为"/compact or /new?";无流式会话时照旧转发 CLI。
+- **/mode 与 Shift+Tab 升级**:app-server 会话活跃时改发 `session/setMode`
+  即刻生效(不再只影响下次 spawn);`--mode`/预设模式在流式握手时同步给
+  新会话(此前流式路径完全忽略 --mode)。
+- **Steer 中途转向**:流式回合进行中输入纯文本并 Enter 即
+  `session/steer` 进当前回合(不再排队;slash/shell 命令与握手/drain 期
+  仍排队);steer 失败自动退回排队,不丢输入。
+- 控制面回显一律以内核 `state.updated`(`mode_changed` 等)为权威,
+  命令失败按请求 id 关联报错、不影响会话;闲时也消费连接消息
+  (新增 idle pump,此前推送会滞留到下一回合)。
+
+### 修复
+
+- **内核 stderr 警告不再打碎 `--json` 总结解析**(间歇性):`--prompt` 子进程
+  的 stdout/stderr 由两个线程各自读行、汇入同一通道,一条 stderr 警告可能
+  恰好插进多行 pretty-printed 总结 JSON 中间——两条解析分支全失效,原始 JSON
+  整块漏进 transcript、上下文水位丢失。现在行事件携带来源流标记:总结缓冲
+  只收 stdout,stderr 收尾时单独以 dim 系统条目呈现(取消时丢弃)。
+  shell / diff 任务保持双流合并的实时视图不变。
+- **pty 冒烟的状态栏断言改用 pyte 终端仿真**(测试基建):ratatui 是差分渲染,
+  状态栏原地更新(如 "streaming (app-server)" → "done (8.3s)")会跳过未变
+  的单元格,原始字节流里永远不出现完整的新文案——裸子串断言必然间歇性误报
+  (s10/s12 的"回合未收尾"其实是采集伪影,TUI 本身行为正确,已用协议级
+  探针证实 `prompt_completed` 正常收尾)。transcript 行是整行写入,裸子串
+  断言依然可靠,维持不变。
+
+### 新增
+
+- **欢迎页真矢量 logo（终端图形协议）**:进入 alt-screen 后探测终端图形能力
+  (`ratatui-image` 的 `Picker::from_query_stdio`),支持
+  **Sixel / Kitty graphics / iTerm2 inline images** 时把 ZCODE logo 贴成
+  **真图**(内嵌 480×231 PNG,清华紫矢量描边——ZCODE 块字 + 天坛/鸟巢/长城/
+  清华二校门线稿 + ZhiPU 地平线,duotone 到 brand 紫与字标同色)。图像按会话
+  List 的条目行定位,整块滚入视图时才绘制(避免协议半绘污染)。
+- **不具备图形环境自动降级**:探测到 Halfblocks(无真图形协议)/ 探测失败 /
+  解码失败 → 无缝退回既有**文本天际线**(UTF-8 走 braille 盲文点阵,否则
+  wire 线框)。`ZCODE_TUI_SKYLINE=braille|wire` 强制走文本(跳过探测),
+  `off` 关闭。默认 auto = 先试图形再降级。
+  真图仅能由用户在支持的终端(kitty/sixel/iTerm2)肉眼验证——pty 冒烟无法
+  渲染图形协议,只覆盖探测/降级/编译。
+
+## [0.4.0] - 2026-07-06
+
+### 新增
+
+- **真流式(试验开关 `ZCODE_TUI_APP_SERVER=1`)**:接入内核的 `zcode
+  app-server`(换行分隔 JSON 的 stdio 协议),prompt 走
+  `session/create → session/subscribe(desktop-continuous) → session/send`,
+  助手正文经 `session/event` 的 `text_delta` **逐 token 增量渲染**进
+  transcript——**单轮纯问答也真流式**,补齐 0.3.2 说明里内核 `--prompt`
+  只能整块返回的限制。app-server 是长驻子进程(进程组),会话跨 prompt 复用
+  同一 sessionId,`/new` 重建;Esc/Ctrl+C 取消发 `session/stop`。
+- reasoning 增量显示在 composer 上方工作区;上下文水位改从 `state.updated`
+  权威事件提取(best-effort,路径随内核变化仍稳)。
+- **工具 chip + 输出折叠**(流式路径,对齐 Codex / Claude Code):工具运行时
+  在工作区显示 spinner chip;`result` 事件到达即把该次调用落进 transcript,
+  成为可 Ctrl+O 折叠的 `Tool` 条目(工具名 · 输入摘要 · 耗时 + 输出正文),
+  与正文按内核发出的先后顺序交错。工具事件按 `toolCallId` 关联
+  (`tool_input_start → …→ result{result.content}`)。
+- 回合终止判定修正:内核**不发** `finish`/`done` 事件;回合以
+  `state.updated {reason:"prompt_completed"}` 结束(`app_state_is_turn_end`)。
+  修掉了流式回合永远停在 "streaming"、要等 600s 兜底才收尾的问题。
+  首开欢迎/更新页的 ZCODE 下方天际线:天坛三重檐叠塔 + 台基、鸟巢编织网壳、
+  长城敌楼城垛 + 蜿蜒城墙、清华二校门中央高大三券洞 + 旗杆宝顶,四座地标坐在
+  连续地平线上、ZhiPU 居中。两种渲染:**braille 盲文点阵**(`skyline_braille`,
+  曲线更平滑,加粗笔画,默认走 UTF-8 环境)与**线框**(`skyline_lines`,最兼容
+  回退);`ZCODE_TUI_SKYLINE=braille|wire|off` 可强制。天际线与 ZCODE 字标
+  **同宽居中**为一个整体 logo(对齐参考设计图)。
+
+### 修复(对抗性审查)
+
+- **取消后陈旧事件污染下一回合**:Esc 取消后复用同一 session,被停回合的
+  尾部事件(含其 `prompt_completed`)会漏进**下一个** prompt——提前收尾新回合、
+  丢掉真正的回答。现引入 drain 态:取消后吞掉停回合尾部直到其终止事件,
+  之后才允许下一 prompt(超时兜底则强制重建 session)。
+- **更新提示中途插入错位索引**:启动探针回合中途报更新时
+  `apply_startup_report` 在顶部插入两行,后移全部索引,但未同步在流的
+  `text_index`/任务 `log_index`/展开集——流式 token 会写进错误条目。现按插入
+  数校正所有活动索引。
+- **同步握手冻结 UI 最长 40s**:首条 prompt 的 `session/create`+`subscribe`
+  两次 20s 阻塞调用改为**主循环非阻塞状态机**(按 id 关联响应),握手期间
+  UI 照常渲染、Esc 可取消;40s 看门狗超时降级。
+- **子进程不回收成僵尸**:`AppServerConn::cancel`/`Drop` 在 kill 后补
+  `wait()` 回收,不再残留 `<defunct>`。
+- **异常终止态不再苦等 600s**:新增 `app_state_turn_error`,`state.updated`
+  的 error/failed/aborted/… 即以提示收尾该回合(保留半截),不拖到 600s 兜底。
+- **`idle`/`ready` 不再误判回合结束**:仅 `prompt_completed` 与
+  `status:completed` 算终止;复用 session 上先于 token 的 `idle`/`ready`
+  过渡态不再把回合提前收成 "(no output)"。
+- **游离错误响应不误伤健康回合**:回合记录其 `session/send` 的 id,只有
+  **本回合**该 id 的错误响应才中止——取消遗留的 `session/stop` 错误响应
+  到达时不再降级正在流式的回合。
+
+### 说明
+
+- **默认关闭**,是 opt-in 试验路径。任一环节失败(app-server 起不动、握手
+  超时、schema 不符、连接中断)→ 本进程**永久无缝降级**回 `--prompt` +
+  一条 dim 提示;当前 prompt 用 `--prompt` 重试一次,用户永不卡死。开关未设
+  时代码路径与 0.3.x 完全一致。
+- 流式路径阶段 1 只落正文 + reasoning + 水位;工具 chip 走协议属阶段 2
+  (payload 形状待在活内核钉死)。
+
 ## [0.3.2] - 2026-07-05
 
 ### 新增

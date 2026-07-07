@@ -70,8 +70,12 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   内核边跑边写），工作区实时显示工具 chip（运行中 spinner → 完成 ✓ + 耗时 /
   失败 ✗）、最新 reasoning、以及**正在成形的助手正文**（多步回合里逐步落库）；
   仅运行时显示、结束即清场；schema 不识别或库缺失时整组自动降级。
-  注：单轮纯问答（不调工具）的正文由内核在生成结束时整块写入，运行期间
-  没有中间态可显示——真 token 流式需要内核 app-server 协议（评估中）。
+- **真流式（试验，`ZCODE_TUI_APP_SERVER=1`）**：接内核 `zcode app-server`
+  协议（`session/create → subscribe → send`），助手正文经 `session/event`
+  的 `text_delta` 逐 token 增量渲染进 transcript——**单轮纯问答也真流式**，
+  补齐上面 db 轮询对单轮无中间态的空缺。默认关闭；任一环节失败（起不动 /
+  握手超时 / schema 不符 / 断连）→ 本进程永久无缝降级回 `--prompt` + 一条
+  dim 提示，当前 prompt 用 `--prompt` 重试一次，用户永不卡死。
 - **上下文水位**：prompt 通道用 `--json` 总结对象作为权威结果（response 走
   markdown 渲染，解析失败自动降级纯文本），状态栏常驻 `ctx 9k/200k (4%)`
   用量显示，≥80% 提示 `/new`。
@@ -248,7 +252,13 @@ text                         通过 zcode --prompt 发送 prompt
 /mcp remove <name>           删除 MCP server
 /mcp ... --scope user        操作 ~/.config/zcode/mcp.json
 /mcp status                  作为 /mcp status 转发给 ZCode
-/mode [build|edit|plan|yolo] 查看/切换权限模式（Shift+Tab 循环）
+/mode [build|edit|plan|yolo] 查看/切换权限模式（Shift+Tab 循环）；
+                             app-server 流式路径下即刻作用于活跃会话
+/model                       切换会话模型（浮层选择内核上报的候选；
+                             app-server 流式路径）
+/think                       循环思考级别 enabled/disabled（app-server）
+/compact                     原地压缩会话上下文、保住会话（app-server 会话
+                             直连内核 compact；否则转发 CLI）
 /resume [sess_id]            恢复最近（不带参数）或指定会话
 /sessions                    浮层选择最近会话并接续
 /new                         重开会话，上下文重置
@@ -268,8 +278,13 @@ Ctrl+P                       命令面板
 Ctrl+X then p/h/e/x/u/q      leader：面板/帮助/编辑器/清会话/清输入/退出
 Tab / Up / Down              建议菜单：接受 / 选择
 Shift+Tab                    循环切换权限模式
-Enter                        发送；菜单导航中则接受选中项
-Esc                          关闭菜单弹窗 → 取消运行中任务 → 退出
+Enter                        发送；菜单导航中则接受选中项；流式回合进行中
+                             发送纯文本＝转向当前回合（steer，app-server；
+                             slash 命令仍排队）
+Esc                          关闭菜单弹窗 → 取消运行中任务 → 退出；
+                             权限确认浮层上＝拒绝
+Up / Down / Enter            权限确认浮层：选择选项 / 应答（plan 模式下被
+                             门禁的工具会弹出该浮层）
 Left/Right Home/End          输入光标移动
 Ctrl+A / Ctrl+E              行首 / 行尾
 Ctrl+W                       删除前一个词
@@ -289,8 +304,17 @@ ZCODE_TUI_LOGIN_CMD          覆盖 /login 执行的命令
 ZCODE_TUI_LOGOUT_CMD         覆盖 /logout 执行的命令
 ZCODE_TUI_IDE_CMD            覆盖 /ide 启动的 IDE 命令
 ZCODE_TUI_NO_UPDATE_CHECK    置 1 关闭启动时的官方更新检测
+ZCODE_TUI_APP_SERVER         置 1/true/on 启用试验性真流式（走 zcode
+                             app-server，逐 token 流式；失败无缝降级回
+                             --prompt）。默认关闭
 ZCODE_API_KEY 等             /auth 检测的 API key 环境变量链
 ZCODE_TUI_NO_MOUSE           置 1 关闭鼠标捕获
+ZCODE_TUI_SKYLINE            欢迎页 ZCODE logo 渲染：默认探测终端图形协议
+                             （Sixel/Kitty/iTerm2），支持则贴真图（清华紫矢量
+                             logo）；不支持自动降级为文本天际线——UTF-8 环境走
+                             braille 盲文点阵（曲线更平滑），否则 wire 线框。
+                             braille / wire 可强制走文本天际线（跳过图形探测），
+                             off 关闭天际线。若点阵显示成方块/发虚，设 wire
 ZCODE_TUI_CONFIG             配置文件路径（默认 ~/.config/zcode-tui/config）
 ZCODE_APP                    wrapper：指定 ZCode 桌面包目录（覆盖自动探测）
 ZCODE_FALLBACK_TUI           wrapper：指定 fallback TUI 二进制路径

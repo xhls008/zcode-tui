@@ -25,19 +25,29 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
 };
 use ratatui::{Frame, Terminal};
+use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::StatefulImage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zcode_tui::{
-    classify_input, command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
-    detect_auth_status, diff_line_role, env_is_headless, file_suggestions, fold_preview,
+    app_compact_params, app_create_params, app_send_params, app_server_enabled,
+    app_session_id_from_result, app_set_mode_params, app_set_model_params, app_set_thought_params,
+    app_state_controls, app_state_is_turn_end, app_state_turn_error, app_state_watermark,
+    app_steer_params, app_stop_params, app_subscribe_params, classify_input, command_palette_rows,
+    context_watermark_warn, db_baseline, db_schema_supported, detect_auth_status, diff_line_role,
+    encode_interaction_reply, env_is_headless, file_suggestions, fold_preview,
     format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
     is_newer_version, kernel_db_path_from, latest_assistant_text, latest_reasoning,
     latest_session_for_dir, leader_action_for_key, list_recent_sessions, live_tool_chips,
     load_ui_config, login_command, markdown_lines, open_kernel_db_ro, parse_cli_args,
-    parse_prompt_summary, parse_stream_event, parse_update_feed, parse_update_feed_url,
-    prompt_command_for, recent_input_history, relative_age, run_command, shorten_home,
-    slash_suggestions, spawn_streaming_command, wrap_display, AppConfig, AuthStatus, DbBaseline,
-    DiffRole, InputAction, JobEvent, LeaderAction, LiveToolChip, MdLineKind, SessionRow, SpanRole,
-    StreamEvent, StreamingJob, ToolChipStatus, UiConfig, UpdateFeed,
+    parse_interaction_request, parse_prompt_summary, parse_stream_event, parse_update_feed,
+    parse_update_feed_url, prompt_command_for, recent_input_history, relative_age, run_command,
+    shorten_home, skyline_braille, skyline_graphics_wanted, skyline_lines, skyline_mode,
+    slash_suggestions, spawn_streaming_command, tool_input_summary, wrap_display, AppConfig,
+    AppServerConn, AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, DbBaseline,
+    DiffRole, InputAction, InteractionRequest, JobEvent, LeaderAction, LiveToolChip, MdLineKind,
+    SessionControls, SessionRow, SkylineMode, SpanRole, StreamEvent, StreamingJob, ToolChipStatus,
+    TurnDelta, UiConfig, UpdateFeed, INTERACTION_METHOD, SKYLINE_LOGO_W,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -49,36 +59,27 @@ const FOLD_THRESHOLD: usize = 24;
 const FOLD_HEAD: usize = 8;
 const HISTORY_SEARCH_LIMIT: usize = 8;
 
-/// ZCODE wordmark over a Beijing skyline: 天坛, 鸟巢, 长城, 清华校门.
-/// Shown when a newer official ZCode release is detected.
-const ZCODE_LOGO: &str = r#"      _/^\_        /\/\/\/\/\      n_n_n_n_n_n      .-~~~~~-.
-     /_____\       \/\/\/\/\/     _|_________|_    /  _____  \
-    /_______\      /\/\/\/\/\    |_____________|  | | |___| | |
-   |__|_|_|__|      \______/     |_____________|  |_|       |_|
-      天坛             鸟巢             长城           清华校门
-
-███████╗  ██████╗  ██████╗  ██████╗  ███████╗
+/// The ZCODE block wordmark. Rendered bright (`█` blocks) over a dim/shadow
+/// secondary layer; the responsive Beijing-skyline wireframe (`skyline_lines`)
+/// is drawn beneath it at render time so it stretches to the terminal width.
+/// Used for both the not-configured welcome (Brand → 清华紫) and the update
+/// notice (Logo → GLM 蓝).
+const ZCODE_WORDMARK: &str = r#"███████╗  ██████╗  ██████╗  ██████╗  ███████╗
 ╚══███╔╝ ██╔════╝ ██╔═══██╗ ██╔══██╗ ██╔════╝
   ███╔╝  ██║      ██║   ██║ ██║  ██║ █████╗
  ███╔╝   ██║      ██║   ██║ ██║  ██║ ██╔══╝
 ███████╗ ╚██████╗ ╚██████╔╝ ██████╔╝ ███████╗
 ╚══════╝  ╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝"#;
 
-/// Not-configured welcome screen: the wordmark in Tsinghua purple (solid
-/// blocks bright, outline glyphs as the darker shadow layer) over a
-/// Beijing-skyline silhouette strip (鸟巢/长城/天坛).
-const UNAUTH_LOGO: &str = r#"███████╗  ██████╗  ██████╗  ██████╗  ███████╗
-╚══███╔╝ ██╔════╝ ██╔═══██╗ ██╔══██╗ ██╔════╝
-  ███╔╝  ██║      ██║   ██║ ██║  ██║ █████╗
- ███╔╝   ██║      ██║   ██║ ██║  ██║ ██╔══╝
-███████╗ ╚██████╗ ╚██████╔╝ ██████╔╝ ███████╗
-╚══════╝  ╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝
-
-    /\/\/\/\/\      n_n_n_n_n_n        _/^\_
-    \/\/\/\/\/     _|_________|_      /_____\
-    /\/\/\/\/\    |_____________|    /_______\
-     \______/     |_____________|   |__|_|_|__|
-       鸟巢             长城             天坛"#;
+/// The true ZCODE logo (清华紫 purple block letters + Beijing-landmark line art
+/// on the ZhiPU horizon), rendered via a terminal graphics protocol when
+/// available. 480×231 RGBA, transparent background, duotoned onto the brand
+/// purple so it matches the text wordmark. Falls back to the text skyline.
+const LOGO_PNG: &[u8] = include_bytes!("../assets/zcode-logo.png");
+/// Cell footprint reserved for the graphics logo. The 2.04:1 source is fit
+/// (aspect-preserving) into this box; ~2:1 cell aspect keeps margins small.
+const LOGO_IMG_ROWS: u16 = 14;
+const LOGO_IMG_COLS: u16 = 58;
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -99,6 +100,9 @@ fn main() -> Result<()> {
 fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
     let mut state = UiState::new(config, zcode_bin.to_string());
     let mut terminal = TerminalGuard::enter(state.mouse_enabled)?;
+    // Probe for a graphics protocol now that the alt-screen is active and
+    // before the event loop reads stdin (ratatui-image queries via stdio).
+    state.init_graphics_logo();
     state.push_banner();
     state.push_unauth_screen_if_needed();
     let probe = spawn_startup_probe(zcode_bin.to_string());
@@ -113,6 +117,9 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
             state.apply_startup_report(report);
         }
         state.pump_job();
+        state.pump_app_connect();
+        state.pump_app_turn();
+        state.pump_app_idle();
         state.poll_live_progress();
         state.drain_queue();
         terminal.draw(&mut state)?;
@@ -162,7 +169,7 @@ fn run_editor_effect(terminal: &mut TerminalGuard, state: &mut UiState) {
 }
 
 fn run_login_effect(terminal: &mut TerminalGuard, state: &mut UiState) {
-    if state.job.is_some() {
+    if state.is_busy() {
         state.status = "busy: wait for the running job before /login".to_string();
         return;
     }
@@ -493,8 +500,13 @@ struct ActiveJob {
     cancel_requested: bool,
     started: Instant,
     /// Assistant jobs buffer stdout here: with --json the whole output is
-    /// one end-of-run summary object, parsed at finalize.
+    /// one end-of-run summary object, parsed at finalize. stderr is kept
+    /// apart in `errs` — a stray kernel warning interleaved mid-JSON would
+    /// otherwise break the summary parse (raw leak + lost watermark).
     raw: Vec<String>,
+    /// Assistant jobs: kernel stderr lines, surfaced as a dim note at
+    /// finalize instead of polluting the summary buffer.
+    errs: Vec<String>,
     live: Option<LiveProgress>,
 }
 
@@ -507,6 +519,65 @@ impl ActiveJob {
 }
 
 const PERMISSION_MODES: [&str; 4] = ["build", "edit", "plan", "yolo"];
+
+/// State of the experimental app-server streaming path for this process.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppMode {
+    /// `ZCODE_TUI_APP_SERVER` not set: always the classic `--prompt` path.
+    Off,
+    /// Opted in and healthy: prompts stream through the app-server.
+    Ready,
+    /// Opted in but a failure permanently downgraded this run to `--prompt`.
+    Downgraded,
+}
+
+/// A single in-flight app-server turn. Answer text streams into an assistant
+/// transcript entry token by token; running tools show as live chips and drop
+/// into the transcript (foldable) as they finish, so text and tools interleave
+/// in chronological order — the way Codex / Claude Code render a turn.
+struct AppTurn {
+    turn: AppServerTurn,
+    /// The open assistant text entry, or None between text runs (e.g. right
+    /// after a tool landed, before the next text token). Created lazily.
+    text_index: Option<usize>,
+    /// Bytes of `turn.text` already flushed into transcript entries; the rest
+    /// is the unwritten suffix appended on the next Text delta.
+    written: usize,
+    started: Instant,
+    cancel_requested: bool,
+    /// At least one visible text token has landed — distinguishes "connection
+    /// died before any answer" (retry via --prompt) from "died mid-answer"
+    /// (keep the partial, just downgrade).
+    got_text: bool,
+    /// Request id of this turn's `session/send`. Only an error Response for
+    /// *this* id aborts the turn — a stray error (e.g. a prior cancel's
+    /// `session/stop`) arriving mid-turn must not down a healthy turn.
+    send_id: u64,
+}
+
+/// A non-blocking `session/create` → `session/subscribe` handshake in flight.
+/// Driven off the main loop so the UI keeps rendering (and Esc keeps working)
+/// instead of freezing on two synchronous 20s blocking calls.
+struct AppConnect {
+    phase: ConnectPhase,
+    /// The prompt to send once the session is subscribed.
+    prompt: String,
+    started: Instant,
+}
+
+/// Which handshake response the connect state is waiting on (matched by id).
+enum ConnectPhase {
+    Create(u64),
+    Subscribe(u64),
+}
+
+/// Stage tag copied out of `ConnectPhase` so a poll loop can mutate `self`
+/// without holding a borrow of `app_connect` across the arms.
+#[derive(Clone, Copy)]
+enum ConnectStage {
+    Create,
+    Subscribe,
+}
 
 /// Availability of the kernel's sqlite database for live progress.
 /// Resolved once by the startup probe; anything but Enabled degrades every
@@ -548,12 +619,66 @@ struct UiState {
     tick: usize,
     /// /sessions picker overlay: rows + selected index.
     session_picker: Option<(Vec<SessionRow>, usize)>,
+    /// /model picker overlay: selected index into `controls.models`.
+    model_picker: Option<usize>,
     /// Ctrl+R reverse search overlay: query + selected index.
     history_query: Option<(String, usize)>,
     /// Log indices the user expanded with Ctrl+O (folding is the default
     /// for long foldable cells).
     unfolded: HashSet<usize>,
     mouse_enabled: bool,
+    /// Experimental app-server streaming path (opt-in, seamless fallback).
+    app_mode: AppMode,
+    app_conn: Option<AppServerConn>,
+    /// Kernel session reused across prompts once created (session continuity).
+    app_session: Option<String>,
+    app_turn: Option<AppTurn>,
+    /// Welcome-skyline renderer (braille / wireframe / off), resolved once.
+    skyline_mode: SkylineMode,
+    /// Whether to attempt the true graphics-protocol logo before falling back
+    /// to `skyline_mode`. Set from env; the actual capability probe runs once
+    /// after entering the alt-screen (`init_graphics_logo`).
+    skyline_graphics: bool,
+    /// The decoded logo bound to a live graphics protocol (Sixel/Kitty/iTerm2)
+    /// once the probe confirms support; `None` keeps the text skyline.
+    graphics_logo: Option<StatefulProtocol>,
+    /// Non-blocking create+subscribe handshake in flight (first prompt of a run).
+    app_connect: Option<AppConnect>,
+    /// After an Esc-cancel the reused session keeps emitting the stopped turn's
+    /// tail (its own `prompt_completed` included). While `Some`, those events
+    /// are swallowed until the terminator lands, so they cannot bleed into —
+    /// and prematurely finalize — the next prompt. Carries the start time for a
+    /// timeout that forces a fresh session if the kernel never terminates it.
+    app_draining: Option<Instant>,
+    /// Pending kernel interaction (permission) request; renders the approval
+    /// overlay. The kernel re-sends the same requestId under fresh envelope
+    /// ids until answered — re-sends only refresh `envelope_id` here.
+    interaction: Option<PendingInteraction>,
+    /// requestIds already answered: late re-sends are dropped silently.
+    interaction_done: HashSet<String>,
+    /// Latest control surface (mode/model/thought level, current + choices)
+    /// pushed by the kernel via `state.updated` — authoritative echo for
+    /// /model, /think and Shift+Tab on the app-server path.
+    controls: SessionControls,
+    /// In-flight fire-and-forget control requests (setMode/setModel/…), by
+    /// request id, so an error response can name the command it failed.
+    control_requests: std::collections::HashMap<u64, ControlReq>,
+}
+
+/// The approval overlay's state: the parsed request, the freshest envelope id
+/// to reply on, and the selected option of the (first) question.
+struct PendingInteraction {
+    request: InteractionRequest,
+    envelope_id: serde_json::Value,
+    selected: usize,
+}
+
+/// A fire-and-forget control request in flight, kept by request id so an
+/// error response can be attributed to the command that sent it. Steer
+/// carries its input so a failure can requeue it instead of losing it.
+enum ControlReq {
+    Command(&'static str),
+    Steer(String),
 }
 
 impl UiState {
@@ -564,6 +689,11 @@ impl UiState {
         let ui_config = load_ui_config();
         let mouse_enabled =
             env::var_os("ZCODE_TUI_NO_MOUSE").is_none() && ui_config.mouse != Some(false);
+        let app_mode = if app_server_enabled(|key| env::var(key).ok()) {
+            AppMode::Ready
+        } else {
+            AppMode::Off
+        };
         Self {
             config,
             zcode_bin,
@@ -592,10 +722,55 @@ impl UiState {
             queued: VecDeque::new(),
             tick: 0,
             session_picker: None,
+            model_picker: None,
             history_query: None,
             unfolded: HashSet::new(),
             mouse_enabled,
+            app_mode,
+            app_conn: None,
+            app_session: None,
+            app_turn: None,
+            skyline_mode: skyline_mode(|key| env::var(key).ok()),
+            skyline_graphics: skyline_graphics_wanted(|key| env::var(key).ok()),
+            graphics_logo: None,
+            app_connect: None,
+            app_draining: None,
+            interaction: None,
+            interaction_done: HashSet::new(),
+            controls: SessionControls::default(),
+            control_requests: std::collections::HashMap::new(),
         }
+    }
+
+    /// Probe the terminal for a graphics protocol and, if one is available,
+    /// decode the embedded logo into a resize protocol. Call once after the
+    /// alt-screen is active and before reading events (per ratatui-image). Any
+    /// failure — probe error, no real protocol, decode error — leaves
+    /// `graphics_logo` as `None`, so the text skyline renders instead.
+    fn init_graphics_logo(&mut self) {
+        if !self.skyline_graphics {
+            return;
+        }
+        let Ok(picker) = Picker::from_query_stdio() else {
+            return;
+        };
+        // Halfblocks is the no-graphics-protocol fallback; prefer our own
+        // braille/wire skyline over ratatui-image's half-block cells.
+        if picker.protocol_type() == ProtocolType::Halfblocks {
+            return;
+        }
+        if let Ok(img) = image::load_from_memory(LOGO_PNG) {
+            self.graphics_logo = Some(picker.new_resize_protocol(img));
+        }
+    }
+
+    /// Whether a job or an app-server turn (including the handshake before it,
+    /// and the drain after a cancel) is currently occupying the UI.
+    fn is_busy(&self) -> bool {
+        self.job.is_some()
+            || self.app_turn.is_some()
+            || self.app_connect.is_some()
+            || self.app_draining.is_some()
     }
 
     fn refresh_auth(&mut self) {
@@ -610,7 +785,7 @@ impl UiState {
         if self.auth_status.is_configured() {
             return;
         }
-        self.log.push(LogLine::new(LogKind::Brand, UNAUTH_LOGO));
+        self.log.push(LogLine::new(LogKind::Brand, ZCODE_WORDMARK));
         let headline = match &self.auth_status {
             AuthStatus::Partial { evidence } => format!(
                 "partially configured: {evidence} found, but the kernel still needs \
@@ -808,6 +983,14 @@ impl UiState {
             self.leader_pending = false;
             return self.handle_leader_key(key);
         }
+        // The kernel is waiting on an answer: the approval overlay owns the
+        // keys (streaming continues rendering behind it).
+        if self.interaction.is_some() {
+            return self.handle_interaction_key(key);
+        }
+        if self.model_picker.is_some() {
+            return self.handle_model_picker_key(key);
+        }
         if self.session_picker.is_some() {
             return self.handle_session_picker_key(key);
         }
@@ -824,8 +1007,8 @@ impl UiState {
             KeyCode::Char('o') if ctrl => self.toggle_fold(),
             KeyCode::Char('q') if ctrl => return Some(UiEffect::Quit),
             KeyCode::Char('c') if ctrl => {
-                if self.job.is_some() {
-                    self.cancel_job();
+                if self.is_busy() {
+                    self.cancel_current();
                 } else if self.input.is_empty() {
                     return Some(UiEffect::Quit);
                 } else {
@@ -897,8 +1080,8 @@ impl UiState {
                     self.show_help = false;
                 } else if self.show_palette {
                     self.show_palette = false;
-                } else if self.job.is_some() {
-                    self.cancel_job();
+                } else if self.is_busy() {
+                    self.cancel_current();
                 } else {
                     return Some(UiEffect::Quit);
                 }
@@ -993,7 +1176,7 @@ impl UiState {
     }
 
     fn clear_log(&mut self) {
-        if self.job.is_some() {
+        if self.is_busy() {
             self.status = "busy: cannot clear while a job streams output".to_string();
             return;
         }
@@ -1017,7 +1200,16 @@ impl UiState {
             return Some(UiEffect::Quit);
         }
 
-        if self.job.is_some() {
+        if self.is_busy() {
+            // Plain text during a live app-server turn steers it instead of
+            // queueing (session/steer). Slash/shell commands, and inputs
+            // during the handshake or drain phases, still queue.
+            if self.app_turn.is_some() && matches!(&classified, Ok(InputAction::Prompt(_))) {
+                self.history.push(input.to_string());
+                self.clear_input();
+                self.steer_turn(input);
+                return None;
+            }
             self.queued.push_back(input.to_string());
             self.history.push(input.to_string());
             self.clear_input();
@@ -1049,7 +1241,7 @@ impl UiState {
     }
 
     fn drain_queue(&mut self) {
-        if self.job.is_some() {
+        if self.is_busy() {
             return;
         }
         if let Some(next) = self.queued.pop_front() {
@@ -1079,6 +1271,18 @@ impl UiState {
             }
             Some("mode") => {
                 self.set_mode(command.get(1).map(String::as_str));
+                return None;
+            }
+            Some("model") => {
+                self.open_model_picker();
+                return None;
+            }
+            Some("think") => {
+                self.toggle_thought();
+                return None;
+            }
+            Some("compact") => {
+                self.compact_session();
                 return None;
             }
             Some("resume") => {
@@ -1137,6 +1341,20 @@ impl UiState {
     }
 
     fn start_prompt_job(&mut self, prompt: &str) {
+        // Experimental streaming path: true token streaming through the
+        // long-lived app-server. Any failure downgrades this process
+        // permanently and falls through to the classic --prompt path so the
+        // user is never stuck (design D4).
+        if self.app_mode == AppMode::Ready {
+            match self.start_app_prompt(prompt) {
+                Ok(()) => return,
+                Err(reason) => self.downgrade_app_server(reason),
+            }
+        }
+        self.start_prompt_job_via_cli(prompt);
+    }
+
+    fn start_prompt_job_via_cli(&mut self, prompt: &str) {
         match prompt_command_for(&self.zcode_bin, &self.config, prompt) {
             Ok(command) => {
                 let live = self.prepare_live_progress();
@@ -1147,6 +1365,204 @@ impl UiState {
             }
             Err(error) => self.push_error(&format!("{error:#}")),
         }
+    }
+
+    /// Drive one prompt through the app-server: spawn the connection lazily,
+    /// create+subscribe a session on the first prompt (reused after), send the
+    /// content, and open an assistant transcript entry the token stream grows
+    /// into. Any protocol/IO failure returns an `AppServerUnavailable` for the
+    /// caller to downgrade on.
+    fn start_app_prompt(&mut self, prompt: &str) -> Result<(), AppServerUnavailable> {
+        // A connection that died between turns is not reusable.
+        if self.app_conn.as_ref().is_some_and(|conn| !conn.is_alive()) {
+            return Err(AppServerUnavailable::Disconnected);
+        }
+        if self.app_conn.is_none() {
+            self.app_conn = Some(AppServerConn::spawn(&self.zcode_bin)?);
+            // A fresh connection has no session yet.
+            self.app_session = None;
+        }
+        match self.app_session.clone() {
+            // Session already open: send immediately (the fast path for every
+            // prompt after the first).
+            Some(session_id) => {
+                // Drop any stray tail from a previously cancelled turn.
+                self.drain_app_events();
+                let conn = self.app_conn.as_mut().expect("app_conn set above");
+                let send_id = conn.send("session/send", app_send_params(&session_id, prompt))?;
+                self.begin_app_turn(send_id);
+            }
+            // First prompt of the run: kick off the create+subscribe handshake
+            // WITHOUT blocking the UI thread. The prompt is sent once the
+            // handshake completes (driven by `pump_app_connect`), so a slow or
+            // hung app-server can never freeze the terminal — Esc still cancels.
+            None => {
+                let workspace = self.app_workspace();
+                let conn = self.app_conn.as_mut().expect("app_conn set above");
+                let create_id = conn.send("session/create", app_create_params(&workspace))?;
+                self.app_connect = Some(AppConnect {
+                    phase: ConnectPhase::Create(create_id),
+                    prompt: prompt.to_string(),
+                    started: Instant::now(),
+                });
+                self.status = "connecting (app-server)…".to_string();
+            }
+        }
+        Ok(())
+    }
+
+    /// The canonical workspace path handed to `session/create`.
+    fn app_workspace(&self) -> String {
+        self.resolve_cwd()
+            .canonicalize()
+            .unwrap_or_else(|_| self.resolve_cwd())
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Open the assistant turn: text and tool entries are created lazily as
+    /// their events arrive so they land in transcript order.
+    fn begin_app_turn(&mut self, send_id: u64) {
+        self.app_turn = Some(AppTurn {
+            turn: AppServerTurn::default(),
+            text_index: None,
+            written: 0,
+            started: Instant::now(),
+            cancel_requested: false,
+            got_text: false,
+            send_id,
+        });
+        self.scroll = 0;
+        self.status = "streaming (app-server)".to_string();
+    }
+
+    /// Drive the non-blocking create→subscribe handshake. Matches each response
+    /// by id, then sends the queued prompt and opens the turn. Any failure or a
+    /// 40s timeout downgrades and retries the prompt once via --prompt.
+    fn pump_app_connect(&mut self) {
+        if self.app_connect.is_none() {
+            return;
+        }
+        if !self.app_conn.as_ref().is_some_and(AppServerConn::is_alive) {
+            self.app_connect_failed(AppServerUnavailable::Disconnected);
+            return;
+        }
+        while let Some(message) = self.app_conn.as_mut().and_then(AppServerConn::poll) {
+            let AppServerMessage::Response { id, result, error } = message else {
+                // Stray events/state before the turn starts: nothing to render.
+                continue;
+            };
+            // Copy the awaited stage+id out so the match arms can mutate `self`.
+            let waiting = match &self.app_connect {
+                Some(connect) => match &connect.phase {
+                    ConnectPhase::Create(want) => (ConnectStage::Create, *want),
+                    ConnectPhase::Subscribe(want) => (ConnectStage::Subscribe, *want),
+                },
+                None => return,
+            };
+            let (stage, want) = waiting;
+            if id != want {
+                continue; // stale/unmatched response id
+            }
+            if let Some(why) = error {
+                self.app_connect_failed(AppServerUnavailable::Protocol(why));
+                return;
+            }
+            match stage {
+                ConnectStage::Create => {
+                    let result = result.unwrap_or(serde_json::Value::Null);
+                    let Some(session_id) = app_session_id_from_result(&result) else {
+                        self.app_connect_failed(AppServerUnavailable::Protocol(
+                            "session/create missing session.sessionId".to_string(),
+                        ));
+                        return;
+                    };
+                    let conn = self.app_conn.as_mut().expect("alive checked above");
+                    match conn.send("session/subscribe", app_subscribe_params(&session_id)) {
+                        Ok(sub_id) => {
+                            self.app_session = Some(session_id);
+                            if let Some(connect) = &mut self.app_connect {
+                                connect.phase = ConnectPhase::Subscribe(sub_id);
+                            }
+                        }
+                        Err(err) => {
+                            self.app_connect_failed(err);
+                            return;
+                        }
+                    }
+                }
+                ConnectStage::Subscribe => {
+                    // Subscribed: send the queued prompt and open the turn.
+                    let connect = self.app_connect.take().expect("connect present");
+                    let session_id = self.app_session.clone().expect("set on create");
+                    // Apply a pre-selected permission mode (--mode, or /mode
+                    // before the first prompt) to the fresh session first —
+                    // requests are processed in order, so the prompt below
+                    // already runs under it. Fresh sessions default to build.
+                    if let Some(mode) = self.config.mode.clone() {
+                        self.send_control(
+                            "session/setMode",
+                            app_set_mode_params(&session_id, &mode),
+                            ControlReq::Command("/mode"),
+                        );
+                    }
+                    let conn = self.app_conn.as_mut().expect("alive checked above");
+                    match conn.send(
+                        "session/send",
+                        app_send_params(&session_id, &connect.prompt),
+                    ) {
+                        Ok(send_id) => self.begin_app_turn(send_id),
+                        Err(err) => {
+                            self.downgrade_app_server(err);
+                            self.start_prompt_job_via_cli(&connect.prompt);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        // Handshake watchdog: never let a hung app-server strand the prompt.
+        if self
+            .app_connect
+            .as_ref()
+            .is_some_and(|c| c.started.elapsed() > Duration::from_secs(40))
+        {
+            self.app_connect_failed(AppServerUnavailable::Handshake(
+                "session handshake timed out".to_string(),
+            ));
+        }
+    }
+
+    /// Handshake failed before any turn started: downgrade and retry the
+    /// prompt once via the classic --prompt path (nothing was shown yet).
+    fn app_connect_failed(&mut self, reason: AppServerUnavailable) {
+        let prompt = self.app_connect.take().map(|c| c.prompt);
+        self.downgrade_app_server(reason);
+        if let Some(prompt) = prompt {
+            self.start_prompt_job_via_cli(&prompt);
+        }
+    }
+
+    /// Discard whatever is currently buffered on the connection without
+    /// applying it (used to clear a cancelled turn's tail before a new turn).
+    fn drain_app_events(&mut self) {
+        if let Some(conn) = self.app_conn.as_mut() {
+            while conn.poll().is_some() {}
+        }
+    }
+
+    /// Retire the app-server path for the rest of this run and note it once.
+    fn downgrade_app_server(&mut self, reason: AppServerUnavailable) {
+        self.app_mode = AppMode::Downgraded;
+        self.app_turn = None;
+        self.app_connect = None;
+        self.app_draining = None;
+        self.app_session = None;
+        // Tear the connection down for good (process-group kill via Drop).
+        self.app_conn = None;
+        self.push_system(&format!(
+            "{reason}; falling back to --prompt for this session"
+        ));
     }
 
     /// Snapshot the db just before spawning so polling only ever attributes
@@ -1243,6 +1659,7 @@ impl UiState {
                     cancel_requested: false,
                     started: Instant::now(),
                     raw: Vec::new(),
+                    errs: Vec::new(),
                     live: None,
                 });
                 self.status = format!("running {label}");
@@ -1259,6 +1676,452 @@ impl UiState {
         }
     }
 
+    /// Cancel whichever path is running: the app-server turn (graceful
+    /// `session/stop`, keeping the connection for the next prompt) or the
+    /// classic child job.
+    fn cancel_current(&mut self) {
+        // Cancelled before the first turn even started (still handshaking):
+        // drop the half-open connection so a clean one is spawned next time.
+        if self.app_connect.is_some() {
+            self.app_connect = None;
+            self.app_conn = None;
+            self.app_session = None;
+            self.status = "cancelled".to_string();
+            return;
+        }
+        if self.app_turn.is_some() {
+            if let (Some(conn), Some(session_id)) =
+                (self.app_conn.as_mut(), self.app_session.clone())
+            {
+                let _ = conn.send("session/stop", app_stop_params(&session_id));
+            }
+            if let Some(turn) = &mut self.app_turn {
+                turn.cancel_requested = true;
+            }
+            self.finalize_app_turn();
+            // The kernel keeps emitting the stopped turn's tail (its own
+            // `prompt_completed` included). Swallow it before the next prompt
+            // reuses the session, or it would bleed into — and prematurely
+            // finalize — the next turn.
+            if self.app_conn.is_some() {
+                self.app_draining = Some(Instant::now());
+            }
+        } else {
+            self.cancel_job();
+        }
+    }
+
+    /// Drain app-server events into the streaming turn each loop tick. Text
+    /// deltas grow the transcript entry live; a `finish` event finalizes; a
+    /// dead connection downgrades and either retries or keeps the partial.
+    fn pump_app_turn(&mut self) {
+        // A cancelled turn's tail is being swallowed before the next prompt.
+        if self.app_draining.is_some() {
+            self.drain_cancelled_turn();
+            return;
+        }
+        if self.app_turn.is_none() {
+            return;
+        }
+        // The connection dying mid-turn is a hard failure.
+        if !self.app_conn.as_ref().is_some_and(AppServerConn::is_alive) {
+            self.app_turn_connection_lost();
+            return;
+        }
+        while let Some(message) = self.app_conn.as_mut().and_then(AppServerConn::poll) {
+            match message {
+                AppServerMessage::Event(event) => {
+                    let Some(turn) = &mut self.app_turn else {
+                        return;
+                    };
+                    match turn.turn.apply(&event) {
+                        TurnDelta::Text => self.app_append_text(),
+                        TurnDelta::ToolFinished(idx) => self.app_push_tool_entry(idx),
+                        TurnDelta::Done => {
+                            self.finalize_app_turn();
+                            return;
+                        }
+                        // ToolStarted shows only as a live chip; Reasoning/None
+                        // need no transcript change.
+                        TurnDelta::ToolStarted(_) | TurnDelta::Reasoning | TurnDelta::None => {}
+                    }
+                }
+                AppServerMessage::StateUpdated(params) => {
+                    if let Some(watermark) = app_state_watermark(&params) {
+                        self.context_watermark = Some(watermark);
+                    }
+                    if let Some(controls) = app_state_controls(&params) {
+                        self.merge_controls(controls);
+                    }
+                    // The kernel ends a turn with a `prompt_completed` state
+                    // update, not a session/event — this is the terminator.
+                    if app_state_is_turn_end(&params) {
+                        self.finalize_app_turn();
+                        return;
+                    }
+                    // Abnormal end (error/aborted/…): close the turn with a note
+                    // instead of hanging until the 600s backstop.
+                    if let Some(why) = app_state_turn_error(&params) {
+                        self.end_app_turn_abnormally(&why);
+                        return;
+                    }
+                }
+                // The kernel asking *us* something (permission approval).
+                AppServerMessage::ServerRequest { id, method, params } => {
+                    self.on_server_request(id, &method, &params);
+                }
+                AppServerMessage::Response {
+                    id,
+                    error: Some(message),
+                    ..
+                } => {
+                    // A failed control command (setMode/steer/…) only concerns
+                    // that command — report it, keep the turn.
+                    if self.on_control_error(id, &message) {
+                        continue;
+                    }
+                    // Only *this* turn's own send failing is fatal. A stray
+                    // error Response (e.g. a prior cancel's session/stop) must
+                    // not down the healthy turn now streaming.
+                    if self.app_turn.as_ref().is_some_and(|t| t.send_id == id) {
+                        self.abort_app_turn(AppServerUnavailable::Protocol(message));
+                        return;
+                    }
+                }
+                AppServerMessage::Response { id, .. } => {
+                    // Successful control command: echo comes via state push.
+                    self.control_requests.remove(&id);
+                }
+                AppServerMessage::Other => {}
+            }
+        }
+        // Backstop: a turn that never gets a finish event and never errors
+        // would otherwise hang forever. Give up after a generous ceiling.
+        if self
+            .app_turn
+            .as_ref()
+            .is_some_and(|t| t.started.elapsed() > Duration::from_secs(600))
+        {
+            self.abort_app_turn(AppServerUnavailable::Handshake(
+                "turn produced no completion".to_string(),
+            ));
+        }
+    }
+
+    /// Flush newly-arrived answer text into the open assistant entry, opening a
+    /// fresh one if the previous run was closed by a tool landing.
+    fn app_append_text(&mut self) {
+        let (full_len, written, existing) = match &self.app_turn {
+            Some(turn) => (turn.turn.text.len(), turn.written, turn.text_index),
+            None => return,
+        };
+        if full_len <= written {
+            return;
+        }
+        let suffix = self.app_turn.as_ref().unwrap().turn.text[written..].to_string();
+        let idx = existing.unwrap_or_else(|| {
+            self.log.push(LogLine::new(LogKind::Assistant, ""));
+            self.log.len() - 1
+        });
+        self.log[idx].text.push_str(&suffix);
+        let non_empty = !self.log[idx].text.is_empty();
+        if let Some(turn) = &mut self.app_turn {
+            turn.text_index = Some(idx);
+            turn.written = full_len;
+            turn.got_text |= non_empty;
+        }
+        self.scroll = 0;
+    }
+
+    /// Persist a finished tool call into the transcript as a foldable `Tool`
+    /// entry (header + output), then close the current text run so following
+    /// answer text opens a new entry — tools and text stay in turn order.
+    fn app_push_tool_entry(&mut self, idx: usize) {
+        let text = {
+            let Some(turn) = &self.app_turn else { return };
+            let Some(tool) = turn.turn.tools.get(idx) else {
+                return;
+            };
+            let mut header = if tool.name.is_empty() {
+                "tool".to_string()
+            } else {
+                tool.name.clone()
+            };
+            let summary = tool_input_summary(&tool.input);
+            if !summary.is_empty() {
+                header.push_str(&format!("  {summary}"));
+            }
+            if let Some(ms) = tool.duration_ms {
+                if ms >= 1000 {
+                    header.push_str(&format!("  · {:.1}s", ms as f32 / 1000.0));
+                } else {
+                    header.push_str(&format!("  · {ms}ms"));
+                }
+            }
+            if !tool.success {
+                header.push_str("  · failed");
+            }
+            let output = tool.output.trim_end();
+            if output.is_empty() {
+                header
+            } else {
+                format!("{header}\n{output}")
+            }
+        };
+        self.log.push(LogLine::new(LogKind::Tool, &text));
+        if let Some(turn) = &mut self.app_turn {
+            turn.text_index = None;
+        }
+        self.scroll = 0;
+    }
+
+    /// The connection dropped while a turn was streaming. If nothing reached the
+    /// transcript yet, retry this prompt on --prompt; otherwise keep the partial.
+    fn app_turn_connection_lost(&mut self) {
+        let Some(turn) = self.app_turn.take() else {
+            return;
+        };
+        let prompt = self
+            .log
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == LogKind::User)
+            .map(|entry| entry.text.clone());
+        self.downgrade_app_server(AppServerUnavailable::Disconnected);
+        if turn.got_text || !turn.turn.tools.is_empty() {
+            // Text and/or tool output already landed; keep it, just downgrade.
+            self.status = "app-server dropped; kept partial reply".to_string();
+        } else if let Some(prompt) = prompt {
+            // Nothing shown yet: retry the whole prompt via --prompt.
+            self.start_prompt_job_via_cli(&prompt);
+        }
+    }
+
+    /// Abort the current turn with a reason and permanently downgrade. Any
+    /// content already streamed into the transcript stays put.
+    fn abort_app_turn(&mut self, reason: AppServerUnavailable) {
+        self.downgrade_app_server(reason);
+    }
+
+    /// End the current turn abnormally (kernel signalled error/aborted). Keep
+    /// whatever streamed, note it, but stay on the app-server path — this is a
+    /// turn-level end, not a connection failure, so the session lives on.
+    fn end_app_turn_abnormally(&mut self, why: &str) {
+        if self.app_turn.is_none() {
+            return;
+        }
+        self.push_system(&format!("app-server ended the turn: {why}"));
+        self.finalize_app_turn();
+        self.status = format!("ended ({why})");
+    }
+
+    /// Swallow a cancelled turn's trailing events until its terminator lands, so
+    /// nothing bleeds into the next prompt on the reused session. Context
+    /// watermarks are still worth keeping; everything else is discarded. If the
+    /// kernel never sends a clean terminator, give up after a ceiling and force
+    /// a fresh session next prompt so no straggler can leak in.
+    fn drain_cancelled_turn(&mut self) {
+        if !self.app_conn.as_ref().is_some_and(AppServerConn::is_alive) {
+            self.app_draining = None;
+            return;
+        }
+        while let Some(message) = self.app_conn.as_mut().and_then(AppServerConn::poll) {
+            if let AppServerMessage::StateUpdated(params) = message {
+                if let Some(watermark) = app_state_watermark(&params) {
+                    self.context_watermark = Some(watermark);
+                }
+                if app_state_is_turn_end(&params) || app_state_turn_error(&params).is_some() {
+                    self.app_draining = None;
+                    return;
+                }
+            }
+        }
+        if self
+            .app_draining
+            .is_some_and(|started| started.elapsed() > Duration::from_secs(10))
+        {
+            self.app_draining = None;
+            self.app_session = None; // recreate → guaranteed clean next prompt
+        }
+    }
+
+    /// Finalize the current app-server turn: mark the session live for
+    /// continuity and update status. Text/tool entries are already in place.
+    fn finalize_app_turn(&mut self) {
+        let Some(turn) = self.app_turn.take() else {
+            return;
+        };
+        let elapsed = turn.started.elapsed().as_secs_f32();
+        if !turn.got_text && turn.turn.tools.is_empty() {
+            self.log
+                .push(LogLine::new(LogKind::Assistant, "(no output)"));
+        }
+        if turn.cancel_requested {
+            self.status = "cancelled".to_string();
+            self.push_system("app-server turn cancelled");
+        } else {
+            self.status = format!("done ({elapsed:.1}s)");
+        }
+        // A turn landed in a live kernel session: keep continuity by reusing
+        // the same sessionId for later prompts (already stored in app_session).
+        self.session_active = true;
+        self.scroll = 0;
+    }
+
+    /// Consume connection messages BETWEEN turns. Control echoes
+    /// (`mode_changed` after /mode·/model·/think), watermark refreshes after
+    /// /compact, and control-command responses would otherwise sit unread in
+    /// the channel until the next turn happens to poll.
+    fn pump_app_idle(&mut self) {
+        if self.app_turn.is_some() || self.app_connect.is_some() || self.app_draining.is_some() {
+            return;
+        }
+        while let Some(message) = self.app_conn.as_mut().and_then(AppServerConn::poll) {
+            match message {
+                AppServerMessage::StateUpdated(params) => {
+                    if let Some(watermark) = app_state_watermark(&params) {
+                        self.context_watermark = Some(watermark);
+                    }
+                    if let Some(controls) = app_state_controls(&params) {
+                        self.merge_controls(controls);
+                    }
+                }
+                AppServerMessage::ServerRequest { id, method, params } => {
+                    self.on_server_request(id, &method, &params);
+                }
+                AppServerMessage::Response {
+                    id,
+                    error: Some(message),
+                    ..
+                } => {
+                    self.on_control_error(id, &message);
+                }
+                AppServerMessage::Response { id, .. } => self.on_control_ok(id),
+                AppServerMessage::Event(_) | AppServerMessage::Other => {}
+            }
+        }
+    }
+
+    /// Merge a control-surface push into the cache, echoing actual changes in
+    /// the status line (the push is the authoritative confirmation — control
+    /// commands never update state optimistically).
+    fn merge_controls(&mut self, update: SessionControls) {
+        if let Some(mode) = update.mode {
+            if self.controls.mode.as_deref() != Some(mode.as_str()) && self.controls.mode.is_some()
+            {
+                self.status = format!("mode {mode}");
+                self.config.mode = Some(mode.clone());
+                self.refresh_banner();
+            }
+            self.controls.mode = Some(mode);
+        }
+        if !update.models.is_empty() {
+            self.controls.models = update.models;
+        }
+        if let Some(current) = update.model_current {
+            if self.controls.model_current.as_deref() != Some(current.as_str())
+                && self.controls.model_current.is_some()
+            {
+                self.status = format!("model {current}");
+            }
+            self.controls.model_current = Some(current);
+        }
+        if !update.thought_levels.is_empty() {
+            self.controls.thought_levels = update.thought_levels;
+        }
+        if let Some(current) = update.thought_current {
+            if self.controls.thought_current.as_deref() != Some(current.as_str())
+                && self.controls.thought_current.is_some()
+            {
+                self.status = format!("thinking {current}");
+            }
+            self.controls.thought_current = Some(current);
+        }
+    }
+
+    /// Dispatch a server→client request. Only the interaction (permission)
+    /// method is understood; anything else stays unanswered — the kernel's
+    /// retry keeps it alive for a future, more capable client.
+    fn on_server_request(
+        &mut self,
+        id: serde_json::Value,
+        method: &str,
+        params: &serde_json::Value,
+    ) {
+        if method != INTERACTION_METHOD {
+            return;
+        }
+        let Some(request) = parse_interaction_request(params) else {
+            return;
+        };
+        if self.interaction_done.contains(&request.request_id) {
+            return; // late re-send of an already-answered request
+        }
+        match &mut self.interaction {
+            // Re-send of the open request: refresh the envelope id to reply on.
+            Some(pending) if pending.request.request_id == request.request_id => {
+                pending.envelope_id = id;
+            }
+            // A different request while one is open: the kernel's retry will
+            // re-deliver it once the current one is answered.
+            Some(_) => {}
+            None => {
+                self.status = format!("approval required: {}", request.tool_name);
+                self.interaction = Some(PendingInteraction {
+                    request,
+                    envelope_id: id,
+                    selected: 0,
+                });
+            }
+        }
+    }
+
+    /// Send a fire-and-forget control request, remembering its id so a later
+    /// error response can name the command. A steer that cannot be sent falls
+    /// back to the queue (spec: steer failure must not lose the input).
+    fn send_control(&mut self, method: &str, params: serde_json::Value, req: ControlReq) {
+        let result = match self.app_conn.as_mut() {
+            Some(conn) => conn.send(method, params),
+            None => Err(AppServerUnavailable::Disconnected),
+        };
+        match result {
+            Ok(id) => {
+                self.control_requests.insert(id, req);
+            }
+            Err(reason) => {
+                self.push_error(&format!("{method} failed: {reason}"));
+                if let ControlReq::Steer(content) = req {
+                    self.queued.push_back(content);
+                }
+            }
+        }
+    }
+
+    /// A control command's error response: report it against the command and
+    /// swallow it (never fatal to the turn/session). True when `id` was ours.
+    fn on_control_error(&mut self, id: u64, message: &str) -> bool {
+        match self.control_requests.remove(&id) {
+            Some(ControlReq::Command(name)) => {
+                self.push_error(&format!("{name} failed: {message}"));
+                true
+            }
+            Some(ControlReq::Steer(content)) => {
+                self.push_error(&format!("steer failed: {message} (input queued)"));
+                self.queued.push_back(content);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A control command succeeded; the substantive echo arrives via the
+    /// state push. /compact gets a direct status (no push marks completion).
+    fn on_control_ok(&mut self, id: u64) {
+        if let Some(ControlReq::Command("/compact")) = self.control_requests.remove(&id) {
+            self.status = "compacted".to_string();
+        }
+    }
+
     fn pump_job(&mut self) {
         loop {
             let (event, kind) = {
@@ -1266,16 +2129,23 @@ impl UiState {
                 (active.job.receiver.try_recv(), active.kind)
             };
             match event {
-                Ok(JobEvent::Line(line)) => {
+                Ok(JobEvent::Line { text, stderr }) => {
                     if kind == LogKind::Assistant {
-                        // --json prints one end-of-run summary object; buffer
-                        // and parse at finalize (fallback replays these lines).
+                        // --json prints one end-of-run summary object on
+                        // stdout; buffer and parse at finalize (fallback
+                        // replays these lines). stderr goes to its own buffer
+                        // so an interleaved warning can't corrupt the parse.
                         if let Some(active) = &mut self.job {
-                            active.raw.push(line);
+                            if stderr {
+                                active.errs.push(text);
+                            } else {
+                                active.raw.push(text);
+                            }
                             active.any_output = true;
                         }
                     } else {
-                        self.append_job_text(&line);
+                        // Shell/diff jobs keep the merged live view.
+                        self.append_job_text(&text);
                     }
                     self.scroll = 0;
                 }
@@ -1327,6 +2197,242 @@ impl UiState {
         entry.text.push_str(text);
         active.entry_started = true;
         active.any_output = true;
+    }
+
+    /// Keys while the kernel awaits an interaction answer: ↑↓ select an
+    /// option, Enter answers, Esc declines.
+    fn handle_interaction_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
+        match key.code {
+            KeyCode::Up => {
+                if let Some(pending) = &mut self.interaction {
+                    pending.selected = pending.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(pending) = &mut self.interaction {
+                    let max = pending
+                        .request
+                        .questions
+                        .first()
+                        .map(|q| q.options.len().saturating_sub(1))
+                        .unwrap_or(0);
+                    pending.selected = (pending.selected + 1).min(max);
+                }
+            }
+            KeyCode::Enter => self.answer_interaction(),
+            KeyCode::Esc => self.decline_interaction(),
+            // Ctrl+C must never be swallowed by an overlay: treat as decline
+            // (it cancels the turn, same as the non-overlay cancel path).
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.decline_interaction()
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Answer the pending interaction with the selected option (any further
+    /// questions get their first option — observed payloads carry exactly
+    /// one). Replying stops the kernel's re-send loop; the turn then
+    /// finalizes through the normal event flow.
+    fn answer_interaction(&mut self) {
+        let Some(pending) = self.interaction.take() else {
+            return;
+        };
+        let request = pending.request;
+        let answers: Vec<(String, String)> = request
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(index, question)| {
+                let pick = if index == 0 {
+                    pending.selected.min(question.options.len() - 1)
+                } else {
+                    0
+                };
+                (
+                    question.header.clone(),
+                    question.options[pick].value.clone(),
+                )
+            })
+            .collect();
+        let line = encode_interaction_reply(&pending.envelope_id, &request.request_id, &answers);
+        let sent = self
+            .app_conn
+            .as_mut()
+            .map(|conn| conn.reply(&line))
+            .unwrap_or(Err(AppServerUnavailable::Disconnected));
+        match sent {
+            Ok(()) => {
+                self.interaction_done.insert(request.request_id.clone());
+                let value = answers.first().map(|(_, v)| v.clone()).unwrap_or_default();
+                self.push_system(&format!("{}: {}", request.tool_name, value));
+                self.status = format!("answered ({value})");
+                // plan_approval + approve: the kernel neither flips the mode
+                // nor continues on its own (pinned 2026-07-07: mode stays
+                // plan, a follow-up Write still doesn't land) — so do the
+                // Claude-Code dance ourselves: switch to build and queue a
+                // continuation prompt for when this turn finalizes.
+                if request.interaction == "plan_approval" && value == "approve" {
+                    if let Some(session_id) = self.app_session.clone() {
+                        self.config.mode = Some("build".to_string());
+                        self.refresh_banner();
+                        self.send_control(
+                            "session/setMode",
+                            app_set_mode_params(&session_id, "build"),
+                            ControlReq::Command("/mode"),
+                        );
+                    }
+                    self.queued
+                        .push_back("Proceed with the approved plan.".to_string());
+                }
+            }
+            Err(reason) => self.push_error(&format!("interaction reply failed: {reason}")),
+        }
+    }
+
+    /// Esc on the approval overlay. The protocol offers no decline option
+    /// (observed options carry only "approve"), so declining stops the turn —
+    /// the existing cancel path sends session/stop and drains the tail.
+    fn decline_interaction(&mut self) {
+        let Some(pending) = self.interaction.take() else {
+            return;
+        };
+        self.interaction_done
+            .insert(pending.request.request_id.clone());
+        self.push_system(&format!("{}: declined", pending.request.tool_name));
+        self.cancel_current();
+    }
+
+    fn handle_model_picker_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
+        match key.code {
+            KeyCode::Esc => {
+                self.model_picker = None;
+                self.status = "model picker closed".to_string();
+            }
+            KeyCode::Up => {
+                if let Some(index) = &mut self.model_picker {
+                    *index = index.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(index) = &mut self.model_picker {
+                    *index = (*index + 1).min(self.controls.models.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Enter => self.pick_model(),
+            _ => {}
+        }
+        None
+    }
+
+    /// /model — list the kernel-reported models for selection. Needs a live
+    /// app-server session: the choices come from its state pushes.
+    fn open_model_picker(&mut self) {
+        if self.app_session.is_none() {
+            self.push_system(
+                "/model needs an active app-server session \
+                 (ZCODE_TUI_APP_SERVER=1, complete one prompt first)",
+            );
+            return;
+        }
+        if self.controls.models.is_empty() {
+            self.push_system("no models reported by the kernel yet (complete one prompt first)");
+            return;
+        }
+        let current =
+            self.controls
+                .model_current
+                .as_deref()
+                .and_then(|id| {
+                    self.controls.models.iter().position(|m| {
+                        m.reference.get("modelId").and_then(|v| v.as_str()) == Some(id)
+                    })
+                })
+                .unwrap_or(0);
+        self.model_picker = Some(current);
+    }
+
+    fn pick_model(&mut self) {
+        let Some(index) = self.model_picker.take() else {
+            return;
+        };
+        let Some(session_id) = self.app_session.clone() else {
+            return;
+        };
+        if let Some(choice) = self.controls.models.get(index).cloned() {
+            self.push_system(&format!("model → {} ({})", choice.label, choice.provider));
+            self.send_control(
+                "session/setModel",
+                app_set_model_params(&session_id, &choice.reference),
+                ControlReq::Command("/model"),
+            );
+        }
+    }
+
+    /// /think — cycle to the next kernel-reported thought level.
+    fn toggle_thought(&mut self) {
+        let Some(session_id) = self.app_session.clone() else {
+            self.push_system(
+                "/think needs an active app-server session \
+                 (ZCODE_TUI_APP_SERVER=1, complete one prompt first)",
+            );
+            return;
+        };
+        if self.controls.thought_levels.is_empty() {
+            self.push_system("no thought levels reported by the kernel yet");
+            return;
+        }
+        let levels = &self.controls.thought_levels;
+        let next = self
+            .controls
+            .thought_current
+            .as_deref()
+            .and_then(|current| levels.iter().position(|level| level == current))
+            .map(|index| levels[(index + 1) % levels.len()].clone())
+            .unwrap_or_else(|| levels[0].clone());
+        self.push_system(&format!("thought level → {next}"));
+        self.send_control(
+            "session/setThoughtLevel",
+            app_set_thought_params(&session_id, &next),
+            ControlReq::Command("/think"),
+        );
+    }
+
+    /// /compact — compact the live session's context in place (keeps the
+    /// session, unlike /new). Completion shows as a watermark refresh. With
+    /// no app-server session it forwards to the kernel CLI as before.
+    fn compact_session(&mut self) {
+        let Some(session_id) = self.app_session.clone() else {
+            self.start_prompt_job("/compact");
+            return;
+        };
+        self.push_system("compacting session context…");
+        self.status = "compacting (app-server)".to_string();
+        self.send_control(
+            "session/compact",
+            app_compact_params(&session_id),
+            ControlReq::Command("/compact"),
+        );
+    }
+
+    /// Steer the RUNNING app-server turn with fresh input (Codex-style: just
+    /// type while it streams). The input lands in the transcript marked as a
+    /// steer; a failure requeues it via the control-error path.
+    fn steer_turn(&mut self, content: &str) {
+        let Some(session_id) = self.app_session.clone() else {
+            self.queued.push_back(content.to_string());
+            return;
+        };
+        self.push_user(content);
+        self.push_system("↪ steering the running turn");
+        self.scroll = 0;
+        self.status = "steering (app-server)".to_string();
+        self.send_control(
+            "session/steer",
+            app_steer_params(&session_id, content),
+            ControlReq::Steer(content.to_string()),
+        );
     }
 
     fn handle_session_picker_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
@@ -1523,6 +2629,13 @@ impl UiState {
                 None => self.render_assistant_fallback(active.log_index, &raw),
             }
         }
+        // Kernel stderr (warnings etc.) surfaces as its own dim note instead
+        // of polluting the summary parse; skip it on cancel (kill noise).
+        if active.kind == LogKind::Assistant && !active.errs.is_empty() && !active.cancel_requested
+        {
+            let note = active.errs.join("\n");
+            self.log.push(LogLine::new(LogKind::System, &note));
+        }
         if !active.any_output {
             self.log[active.log_index].text = match active.kind {
                 LogKind::Diff => "working tree clean".to_string(),
@@ -1618,7 +2731,18 @@ impl UiState {
             Some(mode) if PERMISSION_MODES.contains(&mode) => {
                 self.config.mode = Some(mode.to_string());
                 self.refresh_banner();
-                self.push_system(&format!("mode set to {mode}"));
+                // A live app-server session takes the mode immediately
+                // (session/setMode); otherwise it applies on the next spawn.
+                if let Some(session_id) = self.app_session.clone() {
+                    self.send_control(
+                        "session/setMode",
+                        app_set_mode_params(&session_id, mode),
+                        ControlReq::Command("/mode"),
+                    );
+                    self.push_system(&format!("mode set to {mode} (applied to live session)"));
+                } else {
+                    self.push_system(&format!("mode set to {mode}"));
+                }
                 self.status = format!("mode {mode}");
             }
             Some(other) => self.push_error(&format!(
@@ -1637,6 +2761,14 @@ impl UiState {
             .unwrap_or(PERMISSION_MODES[0]);
         self.config.mode = Some(next.to_string());
         self.refresh_banner();
+        // A live app-server session takes the mode immediately.
+        if let Some(session_id) = self.app_session.clone() {
+            self.send_control(
+                "session/setMode",
+                app_set_mode_params(&session_id, next),
+                ControlReq::Command("/mode"),
+            );
+        }
         self.status = format!("mode {next} (Shift+Tab cycles)");
     }
 
@@ -1665,6 +2797,9 @@ impl UiState {
         self.config.resume = None;
         self.config.continue_session = false;
         self.session_active = false;
+        // Drop the app-server session so the next prompt creates a fresh one;
+        // the connection itself is reused.
+        self.app_session = None;
         self.clear_log();
         self.push_system("fresh session: context resets on the next prompt");
         self.status = "new session".to_string();
@@ -1713,9 +2848,33 @@ impl UiState {
         let tip = build_update_tip(installed, feed, report.feed_base.as_deref());
         let insert_at = banner_pos.map(|pos| pos + 1).unwrap_or(self.log.len());
         self.log
-            .insert(insert_at, LogLine::new(LogKind::Logo, ZCODE_LOGO));
+            .insert(insert_at, LogLine::new(LogKind::Logo, ZCODE_WORDMARK));
         self.log
             .insert(insert_at + 1, LogLine::new(LogKind::Tip, &tip));
+        // The probe can land mid-turn: two entries were just inserted near the
+        // top, so every live index that pointed at or past `insert_at` must
+        // shift by 2 — otherwise streamed text lands in the wrong entry (and a
+        // later remove() could delete the wrong one).
+        const INSERTED: usize = 2;
+        if let Some(turn) = &mut self.app_turn {
+            if let Some(ti) = turn.text_index {
+                if ti >= insert_at {
+                    turn.text_index = Some(ti + INSERTED);
+                }
+            }
+        }
+        if let Some(active) = &mut self.job {
+            if active.log_index >= insert_at {
+                active.log_index += INSERTED;
+            }
+        }
+        if !self.unfolded.is_empty() {
+            self.unfolded = self
+                .unfolded
+                .iter()
+                .map(|&i| if i >= insert_at { i + INSERTED } else { i })
+                .collect();
+        }
         self.status = format!("update available: ZCode {}", feed.version);
         self.scroll = 0;
     }
@@ -1910,8 +3069,15 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     if state.session_picker.is_some() {
         render_session_picker(frame, centered_rect(84, 60, root), state);
     }
+    if state.model_picker.is_some() {
+        render_model_picker(frame, centered_rect(64, 46, root), state);
+    }
     if state.history_query.is_some() {
         render_history_search(frame, centered_rect(72, 50, root), state);
+    }
+    // Topmost: the kernel is blocked on this answer.
+    if state.interaction.is_some() {
+        render_interaction(frame, centered_rect(74, 62, root), state);
     }
 }
 
@@ -1922,13 +3088,62 @@ const LIVE_TEXT_TAIL: usize = 4;
 /// line, and the tail of the assistant text as it forms — all gone the
 /// moment the job finalizes (the authoritative reply lands in the transcript).
 fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
+    let t = &state.theme;
+    // App-server streaming turn: the answer streams straight into the
+    // transcript, so the work panel only carries a live marker and the
+    // newest reasoning, both gone when the turn finalizes.
+    if let Some(turn) = &state.app_turn {
+        let mut lines = Vec::new();
+        let symbol = SPINNER_FRAMES[state.tick % SPINNER_FRAMES.len()];
+        lines.push(Line::from(Span::styled(
+            format!(" {symbol} streaming"),
+            t.accent(),
+        )));
+        // Tools still running show as spinner chips; finished ones have already
+        // dropped into the transcript (foldable), so they leave the panel.
+        let running: Vec<&zcode_tui::AppToolCall> = turn
+            .turn
+            .tools
+            .iter()
+            .filter(|tool| !tool.finished)
+            .collect();
+        if !running.is_empty() {
+            let mut spans = vec![Span::raw(" ".to_string())];
+            for (index, tool) in running.iter().rev().take(6).rev().enumerate() {
+                if index > 0 {
+                    spans.push(Span::raw("   ".to_string()));
+                }
+                spans.push(Span::styled(format!("{symbol} "), t.accent()));
+                let name = if tool.name.is_empty() {
+                    "tool"
+                } else {
+                    tool.name.as_str()
+                };
+                spans.push(Span::styled(name.to_string(), t.text()));
+            }
+            lines.push(Line::from(spans));
+        }
+        let reasoning = turn.turn.reasoning.trim();
+        if !reasoning.is_empty() {
+            let tail: Vec<&str> = reasoning
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .rev()
+                .take(LIVE_TEXT_TAIL)
+                .collect();
+            for line in tail.into_iter().rev() {
+                let clipped: String = line.chars().take(120).collect();
+                lines.push(Line::from(Span::styled(format!(" {clipped}"), t.dim())));
+            }
+        }
+        return lines;
+    }
     let Some(active) = &state.job else {
         return Vec::new();
     };
     let Some(live) = &active.live else {
         return Vec::new();
     };
-    let t = &state.theme;
     let mut lines = Vec::new();
     if !live.chips.is_empty() {
         let mut spans = vec![Span::raw(" ".to_string())];
@@ -1989,17 +3204,38 @@ fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
         height: area.height,
     };
     let width = inner.width as usize;
+    let graphics_logo = state.graphics_logo.is_some();
+    // Item index where the reserved graphics-logo block starts, once placed.
+    let mut logo_span: Option<u16> = None;
     let mut items: Vec<ListItem<'static>> = Vec::new();
     for (index, entry) in state.log.iter().enumerate() {
         if index > 0 {
             items.push(ListItem::new(Line::default()));
+        }
+        // With a graphics protocol the wordmark+skyline block is drawn as a
+        // real image overlay; reserve blank rows here and remember where the
+        // first such block sits so the image can be painted over it below.
+        if graphics_logo
+            && logo_span.is_none()
+            && matches!(entry.kind, LogKind::Logo | LogKind::Brand)
+        {
+            logo_span = Some(items.len() as u16);
+            for _ in 0..LOGO_IMG_ROWS {
+                items.push(ListItem::new(Line::default()));
+            }
+            continue;
         }
         // Long mechanical output folds to a head preview unless expanded.
         if foldable_kind(entry.kind) && !state.unfolded.contains(&index) {
             if let Some((head, hidden)) = fold_preview(&entry.text, FOLD_THRESHOLD, FOLD_HEAD) {
                 let preview_text = entry.text.lines().take(head).collect::<Vec<_>>().join("\n");
                 let preview = LogLine::new(entry.kind, &preview_text);
-                items.extend(log_to_items(&preview, width, &state.theme));
+                items.extend(log_to_items(
+                    &preview,
+                    width,
+                    &state.theme,
+                    state.skyline_mode,
+                ));
                 items.push(ListItem::new(Line::from(Span::styled(
                     format!("  … (+{hidden} lines · Ctrl+O)"),
                     state.theme.dim(),
@@ -2007,7 +3243,7 @@ fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
                 continue;
             }
         }
-        items.extend(log_to_items(entry, width, &state.theme));
+        items.extend(log_to_items(entry, width, &state.theme, state.skyline_mode));
     }
     let total = items.len() as u16;
     let max_scroll = total.saturating_sub(inner.height);
@@ -2022,6 +3258,24 @@ fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
         inner,
         &mut ListState::default().with_offset(offset as usize),
     );
+
+    // Paint the true logo over its reserved rows, but only when the whole
+    // block is scrolled fully into view (partial draws corrupt the protocol).
+    if let Some(start) = logo_span {
+        let end = start.saturating_add(LOGO_IMG_ROWS);
+        if start >= offset && end <= offset.saturating_add(inner.height) {
+            let img_w = LOGO_IMG_COLS.min(inner.width);
+            let rect = Rect {
+                x: inner.x + (inner.width.saturating_sub(img_w)) / 2,
+                y: inner.y + (start - offset),
+                width: img_w,
+                height: LOGO_IMG_ROWS,
+            };
+            if let Some(protocol) = state.graphics_logo.as_mut() {
+                frame.render_stateful_widget(StatefulImage::new(), rect, protocol);
+            }
+        }
+    }
 }
 
 /// Split a line into (matches, chunk) runs so adjacent chars of the same
@@ -2038,7 +3292,29 @@ fn chunk_by(text: &str, pred: impl Fn(char) -> bool) -> Vec<(bool, String)> {
     runs
 }
 
-fn log_to_items(entry: &LogLine, width: usize, theme: &Theme) -> Vec<ListItem<'static>> {
+/// The welcome skyline + the width it centres to. Braille is a fixed 45-col
+/// block; the wireframe is capped to a logo width (not full-panel) so both
+/// centre under the wordmark. `outer` centres the whole logo in the panel;
+/// `inner` centres the 45-col wordmark within a wider skyline.
+fn skyline_layout(mode: SkylineMode, width: usize) -> (Vec<String>, usize, usize) {
+    let sky = match mode {
+        SkylineMode::Braille => skyline_braille(),
+        SkylineMode::Wire => skyline_lines(width.min(70)),
+        SkylineMode::None => Vec::new(),
+    };
+    let sky_w = sky.first().map(|row| row.width()).unwrap_or(0);
+    let logo_w = sky_w.max(SKYLINE_LOGO_W);
+    let outer = width.saturating_sub(logo_w) / 2;
+    let inner = logo_w.saturating_sub(SKYLINE_LOGO_W) / 2;
+    (sky, outer, inner)
+}
+
+fn log_to_items(
+    entry: &LogLine,
+    width: usize,
+    theme: &Theme,
+    mode: SkylineMode,
+) -> Vec<ListItem<'static>> {
     let mut items: Vec<ListItem<'static>> = Vec::new();
     match entry.kind {
         LogKind::Banner => {
@@ -2068,24 +3344,30 @@ fn log_to_items(entry: &LogLine, width: usize, theme: &Theme) -> Vec<ListItem<'s
             ))));
         }
         LogKind::Logo => {
+            // Wordmark bright (GLM 蓝) with the skyline dim beneath it, together
+            // as one centred logo block (wordmark inset within a wider skyline).
+            let (sky, outer, inner) = skyline_layout(mode, width);
             for raw in entry.text.lines() {
-                let style = if raw.contains('█') || raw.contains('╚') {
-                    theme.accent().bold()
-                } else {
-                    theme.dim()
-                };
                 items.push(ListItem::new(Line::from(Span::styled(
-                    raw.to_string(),
-                    style,
+                    format!("{}{raw}", " ".repeat(outer + inner)),
+                    theme.accent().bold(),
+                ))));
+            }
+            for line in sky {
+                items.push(ListItem::new(Line::from(Span::styled(
+                    format!("{}{line}", " ".repeat(outer)),
+                    theme.dim(),
                 ))));
             }
         }
         LogKind::Brand => {
-            // Solid blocks carry the bright purple; every other glyph
-            // (box-drawing outlines, the skyline strip) is the shadow layer.
+            // Solid blocks carry the bright purple; the skyline beneath is the
+            // shadow layer (清华紫 dim). Both centre together as one logo block.
+            let (sky, outer, inner) = skyline_layout(mode, width);
             for raw in entry.text.lines() {
+                let padded = format!("{}{raw}", " ".repeat(outer + inner));
                 let mut spans = Vec::new();
-                for (is_block, chunk) in chunk_by(raw, |c| c == '█') {
+                for (is_block, chunk) in chunk_by(&padded, |c| c == '█') {
                     let style = if is_block {
                         theme.brand().bold()
                     } else {
@@ -2094,6 +3376,12 @@ fn log_to_items(entry: &LogLine, width: usize, theme: &Theme) -> Vec<ListItem<'s
                     spans.push(Span::styled(chunk, style));
                 }
                 items.push(ListItem::new(Line::from(spans)));
+            }
+            for line in sky {
+                items.push(ListItem::new(Line::from(Span::styled(
+                    format!("{}{line}", " ".repeat(outer)),
+                    theme.brand_dim(),
+                ))));
             }
         }
         LogKind::Tip => {
@@ -2383,7 +3671,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     if let Some((used, window)) = state.context_watermark {
         right.push_str(&format_context_watermark(used, window));
         if context_watermark_warn(used, window) {
-            right.push_str(" · /new?");
+            // /compact keeps the session (app-server), /new resets it.
+            right.push_str(" · /compact or /new?");
         }
         right.push_str(" · ");
     }
@@ -2470,6 +3759,127 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
         )));
     frame.render_widget(Clear, area);
     frame.render_widget(List::new(items).block(block), area);
+}
+
+/// The kernel-awaits-approval overlay: prompt + plan under review + question,
+/// then the options list (↑↓/Enter answers, Esc declines).
+fn render_interaction(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let t = &state.theme;
+    let Some(pending) = &state.interaction else {
+        return;
+    };
+    let request = &pending.request;
+    let Some(question) = request.questions.first() else {
+        return;
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(t.accent())
+        .title(Line::from(Span::styled(
+            format!(" {} · Enter answers · Esc declines ", request.tool_name),
+            t.dim(),
+        )));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    // Body text above, options below (options own their exact height).
+    let option_rows = question.options.len().min(6) as u16;
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(option_rows)])
+        .split(inner);
+
+    let mut body: Vec<Line> = Vec::new();
+    if !request.prompt.is_empty() {
+        body.push(Line::from(Span::styled(
+            request.prompt.clone(),
+            t.text().bold(),
+        )));
+        body.push(Line::default());
+    }
+    if let Some(plan) = &request.plan {
+        for raw in plan.lines() {
+            body.push(Line::from(Span::styled(raw.to_string(), t.text())));
+        }
+        body.push(Line::default());
+    }
+    if !question.question.is_empty() {
+        body.push(Line::from(Span::styled(
+            question.question.clone(),
+            t.accent(),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(body)).wrap(Wrap { trim: false }),
+        parts[0],
+    );
+
+    let items = question
+        .options
+        .iter()
+        .map(|option| {
+            let mut spans = vec![Span::styled(
+                format!("{:<12}", option.label),
+                t.text().bold(),
+            )];
+            if !option.description.is_empty() {
+                spans.push(Span::styled(option.description.clone(), t.dim()));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect::<Vec<_>>();
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_style(t.selection())
+            .highlight_symbol("› "),
+        parts[1],
+        &mut ListState::default().with_selected(Some(pending.selected)),
+    );
+}
+
+/// The /model picker: kernel-reported models, current one preselected.
+fn render_model_picker(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let t = &state.theme;
+    let Some(index) = state.model_picker else {
+        return;
+    };
+    let current = state.controls.model_current.as_deref();
+    let items = state
+        .controls
+        .models
+        .iter()
+        .map(|choice| {
+            let id = choice.reference.get("modelId").and_then(|v| v.as_str());
+            let marker = if id.is_some() && id == current {
+                "● "
+            } else {
+                "  "
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{marker}{:<24}", choice.label), t.text()),
+                Span::styled(choice.provider.clone(), t.dim()),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(t.frame())
+        .title(Line::from(Span::styled(
+            " model · Enter selects · Esc closes ".to_string(),
+            t.dim(),
+        )));
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(t.selection())
+            .highlight_symbol("› "),
+        area,
+        &mut ListState::default().with_selected(Some(index)),
+    );
 }
 
 fn render_session_picker(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
