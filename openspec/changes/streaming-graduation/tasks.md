@@ -36,10 +36,10 @@
 - [x] 6.1 /usage [7d|30d]:session/usage + usage/stats 并发发出,结果渲染 System 条目(token 细分表 + 汇总行含 cacheHitRate);无会话提示
 - [x] 6.2 todos 缓存 + 工作区渲染(非空才显示,状态符号);create/resume 结果与 state 推送两处更新
 - [x] 6.3 内核 slashCommands 缓存(create/resume 结果),slash 补全动态合并
-- [ ] 6.4 冒烟:s19 /usage 输出包含 totalTokens 与 7d 汇总(screen/plain)
+- [x] 6.4 冒烟:s19 /usage 输出包含 totalTokens 与 7d 汇总(screen/plain)
 
 ## 7. 收尾与发版 0.5.0
 
-- [ ] 7.1 全量门禁:fmt/clippy -D warnings/test/pty 冒烟全绿;install.sh 部署
+- [x] 7.1 全量门禁:fmt/clippy -D warnings/test/pty 冒烟全绿;install.sh 部署
 - [x] 7.2 CHANGELOG [Unreleased] → [0.5.0],Cargo.toml bump 0.5.0,README 版本引用核对
-- [ ] 7.3 提交(逻辑分组)+ 打 tag v0.5.0(push 与 Release CI 由用户执行)
+- [x] 7.3 提交(逻辑分组)+ 打 tag v0.5.0(push 与 Release CI 由用户执行)

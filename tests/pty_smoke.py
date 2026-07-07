@@ -421,9 +421,9 @@ print("== scenario 15: steer mid-turn (app-server) ==", flush=True)
 out = run_pty(
     {}, SPIKE,
     [
-        (1.5, b"Count slowly from 1 to 30, one number per line."),
+        (1.5, b"Count slowly from 1 to 50, one number per line, no shortcuts."),
         (0.5, b"\r"),
-        (6.0, b"Stop counting and just say STEERED."),
+        (5.0, b"Stop counting and just say STEERED."),
         (0.5, b"\r"),
         (60.0, b"/exit"),
         (0.5, b"\r"),
@@ -472,10 +472,10 @@ out = run_pty(
         (1.5, b"\r"),      # Enter picks the top (current-dir) session
         (1.5, b"Reply with exactly: resumed-ok"),
         (0.5, b"\r"),
-        (45.0, b"/exit"),
+        (75.0, b"/exit"),
         (0.5, b"\r"),
     ],
-    timeout=70,
+    timeout=100,
 )
 plain = strip_ansi(out)
 check("s17: picker shown", "pick a session" in plain or "sessions" in plain)

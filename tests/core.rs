@@ -1451,11 +1451,41 @@ fn session_control_params_match_pinned_schemas() {
 
 #[test]
 fn session_lifecycle_params_and_list_parsing() {
-    use zcode_tui::{app_resume_params, app_usage_params, parse_session_list, usage_stats_params};
+    use zcode_tui::{
+        app_resume_params, app_usage_params, build_runtime_model, parse_session_list,
+        usage_stats_params,
+    };
     assert_eq!(
-        app_resume_params("sess_1"),
+        app_resume_params("sess_1", None),
         serde_json::json!({"sessionId": "sess_1"})
     );
+    // Resume must be able to carry the runtimeModel that revives the model
+    // runtime (resume alone leaves the session RUNTIME_MODEL_UNAVAILABLE).
+    let config = r#"{
+        "provider": {"bigmodel": {"kind": "anthropic", "name": "Bigmodel Coding Plan",
+            "options": {"baseURL": "https://open.bigmodel.cn/api/anthropic", "apiKey": "sk-test"},
+            "models": {"glm-5.1": {"name": "GLM-5.1"}, "glm-4.7": {"name": "GLM-4.7"}}}},
+        "model": {"main": "bigmodel/glm-5.1", "lite": "bigmodel/glm-4.7"}
+    }"#;
+    let runtime = build_runtime_model(config, 1234).unwrap();
+    assert_eq!(runtime["model"]["providerId"], "bigmodel");
+    assert_eq!(runtime["model"]["modelId"], "glm-5.1");
+    assert_eq!(runtime["generatedAt"], 1234);
+    let provider = &runtime["provider"];
+    assert_eq!(provider["kind"], "anthropic");
+    // apiKey is the kernel's credential union: inline carries the value.
+    assert_eq!(provider["apiKey"]["source"], "inline");
+    assert_eq!(provider["apiKey"]["value"], "sk-test");
+    assert_eq!(
+        provider["baseURL"],
+        "https://open.bigmodel.cn/api/anthropic"
+    );
+    assert_eq!(provider["models"].as_array().unwrap().len(), 2);
+    let with = app_resume_params("sess_1", Some(&runtime));
+    assert_eq!(with["runtimeModel"]["revision"], "zcode-tui-resume");
+    // Unknown layouts -> None (bare resume + create fallback), never panic.
+    assert!(build_runtime_model("{}", 1).is_none());
+    assert!(build_runtime_model("not json", 1).is_none());
     assert_eq!(
         app_usage_params("sess_1"),
         serde_json::json!({"sessionId": "sess_1"})

@@ -16,8 +16,12 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
   无缝回落 `--prompt`。
 - **流式路径 /resume 修复**(真 bug):`--resume`、`/resume`、`/sessions`
   选择此前在流式下被无声忽略(永远新建会话)。现握手改发
-  `session/resume {sessionId}`(实测返回含历史 messages/todos),续接提示
-  显示历史条数;resume 失败自动回退新建,不阻塞 prompt。
+  `session/resume {sessionId, runtimeModel}`(实测返回含历史 messages/todos),
+  续接提示显示历史条数;resume 失败自动回退新建,不阻塞 prompt。
+  **关键实测**:resume 只恢复会话不恢复模型运行时,裸 resume 后首次 send
+  必报 `ZCODE_RUNTIME_MODEL_UNAVAILABLE`——必须随 resume 附上从内核
+  config.json 构造的 `runtimeModel`(provider 凭证走 inline credential
+  union),内核 strict schema 逐字段钉死。
 - **/sessions 协议数据源**:连接活跃时用 `session/list` 填充选择器
   (running 会话带标注),替代流式下的 db 轮询;db 保留为经典路径回退。
 - **steer 被拒不再丢输入**:steer 成功信封的 result 是

@@ -78,3 +78,18 @@ kernel-session-controls 之后流式路径功能完整,wrapper 已默认开启
 
 - resume 返回的 messages 是否值得回放进 transcript(体量可能大;v1 先不
   回放,只提示"已续接 N 条历史"),实现期看 messages 形状决定。
+
+## 实现期新钉事实(2026-07-07,s17 失败根因)
+
+- **裸 `session/resume` 的会话发 prompt 必失败**:错误
+  `ZCODE_RUNTIME_MODEL_UNAVAILABLE`("历史任务使用的模型已不可用")——
+  resume 恢复会话但不恢复模型运行时;setModel 也救不了(model_changed 推送
+  会来,但 send 依旧拒)。fork 也不是出路(要求 active + 有 checkpoint)。
+- **正解**:resume params 本身接受可选 `runtimeModel`(bundle zxe schema),
+  形状 `p_` strict:`{revision, generatedAt, model:{providerId,modelId},
+  provider:{providerId, kind(enum anthropic|openai|openai-compatible),
+  label?, source(enum …|user|…), baseURL?, apiKey:<credential union>,
+  models:[{modelId,label?}…](min 1)}}`;apiKey 必须是判别 union,
+  inline 形态 `{source:"inline", value:"…"}`。从内核自己的
+  `~/.zcode/cli/config.json` 构造(`build_runtime_model`),实弹验证:
+  resume+runtimeModel → send 接受 → prompt_completed 6.4s。

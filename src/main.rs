@@ -33,21 +33,21 @@ use zcode_tui::{
     app_compact_params, app_create_params, app_resume_params, app_send_params, app_server_enabled,
     app_session_id_from_result, app_set_mode_params, app_set_model_params, app_set_thought_params,
     app_state_controls, app_state_is_turn_end, app_state_turn_error, app_state_watermark,
-    app_steer_params, app_stop_params, app_subscribe_params, app_usage_params, classify_input,
-    command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
+    app_steer_params, app_stop_params, app_subscribe_params, app_usage_params, build_runtime_model,
+    classify_input, command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
     detect_auth_status, diff_line_role, encode_interaction_reply, env_is_headless,
     file_suggestions, fold_preview, format_context_watermark, git_diff_command,
-    handle_local_command, help_text, history_search, is_newer_version, kernel_db_path_from,
-    latest_assistant_text, latest_reasoning, latest_session_for_dir, leader_action_for_key,
-    list_recent_sessions, live_tool_chips, load_ui_config, login_command, markdown_lines,
-    open_kernel_db_ro, parse_cli_args, parse_interaction_request, parse_kernel_slash_commands,
-    parse_prompt_summary, parse_session_list, parse_steer_result, parse_stream_event, parse_todos,
-    parse_update_feed, parse_update_feed_url, prompt_command_for, recent_input_history,
-    relative_age, run_command, shorten_home, skyline_braille, skyline_graphics_wanted,
-    skyline_lines, skyline_mode, slash_suggestions_merged, spawn_streaming_command,
-    tool_input_summary, usage_stats_params, wrap_display, AppConfig, AppServerConn,
-    AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, DbBaseline, DiffRole,
-    InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction, LiveToolChip,
+    handle_local_command, help_text, history_search, is_newer_version, kernel_config_path_from,
+    kernel_db_path_from, latest_assistant_text, latest_reasoning, latest_session_for_dir,
+    leader_action_for_key, list_recent_sessions, live_tool_chips, load_ui_config, login_command,
+    markdown_lines, open_kernel_db_ro, parse_cli_args, parse_interaction_request,
+    parse_kernel_slash_commands, parse_prompt_summary, parse_session_list, parse_steer_result,
+    parse_stream_event, parse_todos, parse_update_feed, parse_update_feed_url, prompt_command_for,
+    recent_input_history, relative_age, run_command, shorten_home, skyline_braille,
+    skyline_graphics_wanted, skyline_lines, skyline_mode, slash_suggestions_merged,
+    spawn_streaming_command, tool_input_summary, usage_stats_params, wrap_display, AppConfig,
+    AppServerConn, AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, DbBaseline,
+    DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction, LiveToolChip,
     MdLineKind, SessionControls, SessionRow, SkylineMode, SpanRole, SteerOutcome, StreamEvent,
     StreamingJob, TodoItem, ToolChipStatus, TurnDelta, UiConfig, UpdateFeed, SKYLINE_LOGO_W,
 };
@@ -1446,11 +1446,18 @@ impl UiState {
             None => {
                 let workspace = self.app_workspace();
                 let resume = self.config.resume.clone();
+                // Resume restores the conversation but NOT the model runtime:
+                // without this, the first send fails with
+                // ZCODE_RUNTIME_MODEL_UNAVAILABLE (pinned live 2026-07-07).
+                // Built from the kernel's own config.json; None falls back to
+                // a bare resume + the create-fallback path.
+                let runtime = resume.as_ref().and_then(|_| load_runtime_model());
                 let conn = self.app_conn.as_mut().expect("app_conn set above");
                 let phase = match resume {
-                    Some(session_id) => ConnectPhase::Resume(
-                        conn.send("session/resume", app_resume_params(&session_id))?,
-                    ),
+                    Some(session_id) => ConnectPhase::Resume(conn.send(
+                        "session/resume",
+                        app_resume_params(&session_id, runtime.as_ref()),
+                    )?),
                     None => ConnectPhase::Create(
                         conn.send("session/create", app_create_params(&workspace))?,
                     ),
@@ -1785,7 +1792,7 @@ FEED='{feed_url}'
 echo "feed: $FEED"
 YML=$(curl -fsSL --max-time 15 "$FEED")
 VER=$(printf '%s' "$YML" | sed -n 's/^version:[[:space:]]*//p' | head -1)
-DEB=$(printf '%s' "$YML" | sed -n 's/^[[:space:]]*-\{{0,1}}[[:space:]]*url:[[:space:]]*//p' | grep '\.deb$' | head -1)
+DEB=$(printf '%s' "$YML" | sed -n 's/^[[:space:]]*-*[[:space:]]*url:[[:space:]]*//p' | grep '\.deb$' | head -1)
 SHA=$(printf '%s' "$YML" | awk '/url:.*\.deb$/{{f=1;next}} f&&/sha512:/{{sub(/^[[:space:]]*sha512:[[:space:]]*/,"");print;exit}}')
 INSTALLED=$(dpkg-query -W -f='${{Version}}' zcode 2>/dev/null | cut -d- -f1 || echo 0)
 echo "installed: $INSTALLED   latest: $VER"
@@ -3518,6 +3525,19 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// The `runtimeModel` to attach to `session/resume`, built from the kernel's
+/// own `~/.zcode/cli/config.json` (the file session/create seeds fresh
+/// sessions from). None → resume bare; the create-fallback still saves us.
+fn load_runtime_model() -> Option<serde_json::Value> {
+    let home = env::var("HOME").ok()?;
+    let config = fs::read_to_string(kernel_config_path_from(std::path::Path::new(&home))).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    build_runtime_model(&config, now)
 }
 
 /// `session/usage` result → readable summary (shape pinned live 2026-07-07).

@@ -2921,8 +2921,76 @@ pub fn app_steer_params(session_id: &str, content: &str) -> serde_json::Value {
 
 /// `session/resume` — reopen an existing session; the result is shaped like
 /// `session/create`'s (verified live: messages/projection/session/todos).
-pub fn app_resume_params(session_id: &str) -> serde_json::Value {
-    serde_json::json!({ "sessionId": session_id })
+/// `runtime_model` (from [`build_runtime_model`]) MUST accompany the resume:
+/// resume restores the conversation but NOT the model runtime — without it
+/// the first send fails with `ZCODE_RUNTIME_MODEL_UNAVAILABLE` ("历史任务
+/// 使用的模型已不可用", pinned live 2026-07-07).
+pub fn app_resume_params(
+    session_id: &str,
+    runtime_model: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    match runtime_model {
+        Some(runtime) => {
+            serde_json::json!({ "sessionId": session_id, "runtimeModel": runtime })
+        }
+        None => serde_json::json!({ "sessionId": session_id }),
+    }
+}
+
+/// Build the `runtimeModel` object the kernel needs to revive a resumed
+/// session, from the kernel's own `~/.zcode/cli/config.json` (the same file
+/// session/create seeds a fresh session from). Shape pinned live 2026-07-07
+/// against the kernel's strict zod schema (`p_` in the bundle):
+/// `{revision, generatedAt, model:{providerId,modelId},
+///   provider:{providerId, kind, label?, source, baseURL?,
+///             apiKey:{source:"inline", value}?, models:[{modelId,label?}…]}}`.
+/// Returns None when the config is missing or not in the known layout — the
+/// caller resumes without it and relies on the create-fallback path.
+pub fn build_runtime_model(config_json: &str, generated_at: u64) -> Option<serde_json::Value> {
+    let config: serde_json::Value = serde_json::from_str(config_json).ok()?;
+    // `model.main` is "provider/modelId".
+    let main = config.pointer("/model/main")?.as_str()?;
+    let (provider_id, model_id) = main.split_once('/')?;
+    let provider = config.pointer(&format!("/provider/{provider_id}"))?;
+    let kind = provider.get("kind")?.as_str()?;
+    let models: Vec<serde_json::Value> = provider
+        .get("models")?
+        .as_object()?
+        .iter()
+        .map(|(id, m)| {
+            serde_json::json!({
+                "modelId": id,
+                "label": m.get("name").and_then(|v| v.as_str()).unwrap_or(id),
+            })
+        })
+        .collect();
+    if models.is_empty() {
+        return None;
+    }
+    let mut provider_obj = serde_json::json!({
+        "providerId": provider_id,
+        "kind": kind,
+        "label": provider.get("name").and_then(|v| v.as_str()).unwrap_or(provider_id),
+        "source": "user",
+        "models": models,
+    });
+    if let Some(base_url) = provider
+        .pointer("/options/baseURL")
+        .and_then(|v| v.as_str())
+    {
+        provider_obj["baseURL"] = serde_json::json!(base_url);
+    }
+    if let Some(api_key) = provider.pointer("/options/apiKey").and_then(|v| v.as_str()) {
+        // The kernel's credential union; inline carries the key verbatim
+        // (same trust domain: the kernel owns config.json to begin with).
+        provider_obj["apiKey"] = serde_json::json!({ "source": "inline", "value": api_key });
+    }
+    Some(serde_json::json!({
+        "revision": "zcode-tui-resume",
+        "generatedAt": generated_at,
+        "model": { "providerId": provider_id, "modelId": model_id },
+        "provider": provider_obj,
+    }))
 }
 
 /// `session/usage` — per-session token breakdown.
