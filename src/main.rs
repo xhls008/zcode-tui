@@ -1446,7 +1446,10 @@ impl UiState {
                 self.launch_ide(output.trim_start_matches("__IDE__"));
             }
             Ok(output) => {
-                self.push_system(output.trim_end());
+                // Direct answer to a user command (/skills list, /mcp list,
+                // /status, …): show it whole, never folded.
+                self.log
+                    .push(LogLine::unfolded(LogKind::System, output.trim_end()));
                 self.status = "ok".to_string();
             }
             Err(error) => self.push_error(&format!("{error:#}")),
@@ -2632,7 +2635,8 @@ fi"#
                         "session" => format_session_usage(result),
                         _ => format_usage_stats(result),
                     };
-                    self.push_system(&text);
+                    // /usage is a user-requested report: never fold.
+                    self.log.push(LogLine::unfolded(LogKind::System, &text));
                     self.status = "usage".to_string();
                 }
             }
@@ -3502,6 +3506,7 @@ fi"#
             .rev()
             .find(|(_, entry)| {
                 foldable_kind(entry.kind)
+                    && !entry.no_fold
                     && fold_preview(&entry.text, FOLD_THRESHOLD, FOLD_HEAD).is_some()
             })
             .map(|(index, _)| index);
@@ -3896,6 +3901,11 @@ fn foldable_kind(kind: LogKind) -> bool {
 struct LogLine {
     kind: LogKind,
     text: String,
+    /// Exempt from long-output folding. Set for DIRECT ANSWERS the user
+    /// asked to read (/skills list, /mcp list, /status, /usage): folding
+    /// exists to keep mechanical tool/shell output from flooding the
+    /// transcript, not to hide a listing the user explicitly requested.
+    no_fold: bool,
 }
 
 impl LogLine {
@@ -3903,6 +3913,16 @@ impl LogLine {
         Self {
             kind,
             text: text.to_string(),
+            no_fold: false,
+        }
+    }
+
+    /// A user-requested listing: renders like its kind but never folds.
+    fn unfolded(kind: LogKind, text: &str) -> Self {
+        Self {
+            kind,
+            text: text.to_string(),
+            no_fold: true,
         }
     }
 }
@@ -4292,7 +4312,8 @@ fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
             continue;
         }
         // Long mechanical output folds to a head preview unless expanded.
-        if foldable_kind(entry.kind) && !state.unfolded.contains(&index) {
+        // User-requested listings (no_fold) always render in full.
+        if foldable_kind(entry.kind) && !entry.no_fold && !state.unfolded.contains(&index) {
             if let Some((head, hidden)) = fold_preview(&entry.text, FOLD_THRESHOLD, FOLD_HEAD) {
                 let preview_text = entry.text.lines().take(head).collect::<Vec<_>>().join("\n");
                 let preview = LogLine::new(entry.kind, &preview_text);

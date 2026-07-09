@@ -6,6 +6,8 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-10
+
 ### 新增(openspec 变更 session-rewind,协议形状 2026-07-07 对真内核 0.15.0 实弹钉死)
 
 - **/rewind 检查点回滚**(app-server 路径):`checkpoint.created` 事件
@@ -51,6 +53,8 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
   `mcp/list` 显示 connected + toolCount。
 - **/update 加固**:feed 提供的 deb 文件名过 `basename` 再拼下载路径,
   防恶意 feed 以 `../` 路径穿越写盘;正常 feed 行为不变。
+- **用户请求的列表不折叠**:`/status`、`/usage`、`/skills list` 等显式
+  查询结果始终完整展示;长输出折叠仍只用于工具/shell 这类机械输出。
 
 ### 新增(同变更)
 
