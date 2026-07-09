@@ -53,8 +53,13 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
   `mcp/list` 显示 connected + toolCount。
 - **/update 加固**:feed 提供的 deb 文件名过 `basename` 再拼下载路径,
   防恶意 feed 以 `../` 路径穿越写盘;正常 feed 行为不变。
-- **用户请求的列表不折叠**:`/status`、`/usage`、`/skills list` 等显式
-  查询结果始终完整展示;长输出折叠仍只用于工具/shell 这类机械输出。
+- **用户主动索取的清单不再被折叠**:`/skills list`、`/mcp list`、`/status`、
+  `/usage` 等本地命令的直接回答此前超过 24 行会被长输出折叠成头 8 行
+  (用户报告 /skills list "显示不完全")。折叠本意是抑制工具/shell 的
+  机械长输出,不该把用户点名要看的清单藏起来;这类条目现在标记为
+  不可折叠、整体渲染(超出视口用 PgUp/滚轮回看)。shell、工具输出、
+  /diff 的折叠行为不变。排查中确认输出链路无数据丢失,
+  "error" 字样为 skill 描述文本自带,非真实错误。
 
 ### 新增(同变更)
 

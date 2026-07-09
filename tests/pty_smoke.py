@@ -260,6 +260,28 @@ plain = strip_ansi(out)
 check("s7: long output folded with hidden count", "+112 lines" in plain and "Ctrl+O" in plain)
 check("s7: Ctrl+O expands", "expanded (Ctrl+O folds back)" in plain)
 
+# ---- scenario 7b: user-requested listings never fold ----
+# /skills list is a direct answer the user asked to read; unlike shell/tool
+# output it must render whole (no "+N lines" fold marker for it).
+print("== scenario 7b: /skills list renders unfolded ==", flush=True)
+out = run_pty(
+    {"ZCODE_TUI_APP_SERVER": "0"}, SPIKE,
+    [
+        (2.0, b"/skills list"),
+        (0.5, b"\r"),
+    ] + [(0.5, b"\x1b[5~")] * 16 + [   # PgUp back through the tall listing
+        (1.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=30,
+)
+plain = strip_ansi(out)
+# Tail is visible immediately; the head must be reachable by scrolling.
+check("s7b: last listed skill visible without expanding",
+      "zcode-configuration-guide" in plain)
+check("s7b: first listed skill reachable via PgUp", "diagnosing-commands" in plain)
+check("s7b: listing not folded", "lines · Ctrl+O)" not in plain)
+
 # ---- scenario 8: ui config color override (user story: 换掉强调色) ----
 print("== scenario 8: config accent override ==", flush=True)
 cfg = os.path.join(SPIKE, "tui-config")
