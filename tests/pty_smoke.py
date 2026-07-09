@@ -613,6 +613,55 @@ check("s21: history replayed into the transcript",
       "Say exactly REPLAY-MARK-42" in plain)
 check("s21: turn completed on resumed session", screen_seen(run_pty.last_raw, "done ("))
 
+# ---- scenario 22: /rewind — checkpoint picker, preview, file restore ----
+# Two approved writes create two checkpoint.created events; /rewind previews
+# latestCheckpoint (the pre-image of write #2) and applies the file scope via
+# applyFileRewind — r.txt must be back to "one" on disk afterwards.
+print("== scenario 22: /rewind file restore (app-server) ==", flush=True)
+rewind_dir = tempfile.mkdtemp(prefix="zcode-smoke-rewind-")
+out = run_pty(
+    {}, rewind_dir,
+    [
+        (1.5, b"Create a file named r.txt containing one. Just do it."),
+        (0.5, b"\r"),
+        (60.0, b"\r"),     # Enter: Allow once (write #1)
+        (45.0, b"Change r.txt content to two. Just do it."),
+        (0.5, b"\r"),
+        (60.0, b"\r"),     # Enter: Allow once (write #2)
+        (45.0, b"/rewind"),
+        (0.5, b"\r"),      # open the target picker
+        (2.0, b"\r"),      # Enter: preview the latest checkpoint
+        (4.0, b"\r"),      # Enter: apply (scope defaults to workspace)
+        (8.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=260,
+)
+raw = run_pty.last_raw
+check("s22: rewind picker listed targets", screen_seen(raw, "latest checkpoint"))
+check("s22: preview stage rendered", screen_seen(raw, "rewind preview"))
+check("s22: file restore acknowledged", screen_seen(raw, "rewound (files)"))
+r_path = os.path.join(rewind_dir, "r.txt")
+r_content = open(r_path).read().strip() if os.path.exists(r_path) else "<absent>"
+check("s22: file reverted on disk (two -> one)", r_content == "one",
+      f"r.txt={r_content!r}")
+
+# ---- scenario 23: /rewind off the app-server path only reports ----
+print("== scenario 23: /rewind without app-server ==", flush=True)
+out = run_pty(
+    {"ZCODE_TUI_APP_SERVER": "0"}, SPIKE,
+    [
+        (2.0, b"/rewind"),
+        (0.5, b"\r"),
+        (2.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=20,
+)
+plain = strip_ansi(out)
+check("s23: reports the app-server requirement",
+      "needs an active app-server session" in plain)
+
 failed = [name for name, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} checks passed", flush=True)
 sys.exit(1 if failed else 0)

@@ -467,7 +467,7 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
         "exit" | "quit" => Ok(InputAction::Quit),
         "help" | "clear" | "editor" | "login" | "logout" | "auth" | "status" | "diff" | "ide"
         | "sessions" | "mode" | "resume" | "new" | "model" | "think" | "compact" | "usage"
-        | "update" | "copy" => Ok(InputAction::Local(parts)),
+        | "update" | "copy" | "rewind" => Ok(InputAction::Local(parts)),
         "skills" => {
             let mut local = parts;
             if local.len() == 1 {
@@ -612,6 +612,11 @@ pub fn command_catalog() -> &'static [CommandSpec] {
         CommandSpec {
             command: "/usage",
             summary: "session + 7d/30d token usage (app-server streaming path)",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/rewind",
+            summary: "rewind files/conversation to a checkpoint (app-server streaming path)",
             route: "local",
         },
         CommandSpec {
@@ -1436,6 +1441,8 @@ pub fn help_text() -> &'static str {
   /think                       cycle the thought level (app-server path)
   /compact                     compact the session context in place
   /usage [7d|30d]              show session and period token usage
+  /rewind                      rewind files/conversation to a checkpoint
+                               (app-server path; Enter previews then applies)
   /update                      update the ZCode kernel from the official feed
   /copy                        copy the last assistant reply to the system
                                clipboard (OSC52; tmux needs set-clipboard on)
@@ -3198,6 +3205,239 @@ pub fn app_close_params(session_id: &str) -> serde_json::Value {
     serde_json::json!({ "sessionId": session_id })
 }
 
+/// One captured `checkpoint.created` event — a rewind target. The kernel
+/// emits one per gated tool write; the snapshot is the workspace state
+/// **before** that write ran (pinned live 2026-07-07: rewinding to the first
+/// checkpoint of a fresh file DELETES it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointEntry {
+    pub id: String,
+    /// `fileCount` — files captured by the snapshot.
+    pub files: u64,
+    /// `targetMessageId` — the turn's user message. The conversation-scope
+    /// leg MUST target this via `{kind:"message"}`: pinned live 2026-07-09,
+    /// `session/rewind` COERCES checkpoint-kind targets to a workspace (file)
+    /// rewind no matter which scope was requested, while message-kind targets
+    /// honor scope:"conversation" and leave files alone.
+    pub message_id: Option<String>,
+}
+
+/// Short display form of a checkpoint id ("checkpoint_90c0d5df-…" → "90c0d5df").
+pub fn checkpoint_short_id(id: &str) -> String {
+    id.trim_start_matches("checkpoint_")
+        .chars()
+        .take(8)
+        .collect()
+}
+
+/// A rewind target — the discriminated union of `session/rewind` and the
+/// file-rewind pair. The UI picks checkpoint forms; conversation legs are
+/// translated to `Message` (see `conversation_target`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RewindTarget {
+    /// `{kind:"latestCheckpoint"}` — kernel-tracked most recent checkpoint.
+    LatestCheckpoint,
+    /// `{kind:"checkpoint", checkpointId}`.
+    Checkpoint(String),
+    /// `{kind:"message", messageId}` — the only target kind whose
+    /// scope:"conversation" is honored by session/rewind (pinned live
+    /// 2026-07-09; checkpoint kinds get coerced to a forced file rewind).
+    Message(String),
+    /// `{kind:"turn", turnIndex}` — conversation rewind to before that turn.
+    Turn(u64),
+}
+
+impl RewindTarget {
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::LatestCheckpoint => serde_json::json!({ "kind": "latestCheckpoint" }),
+            Self::Checkpoint(id) => {
+                serde_json::json!({ "kind": "checkpoint", "checkpointId": id })
+            }
+            Self::Message(id) => serde_json::json!({ "kind": "message", "messageId": id }),
+            Self::Turn(index) => serde_json::json!({ "kind": "turn", "turnIndex": index }),
+        }
+    }
+
+    /// Picker/status label, e.g. "latest checkpoint" or "checkpoint 90c0d5df".
+    pub fn label(&self) -> String {
+        match self {
+            Self::LatestCheckpoint => "latest checkpoint".to_string(),
+            Self::Checkpoint(id) => format!("checkpoint {}", checkpoint_short_id(id)),
+            Self::Message(id) => format!("message {}", &id[..id.len().min(16)]),
+            Self::Turn(index) => format!("turn {index}"),
+        }
+    }
+}
+
+/// Translate a picker target (checkpoint form) into the message-kind target
+/// its conversation-scope leg must use. None when the checkpoint (or its
+/// `targetMessageId`) is unknown — the caller refuses the conversation leg
+/// instead of sending a checkpoint target that would force-restore files.
+pub fn conversation_target(
+    picker: &RewindTarget,
+    checkpoints: &[CheckpointEntry],
+) -> Option<RewindTarget> {
+    let entry = match picker {
+        RewindTarget::Checkpoint(id) => checkpoints.iter().find(|c| &c.id == id),
+        RewindTarget::LatestCheckpoint => checkpoints.last(),
+        // Already conversation-shaped.
+        RewindTarget::Message(_) | RewindTarget::Turn(_) => return Some(picker.clone()),
+    }?;
+    entry.message_id.clone().map(RewindTarget::Message)
+}
+
+/// `session/previewFileRewind` / `session/applyFileRewind` — both take
+/// `{sessionId, target}` (empty-params ZodError names exactly those two).
+pub fn app_file_rewind_params(session_id: &str, target: &RewindTarget) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id, "target": target.to_json() })
+}
+
+/// `session/rewind {sessionId, target, scope}`. scope ∈ conversation|
+/// workspace|both. The UI only sends scope:"conversation" and only with
+/// message-kind targets — BOTH pinned live: session/rewind FORCE-applies
+/// file restores over external modifications (2026-07-07, ignores
+/// canApply:false), and it COERCES checkpoint-kind targets to a workspace
+/// rewind even when scope:"conversation" was requested (2026-07-09,
+/// rewind.triggered came back scope:"workspace" and deleted the file).
+/// File restores must go through `session/applyFileRewind` instead.
+pub fn app_rewind_params(
+    session_id: &str,
+    target: &RewindTarget,
+    scope: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "sessionId": session_id,
+        "target": target.to_json(),
+        "scope": scope,
+    })
+}
+
+/// One file row of a rewind preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindFile {
+    pub path: String,
+    /// safeFiles: `action` ("restore"); unsafeFiles: `reason`
+    /// ("external_modified", …).
+    pub note: String,
+    /// Joined `toolNames`.
+    pub tools: String,
+}
+
+/// Parsed `session/previewFileRewind` result (shape pinned live 2026-07-07:
+/// `{canApply, safeFiles[{action,operationCount,path,toolNames}],
+/// unsafeFiles[{path,reason,expectedHash,currentHash,…}], ignoredFiles,…}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindPreview {
+    pub can_apply: bool,
+    pub safe: Vec<RewindFile>,
+    pub unsafe_files: Vec<RewindFile>,
+    pub ignored: usize,
+}
+
+fn rewind_files(result: &serde_json::Value, key: &str, note_key: &str) -> Vec<RewindFile> {
+    result
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|file| {
+                    let path = file.get("path")?.as_str()?.to_string();
+                    let tools = file
+                        .get("toolNames")
+                        .and_then(|v| v.as_array())
+                        .map(|names| {
+                            names
+                                .iter()
+                                .filter_map(|n| n.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    Some(RewindFile {
+                        path,
+                        note: str_at(file, note_key),
+                        tools,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse a previewFileRewind result. Missing `canApply` -> None (not a
+/// preview shape); empty file lists are valid (nothing to restore).
+pub fn parse_rewind_preview(result: &serde_json::Value) -> Option<RewindPreview> {
+    let can_apply = result.get("canApply")?.as_bool()?;
+    Some(RewindPreview {
+        can_apply,
+        safe: rewind_files(result, "safeFiles", "action"),
+        unsafe_files: rewind_files(result, "unsafeFiles", "reason"),
+        ignored: result
+            .get("ignoredFiles")
+            .and_then(|v| v.as_array())
+            .map_or(0, Vec::len),
+    })
+}
+
+/// Outcome of `session/applyFileRewind` (shape pinned live 2026-07-07:
+/// `{applied: bool, preview: {…}, response: string}`; refusals keep
+/// `applied:false` with the unsafe files in the embedded preview).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRewindOutcome {
+    pub applied: bool,
+    pub response: String,
+    /// Unsafe rows of the embedded preview ("reason path"), for the refusal
+    /// report.
+    pub unsafe_files: Vec<RewindFile>,
+}
+
+pub fn parse_apply_file_rewind(result: &serde_json::Value) -> FileRewindOutcome {
+    FileRewindOutcome {
+        applied: result
+            .get("applied")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        response: str_at(result, "response"),
+        unsafe_files: result
+            .get("preview")
+            .map(|preview| rewind_files(preview, "unsafeFiles", "reason"))
+            .unwrap_or_default(),
+    }
+}
+
+/// Judge a `session/rewind` outcome. NEVER trust the envelope: a rewind to a
+/// nonexistent checkpoint returns a SUCCESS envelope whose `response` reads
+/// "Checkpoint … was not found." (pinned live 2026-07-07). The only reliable
+/// signal is the `rewind.triggered` session event: `strategy:"active_chain"`
+/// = applied, `strategy:"unavailable"` (+ `reason`, e.g.
+/// "target_checkpoint_not_found") = nothing happened. Returns the failure
+/// text, or None on success.
+pub fn rewind_failure(
+    strategy: Option<&str>,
+    reason: Option<&str>,
+    response: &str,
+) -> Option<String> {
+    match strategy {
+        Some("unavailable") => Some(if response.is_empty() {
+            format!("rewind unavailable: {}", reason.unwrap_or("unknown reason"))
+        } else {
+            response.to_string()
+        }),
+        Some(_) => None,
+        // No rewind.triggered observed at all — do not claim success.
+        None => Some(format!(
+            "no rewind.triggered event observed (kernel said: {})",
+            if response.is_empty() {
+                "nothing"
+            } else {
+                response
+            }
+        )),
+    }
+}
+
 /// One replayable history message from a `session/resume` result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayMessage {
@@ -3658,6 +3898,21 @@ pub struct AppServerEvent {
     /// `payload.fileCount` — files captured by a `checkpoint.created`
     /// session-level event (surfaced via `params.type` passthrough).
     pub file_count: Option<u64>,
+    /// `payload.checkpointId` (`checkpoint.created`) — the rewind target id;
+    /// captured per session for the /rewind picker.
+    pub checkpoint_id: Option<String>,
+    /// `payload.targetMessageId` (falling back to `payload.messageId`) of a
+    /// `checkpoint.created` — the turn's user message, needed as the
+    /// `{kind:"message"}` target of the conversation-scope leg.
+    pub target_message_id: Option<String>,
+    /// `payload.strategy` (`rewind.triggered`) — "active_chain" on a real
+    /// rewind, "unavailable" when the kernel could NOT rewind. Pinned live
+    /// 2026-07-07: a failed rewind still returns a SUCCESS envelope, so this
+    /// event is the only trustworthy outcome signal.
+    pub strategy: Option<String>,
+    /// `payload.reason` (`rewind.triggered`) — e.g. "target_in_active_chain",
+    /// "target_checkpoint_not_found".
+    pub reason: Option<String>,
 }
 
 /// Decode a single inbound protocol line. Unparseable lines -> None (skip).
@@ -3733,6 +3988,10 @@ pub fn decode_app_message(line: &str) -> Option<AppServerMessage> {
                     .and_then(serde_json::Value::as_bool),
                 duration_ms: payload.get("duration").and_then(serde_json::Value::as_u64),
                 file_count: payload.get("fileCount").and_then(serde_json::Value::as_u64),
+                checkpoint_id: str_field("checkpointId"),
+                target_message_id: str_field("targetMessageId").or_else(|| str_field("messageId")),
+                strategy: str_field("strategy"),
+                reason: str_field("reason"),
             }))
         }
         Some("state.updated") => Some(AppServerMessage::StateUpdated(

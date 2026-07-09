@@ -6,6 +6,32 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ## [Unreleased]
 
+### 新增(openspec 变更 session-rewind,协议形状 2026-07-07 对真内核 0.15.0 实弹钉死)
+
+- **/rewind 检查点回滚**(app-server 路径):`checkpoint.created` 事件
+  (每次被门禁放行的工具写盘一条,checkpointId 现随事件解码保留)按会话
+  累积为回滚目标;`/rewind` 浮层列出目标(latestCheckpoint + 检查点
+  新→旧,检查点=**该次写盘前**的前像),Enter 发
+  `session/previewFileRewind` 预览将还原/删除的文件
+  (safeFiles/unsafeFiles/canApply),←/→ 选 scope
+  (workspace/conversation/both,默认 workspace),Enter 应用。
+- **安全应用路径**:文件回滚走 `session/applyFileRewind`(实弹钉死:
+  尊重 canApply,拒绝覆盖被会话外修改的文件,`applied:false` + 原因
+  返回);**绝不**对文件 scope 使用裸 `session/rewind`——实弹证实它会
+  无视 canApply 强制覆盖外部改动。对话回滚把目标翻译为
+  `{kind:"message", messageId:<检查点的 targetMessageId>}` 再发
+  `session/rewind scope:"conversation"`——实弹证实 checkpoint 类目标
+  会被内核**无视 scope 强制转为文件回滚**(甚至删文件),仅 message
+  目标尊重 conversation scope。scope both = applyFileRewind 成功后
+  再链 conversation 段。
+- **假成功识别**:对话回滚以 `rewind.triggered` 事件的
+  `strategy`(active_chain/unavailable)判成败——实弹证实内核对
+  "检查点不存在"仍返回**成功信封**("Checkpoint … was not found.");
+  信封一律不作成功依据。失败按既有控制命令纪律:报告、不 kill 会话。
+- 会话切换(/new、/resume、降级、握手重建)清空检查点累积;回合进行中
+  /rewind 被拒绝(先等回合结束);非 app-server 路径 /rewind 仅提示。
+  `ZCODE_TUI_LOG` 记录 rewind 全部状态转换(捕获/预览/应用/失败)。
+
 ### 修复(openspec 变更 streaming-attachments-and-comfort,协议形状全部对真内核 0.15.0 实弹钉死)
 
 - **流式路径 @文件 附件失效**(真 bug):经典路径把 `@路径` 翻译成

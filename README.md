@@ -94,6 +94,11 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   级别、`/compact` 原地压缩上下文保住会话、`/mode`/Shift+Tab 即刻切换活跃
   会话的权限模式；**流式回合进行中直接输入文本＝转向（steer）当前回合**，
   不用取消重来。
+- **检查点回滚（app-server 路径）**：内核每次放行的工具写盘都会产生检查点；
+  `/rewind` 浮层列出本会话检查点（含 latestCheckpoint），Enter 先预览将
+  还原/删除的文件，选 scope 后应用。文件回滚走 `applyFileRewind`——被会话外
+  修改过的文件**拒绝覆盖**（绝不强刷你的手工改动）；对话回滚以
+  `rewind.triggered` 事件判成败（内核对失败也返回成功信封，不上当）。
 - **上下文水位**：prompt 通道用 `--json` 总结对象作为权威结果（response 走
   markdown 渲染，解析失败自动降级纯文本），状态栏常驻 `ctx 9k/200k (4%)`
   用量显示，≥80% 提示 `/compact` 或 `/new`。
@@ -295,6 +300,10 @@ text                         通过 zcode --prompt 发送 prompt
 /compact                     原地压缩会话上下文、保住会话（app-server 会话
                              直连内核 compact；否则转发 CLI）
 /usage [7d|30d]              显示当前会话与周期 token 用量（app-server）
+/rewind                      回滚到检查点：浮层选目标 → 预览将还原的文件 →
+                             选 scope（workspace/conversation/both）后应用；
+                             文件回滚走 applyFileRewind（外部改动过的文件
+                             拒绝覆盖）（app-server）
 /update                      从官方 feed 更新 ZCode 内核（下载 + sha512 校验）
 /copy                        复制最后一条助手回复到系统剪贴板（OSC52；
                              tmux 需 set -g set-clipboard on）

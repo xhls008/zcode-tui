@@ -30,28 +30,30 @@ use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::StatefulImage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zcode_tui::{
-    app_close_params, app_compact_params, app_create_params, app_resume_params,
-    app_send_params_with_attachments, app_server_enabled, app_session_id_from_result,
-    app_set_mode_params, app_set_model_params, app_set_thought_params, app_state_controls,
-    app_state_is_turn_end, app_state_turn_error, app_state_watermark, app_steer_params,
-    app_stop_params, app_subscribe_params, app_usage_params, build_runtime_model,
-    build_send_attachments, classify_input, command_palette_rows, context_watermark_warn,
-    db_baseline, db_schema_supported, detect_auth_status, diff_line_role, encode_interaction_reply,
-    env_is_headless, extract_file_mentions, file_suggestions, fold_preview,
-    format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
-    is_newer_version, kernel_config_path_from, kernel_db_path_from, latest_assistant_text,
-    latest_reasoning, latest_session_for_dir, leader_action_for_key, list_recent_sessions,
-    live_tool_chips, load_mcp_config, load_ui_config, login_command, markdown_lines,
-    mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence, parse_cli_args,
-    parse_interaction_request, parse_kernel_slash_commands, parse_prompt_summary,
-    parse_resume_messages, parse_session_list, parse_steer_result, parse_stream_event, parse_todos,
-    parse_update_feed, parse_update_feed_url, prompt_command_for, recent_input_history,
-    relative_age, run_command, shorten_home, skyline_braille, skyline_graphics_wanted,
-    skyline_lines, skyline_mode, slash_suggestions_merged, spawn_streaming_command,
-    tool_input_summary, usage_stats_params, user_mcp_config_path, with_mcp_servers, wrap_display,
-    AppConfig, AppServerConn, AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus,
-    DbBaseline, DebugLog, DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand,
-    LeaderAction, LiveToolChip, MdLineKind, SessionControls, SessionRow, SkylineMode, SpanRole,
+    app_close_params, app_compact_params, app_create_params, app_file_rewind_params,
+    app_resume_params, app_rewind_params, app_send_params_with_attachments, app_server_enabled,
+    app_session_id_from_result, app_set_mode_params, app_set_model_params, app_set_thought_params,
+    app_state_controls, app_state_is_turn_end, app_state_turn_error, app_state_watermark,
+    app_steer_params, app_stop_params, app_subscribe_params, app_usage_params, build_runtime_model,
+    build_send_attachments, checkpoint_short_id, classify_input, command_palette_rows,
+    context_watermark_warn, conversation_target, db_baseline, db_schema_supported,
+    detect_auth_status, diff_line_role, encode_interaction_reply, env_is_headless,
+    extract_file_mentions, file_suggestions, fold_preview, format_context_watermark,
+    git_diff_command, handle_local_command, help_text, history_search, is_newer_version,
+    kernel_config_path_from, kernel_db_path_from, latest_assistant_text, latest_reasoning,
+    latest_session_for_dir, leader_action_for_key, list_recent_sessions, live_tool_chips,
+    load_mcp_config, load_ui_config, login_command, markdown_lines, mcp_config_path,
+    mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence, parse_apply_file_rewind,
+    parse_cli_args, parse_interaction_request, parse_kernel_slash_commands, parse_prompt_summary,
+    parse_resume_messages, parse_rewind_preview, parse_session_list, parse_steer_result,
+    parse_stream_event, parse_todos, parse_update_feed, parse_update_feed_url, prompt_command_for,
+    recent_input_history, relative_age, rewind_failure, run_command, shorten_home, skyline_braille,
+    skyline_graphics_wanted, skyline_lines, skyline_mode, slash_suggestions_merged,
+    spawn_streaming_command, tool_input_summary, usage_stats_params, user_mcp_config_path,
+    with_mcp_servers, wrap_display, AppConfig, AppServerConn, AppServerEvent, AppServerMessage,
+    AppServerTurn, AppServerUnavailable, AuthStatus, CheckpointEntry, DbBaseline, DebugLog,
+    DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction, LiveToolChip,
+    MdLineKind, RewindPreview, RewindTarget, SessionControls, SessionRow, SkylineMode, SpanRole,
     SteerOutcome, StreamEvent, StreamingJob, TodoItem, ToolChipStatus, TurnDelta, UiConfig,
     UpdateFeed, SKYLINE_LOGO_W,
 };
@@ -692,6 +694,16 @@ struct UiState {
     /// In-flight fire-and-forget control requests (setMode/setModel/…), by
     /// request id, so an error response can name the command it failed.
     control_requests: std::collections::HashMap<u64, ControlReq>,
+    /// `checkpoint.created` events captured this session (in capture order) —
+    /// the /rewind targets. Cleared whenever the session changes.
+    checkpoints: Vec<CheckpointEntry>,
+    /// /rewind overlay (target picker → preview/scope → apply).
+    rewind: Option<RewindOverlay>,
+    /// Latest `rewind.triggered` event (strategy, reason): the ONLY reliable
+    /// rewind outcome signal — a failed rewind still gets a success envelope.
+    /// The event precedes the response on the same stream; taken when the
+    /// session/rewind response lands.
+    rewind_trigger: Option<(String, String)>,
     /// ZCODE_TUI_LOG state-transition log (protocol traffic is logged by the
     /// connection itself); None = disabled, zero overhead.
     debug_log: Option<DebugLog>,
@@ -716,7 +728,41 @@ enum ControlReq {
     /// A /usage sub-request; the tag ("session" | "stats") picks the
     /// formatter when the result arrives.
     Usage(&'static str),
+    /// /rewind: previewFileRewind in flight; the result feeds the preview
+    /// stage of the overlay (dropped if the overlay was closed meanwhile).
+    RewindPreview(RewindTarget),
+    /// /rewind: applyFileRewind in flight (file scope — the safe apply that
+    /// refuses externally-modified files). `then_conversation` carries the
+    /// pre-translated MESSAGE-kind target of the conversation leg chained
+    /// after a successful file restore (scope "both").
+    RewindApplyFiles {
+        target: RewindTarget,
+        then_conversation: Option<RewindTarget>,
+    },
+    /// /rewind: conversation-scope session/rewind in flight; judged by the
+    /// preceding rewind.triggered event, never the envelope.
+    RewindConversation(RewindTarget),
 }
+
+/// The /rewind overlay. Stage 1 (`preview: None`): pick a target from the
+/// session's captured checkpoints (+ latestCheckpoint). Stage 2: the
+/// previewFileRewind result arrived — show it, pick a scope, Enter applies.
+struct RewindOverlay {
+    /// (label, target), latestCheckpoint first, then checkpoints new→old.
+    targets: Vec<(String, RewindTarget)>,
+    selected: usize,
+    /// Set once the preview response lands (stage 2).
+    preview: Option<(RewindTarget, RewindPreview)>,
+    /// Index into REWIND_SCOPES (stage 2).
+    scope: usize,
+    /// A preview/apply request is in flight — Enter is debounced.
+    busy: bool,
+}
+
+/// Scope choices of the preview stage. Default workspace (files only): the
+/// primary use case is "the model broke my file". conversation/both rewrite
+/// the kernel conversation and are explicit choices.
+const REWIND_SCOPES: [&str; 3] = ["workspace", "conversation", "both"];
 
 impl UiState {
     fn new(config: AppConfig, zcode_bin: String) -> Self {
@@ -779,6 +825,9 @@ impl UiState {
             kernel_commands: Vec::new(),
             todos: Vec::new(),
             control_requests: std::collections::HashMap::new(),
+            checkpoints: Vec::new(),
+            rewind: None,
+            rewind_trigger: None,
             debug_log: DebugLog::from_env(),
             notify_enabled,
         }
@@ -1061,6 +1110,9 @@ impl UiState {
         }
         if self.model_picker.is_some() {
             return self.handle_model_picker_key(key);
+        }
+        if self.rewind.is_some() {
+            return self.handle_rewind_key(key);
         }
         if self.session_picker.is_some() {
             return self.handle_session_picker_key(key);
@@ -1362,6 +1414,10 @@ impl UiState {
                 self.show_usage(command.get(1).map(String::as_str));
                 return None;
             }
+            Some("rewind") => {
+                self.open_rewind_picker();
+                return None;
+            }
             Some("update") => {
                 self.update_kernel();
                 return None;
@@ -1466,6 +1522,7 @@ impl UiState {
             self.app_conn = Some(AppServerConn::spawn(&self.zcode_bin)?);
             // A fresh connection has no session yet.
             self.app_session = None;
+            self.reset_rewind_state();
         }
         match self.app_session.clone() {
             // Session already open: send immediately (the fast path for every
@@ -1738,6 +1795,7 @@ impl UiState {
                     match conn.send("session/subscribe", app_subscribe_params(&session_id)) {
                         Ok(sub_id) => {
                             self.app_session = Some(session_id);
+                            self.reset_rewind_state();
                             if let Some(connect) = &mut self.app_connect {
                                 connect.phase = ConnectPhase::Subscribe(sub_id);
                             }
@@ -1824,6 +1882,7 @@ impl UiState {
         self.app_connect = None;
         self.app_draining = None;
         self.app_session = None;
+        self.reset_rewind_state();
         // Tear the connection down for good (process-group kill via Drop).
         self.app_conn = None;
         self.push_system(&format!(
@@ -2026,6 +2085,7 @@ fi"#
             self.app_connect = None;
             self.app_conn = None;
             self.app_session = None;
+            self.reset_rewind_state();
             self.status = "cancelled".to_string();
             return;
         }
@@ -2071,6 +2131,9 @@ fi"#
         while let Some(message) = self.app_conn.as_mut().and_then(AppServerConn::poll) {
             match message {
                 AppServerMessage::Event(event) => {
+                    // Retain checkpoint ids as /rewind targets (the turn
+                    // itself only counts them for the files-changed note).
+                    self.capture_rewind_event(&event);
                     let Some(turn) = &mut self.app_turn else {
                         return;
                     };
@@ -2286,6 +2349,7 @@ fi"#
         {
             self.app_draining = None;
             self.app_session = None; // recreate → guaranteed clean next prompt
+            self.reset_rewind_state();
         }
     }
 
@@ -2360,8 +2424,43 @@ fi"#
                 AppServerMessage::Response { id, result, .. } => {
                     self.on_control_ok(id, result.as_ref())
                 }
-                AppServerMessage::Event(_) | AppServerMessage::Other => {}
+                // Idle events matter to /rewind: the kernel runs a rewind as
+                // a synthetic turn (turn.started → rewind.triggered →
+                // turn.completed) outside any prompt of ours.
+                AppServerMessage::Event(event) => self.capture_rewind_event(&event),
+                AppServerMessage::Other => {}
             }
+        }
+    }
+
+    /// Session-level events the /rewind flow feeds on: `checkpoint.created`
+    /// (target accumulation) and `rewind.triggered` (the only reliable
+    /// rewind outcome — the envelope lies on failure).
+    fn capture_rewind_event(&mut self, event: &AppServerEvent) {
+        match event.kind.as_str() {
+            "checkpoint.created" => {
+                if let Some(id) = &event.checkpoint_id {
+                    self.log_debug(&format!(
+                        "rewind: checkpoint captured {} ({} file(s))",
+                        id,
+                        event.file_count.unwrap_or(0)
+                    ));
+                    self.checkpoints.push(CheckpointEntry {
+                        id: id.clone(),
+                        files: event.file_count.unwrap_or(0),
+                        message_id: event.target_message_id.clone(),
+                    });
+                }
+            }
+            "rewind.triggered" => {
+                let strategy = event.strategy.clone().unwrap_or_default();
+                let reason = event.reason.clone().unwrap_or_default();
+                self.log_debug(&format!(
+                    "rewind: triggered strategy={strategy} reason={reason}"
+                ));
+                self.rewind_trigger = Some((strategy, reason));
+            }
+            _ => {}
         }
     }
 
@@ -2451,8 +2550,18 @@ fi"#
             }
             Err(reason) => {
                 self.push_error(&format!("{method} failed: {reason}"));
-                if let ControlReq::Steer(content) = req {
-                    self.queued.push_back(content);
+                match req {
+                    ControlReq::Steer(content) => self.queued.push_back(content),
+                    // A rewind leg that never left must not wedge the overlay.
+                    ControlReq::RewindPreview(_) => {
+                        if let Some(overlay) = &mut self.rewind {
+                            overlay.busy = false;
+                        }
+                    }
+                    ControlReq::RewindApplyFiles { .. } | ControlReq::RewindConversation(_) => {
+                        self.close_rewind_overlay();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2473,6 +2582,29 @@ fi"#
             }
             Some(ControlReq::Usage(tag)) => {
                 self.push_error(&format!("usage {tag} failed: {message}"));
+                true
+            }
+            // A rewind leg erroring never harms the session — report, close
+            // the overlay so the user is not stuck on a dead preview.
+            Some(ControlReq::RewindPreview(target)) => {
+                self.push_error(&format!("rewind preview failed: {message}"));
+                self.log_debug(&format!(
+                    "rewind: preview error for {} ({message})",
+                    target.label()
+                ));
+                if let Some(overlay) = &mut self.rewind {
+                    overlay.busy = false;
+                }
+                true
+            }
+            Some(ControlReq::RewindApplyFiles { target, .. })
+            | Some(ControlReq::RewindConversation(target)) => {
+                self.push_error(&format!("rewind failed: {message}"));
+                self.log_debug(&format!(
+                    "rewind: apply error for {} ({message})",
+                    target.label()
+                ));
+                self.close_rewind_overlay();
                 true
             }
             None => false,
@@ -2503,6 +2635,14 @@ fi"#
                     self.push_system(&text);
                     self.status = "usage".to_string();
                 }
+            }
+            Some(ControlReq::RewindPreview(target)) => self.on_rewind_preview(target, result),
+            Some(ControlReq::RewindApplyFiles {
+                target,
+                then_conversation,
+            }) => self.on_apply_file_rewind(target, then_conversation, result),
+            Some(ControlReq::RewindConversation(target)) => {
+                self.on_conversation_rewind(target, result)
             }
             _ => {}
         }
@@ -2858,6 +2998,365 @@ fi"#
             app_steer_params(&session_id, content),
             ControlReq::Steer(content.to_string()),
         );
+    }
+
+    /// /rewind — pick a captured checkpoint (or latestCheckpoint), preview
+    /// the file restore, choose a scope, apply. App-server path only; idle
+    /// only (a rewind mid-turn would race the streaming turn's events).
+    fn open_rewind_picker(&mut self) {
+        if self.app_session.is_none() {
+            self.push_system(
+                "/rewind needs an active app-server session \
+                 (complete one streaming prompt first; ZCODE_TUI_APP_SERVER=0 disables it)",
+            );
+            return;
+        }
+        if self.app_turn.is_some() || self.app_connect.is_some() || self.app_draining.is_some() {
+            self.push_system("/rewind: wait for the running turn to finish (Esc cancels it)");
+            return;
+        }
+        if self.checkpoints.is_empty() {
+            self.push_system(
+                "no checkpoints in this session yet \
+                 (approved tool writes create them; nothing to rewind to)",
+            );
+            return;
+        }
+        let mut targets: Vec<(String, RewindTarget)> = vec![(
+            "latest checkpoint (undo the most recent write)".to_string(),
+            RewindTarget::LatestCheckpoint,
+        )];
+        for (index, entry) in self.checkpoints.iter().enumerate().rev() {
+            targets.push((
+                format!(
+                    "checkpoint {} · #{} · {} file(s) · restores the state BEFORE this write",
+                    checkpoint_short_id(&entry.id),
+                    index + 1,
+                    entry.files,
+                ),
+                RewindTarget::Checkpoint(entry.id.clone()),
+            ));
+        }
+        self.log_debug(&format!(
+            "rewind: picker opened ({} targets)",
+            targets.len()
+        ));
+        self.rewind = Some(RewindOverlay {
+            targets,
+            selected: 0,
+            preview: None,
+            scope: 0,
+            busy: false,
+        });
+        self.status = "rewind: pick a target".to_string();
+    }
+
+    fn handle_rewind_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
+        let previewing = self
+            .rewind
+            .as_ref()
+            .is_some_and(|overlay| overlay.preview.is_some());
+        match key.code {
+            KeyCode::Esc if previewing => {
+                // Back to the target list.
+                if let Some(overlay) = &mut self.rewind {
+                    overlay.preview = None;
+                    overlay.busy = false;
+                }
+                self.status = "rewind: pick a target".to_string();
+            }
+            KeyCode::Esc => {
+                self.rewind = None;
+                self.status = "rewind closed".to_string();
+            }
+            // Preview stage: ←/→ (and ↑/↓) cycle the scope.
+            KeyCode::Left | KeyCode::Up if previewing => {
+                if let Some(overlay) = &mut self.rewind {
+                    overlay.scope = (overlay.scope + REWIND_SCOPES.len() - 1) % REWIND_SCOPES.len();
+                }
+            }
+            KeyCode::Right | KeyCode::Down if previewing => {
+                if let Some(overlay) = &mut self.rewind {
+                    overlay.scope = (overlay.scope + 1) % REWIND_SCOPES.len();
+                }
+            }
+            KeyCode::Up => {
+                if let Some(overlay) = &mut self.rewind {
+                    overlay.selected = overlay.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(overlay) = &mut self.rewind {
+                    overlay.selected =
+                        (overlay.selected + 1).min(overlay.targets.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Enter if previewing => self.apply_rewind(),
+            KeyCode::Enter => self.request_rewind_preview(),
+            _ => {}
+        }
+        None
+    }
+
+    /// Stage 1 Enter: ask the kernel what the selected target would restore.
+    fn request_rewind_preview(&mut self) {
+        let Some(session_id) = self.app_session.clone() else {
+            return;
+        };
+        let Some(overlay) = &mut self.rewind else {
+            return;
+        };
+        if overlay.busy {
+            return; // a preview/apply is already in flight
+        }
+        let Some((_, target)) = overlay.targets.get(overlay.selected) else {
+            return;
+        };
+        let target = target.clone();
+        overlay.busy = true;
+        self.log_debug(&format!("rewind: preview requested {}", target.label()));
+        self.status = format!("rewind: previewing {}…", target.label());
+        self.send_control(
+            "session/previewFileRewind",
+            app_file_rewind_params(&session_id, &target),
+            ControlReq::RewindPreview(target),
+        );
+    }
+
+    /// Stage 2 Enter: apply with the chosen scope. File scopes go through
+    /// applyFileRewind (refuses unsafe files); the conversation scope uses
+    /// session/rewind with a MESSAGE-kind target — both pinned live:
+    /// session/rewind force-applies file restores over external
+    /// modifications, and it coerces checkpoint-kind targets to a workspace
+    /// rewind even under scope:"conversation" (2026-07-09: the file got
+    /// deleted). Only `{kind:"message"}` targets honor the conversation scope.
+    fn apply_rewind(&mut self) {
+        let Some(session_id) = self.app_session.clone() else {
+            return;
+        };
+        let (target, preview, scope) = {
+            let Some(overlay) = &self.rewind else {
+                return;
+            };
+            if overlay.busy {
+                return;
+            }
+            let Some((target, preview)) = overlay.preview.clone() else {
+                return;
+            };
+            (target, preview, REWIND_SCOPES[overlay.scope])
+        };
+        // Local gate mirroring applyFileRewind's own refusal: file scopes
+        // cannot apply over externally-modified files (and we never force —
+        // that would need the unchecked session/rewind).
+        if scope != "conversation" && !preview.can_apply {
+            let files = preview
+                .unsafe_files
+                .iter()
+                .map(|f| format!("{} ({})", f.path, f.note))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.push_error(&format!(
+                "rewind blocked: unsafe file(s) changed outside the session: {files} — \
+                 resolve them or use the conversation scope"
+            ));
+            self.log_debug("rewind: apply blocked (canApply=false)");
+            return;
+        }
+        // Conversation legs need the checkpoint's targetMessageId; without it
+        // the only wire form left would be the checkpoint target, which the
+        // kernel turns into a forced file rewind — refuse instead.
+        let conversation = if scope == "conversation" || scope == "both" {
+            match conversation_target(&target, &self.checkpoints) {
+                Some(message_target) => Some(message_target),
+                None => {
+                    self.push_error(
+                        "conversation rewind unavailable for this target \
+                         (no message id captured) — workspace scope still works",
+                    );
+                    self.log_debug("rewind: conversation leg refused (no message id)");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(overlay) = &mut self.rewind {
+            overlay.busy = true;
+        }
+        self.rewind_trigger = None;
+        self.log_debug(&format!("rewind: apply {} scope={scope}", target.label()));
+        self.status = format!("rewinding ({scope})…");
+        match scope {
+            "conversation" => {
+                let wire = conversation.expect("checked above");
+                self.send_control(
+                    "session/rewind",
+                    app_rewind_params(&session_id, &wire, "conversation"),
+                    ControlReq::RewindConversation(target),
+                );
+            }
+            both_or_workspace => self.send_control(
+                "session/applyFileRewind",
+                app_file_rewind_params(&session_id, &target),
+                ControlReq::RewindApplyFiles {
+                    target,
+                    then_conversation: if both_or_workspace == "both" {
+                        conversation
+                    } else {
+                        None
+                    },
+                },
+            ),
+        }
+    }
+
+    /// previewFileRewind result → stage 2. Dropped unless an overlay is open
+    /// AND awaiting (`busy`) — a stale response from a closed-and-reopened
+    /// picker must not surface a preview the user never asked for.
+    fn on_rewind_preview(&mut self, target: RewindTarget, result: Option<&serde_json::Value>) {
+        if !self.rewind.as_ref().is_some_and(|overlay| overlay.busy) {
+            return;
+        }
+        let preview = result.and_then(parse_rewind_preview);
+        let Some(preview) = preview else {
+            if let Some(overlay) = &mut self.rewind {
+                overlay.busy = false;
+            }
+            self.push_error("rewind preview: unrecognized result shape");
+            return;
+        };
+        self.log_debug(&format!(
+            "rewind: preview canApply={} safe={} unsafe={}",
+            preview.can_apply,
+            preview.safe.len(),
+            preview.unsafe_files.len()
+        ));
+        self.status = if preview.can_apply {
+            "rewind: Enter applies · ←/→ scope · Esc back".to_string()
+        } else {
+            "rewind: unsafe files — conversation scope only".to_string()
+        };
+        if let Some(overlay) = &mut self.rewind {
+            overlay.busy = false;
+            overlay.scope = 0;
+            overlay.preview = Some((target, preview));
+        }
+    }
+
+    /// applyFileRewind result: `applied` is authoritative (a refusal is a
+    /// success envelope with applied:false + the unsafe files).
+    fn on_apply_file_rewind(
+        &mut self,
+        target: RewindTarget,
+        then_conversation: Option<RewindTarget>,
+        result: Option<&serde_json::Value>,
+    ) {
+        let outcome = result.map(parse_apply_file_rewind);
+        let Some(outcome) = outcome else {
+            self.push_error("rewind: applyFileRewind returned no result");
+            self.close_rewind_overlay();
+            return;
+        };
+        if !outcome.applied {
+            let files = outcome
+                .unsafe_files
+                .iter()
+                .map(|f| format!("{} ({})", f.path, f.note))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let detail = if files.is_empty() {
+                outcome.response.clone()
+            } else {
+                format!("{} — {files}", outcome.response)
+            };
+            self.push_error(&format!("rewind not applied: {detail}"));
+            self.log_debug("rewind: applyFileRewind refused");
+            self.close_rewind_overlay();
+            return;
+        }
+        self.push_system(&format!("⟲ {}", outcome.response));
+        self.log_debug(&format!("rewind: files restored ({})", target.label()));
+        self.status = "rewound (files)".to_string();
+        if let Some(wire) = then_conversation {
+            // scope "both": chain the conversation rewind (message-kind
+            // target — checkpoint kinds would force ANOTHER file rewind)
+            // now that the file restore landed safely.
+            if let Some(session_id) = self.app_session.clone() {
+                self.rewind_trigger = None;
+                self.send_control(
+                    "session/rewind",
+                    app_rewind_params(&session_id, &wire, "conversation"),
+                    ControlReq::RewindConversation(target),
+                );
+                return; // overlay closes when the conversation leg reports
+            }
+        }
+        self.close_rewind_overlay();
+    }
+
+    /// session/rewind (conversation scope) result: judged by the preceding
+    /// rewind.triggered event — the envelope is a success even when the
+    /// kernel did nothing ("Checkpoint … was not found.").
+    fn on_conversation_rewind(&mut self, target: RewindTarget, result: Option<&serde_json::Value>) {
+        let response = result
+            .and_then(|r| r.get("response"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let trigger = self.rewind_trigger.take();
+        let (strategy, reason) = match &trigger {
+            Some((strategy, reason)) => (Some(strategy.as_str()), Some(reason.as_str())),
+            None => (None, None),
+        };
+        match rewind_failure(strategy, reason, &response) {
+            Some(failure) => {
+                self.push_error(&format!("rewind failed: {failure}"));
+                self.log_debug(&format!("rewind: conversation leg failed ({failure})"));
+            }
+            None => {
+                self.push_system(&format!("⟲ {response}"));
+                self.push_system(
+                    "conversation rewound — messages after the target are gone kernel-side \
+                     (transcript above is history, not context)",
+                );
+                self.prune_checkpoints(&target);
+                self.log_debug(&format!(
+                    "rewind: conversation rewound ({})",
+                    target.label()
+                ));
+                self.status = "rewound (conversation)".to_string();
+            }
+        }
+        self.close_rewind_overlay();
+    }
+
+    /// After a conversation rewind the checkpoints at/after the target no
+    /// longer exist on the kernel's active chain — drop them locally too.
+    fn prune_checkpoints(&mut self, target: &RewindTarget) {
+        match target {
+            RewindTarget::Checkpoint(id) => {
+                if let Some(pos) = self.checkpoints.iter().position(|c| &c.id == id) {
+                    self.checkpoints.truncate(pos);
+                }
+            }
+            RewindTarget::LatestCheckpoint => {
+                self.checkpoints.pop();
+            }
+            RewindTarget::Message(_) | RewindTarget::Turn(_) => self.checkpoints.clear(),
+        }
+    }
+
+    fn close_rewind_overlay(&mut self) {
+        self.rewind = None;
+    }
+
+    /// The session is gone (new/resume/downgrade/cancel): its checkpoints are
+    /// not valid targets anymore, and any open /rewind flow is moot.
+    fn reset_rewind_state(&mut self) {
+        self.checkpoints.clear();
+        self.rewind = None;
+        self.rewind_trigger = None;
     }
 
     fn handle_session_picker_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
@@ -3238,6 +3737,7 @@ fi"#
                 // Drop any live streaming session: the next prompt must
                 // handshake anew via session/resume, not reuse the old one.
                 self.app_session = None;
+                self.reset_rewind_state();
                 self.push_system(&format!("resuming {id} on the next prompt"));
             }
             Some(other) => {
@@ -3262,6 +3762,7 @@ fi"#
         // connection itself is reused.
         self.close_app_session();
         self.app_session = None;
+        self.reset_rewind_state();
         self.clear_log();
         self.push_system("fresh session: context resets on the next prompt");
         self.status = "new session".to_string();
@@ -3547,6 +4048,9 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     }
     if state.model_picker.is_some() {
         render_model_picker(frame, centered_rect(64, 46, root), state);
+    }
+    if state.rewind.is_some() {
+        render_rewind(frame, centered_rect(78, 58, root), state);
     }
     if state.history_query.is_some() {
         render_history_search(frame, centered_rect(72, 50, root), state);
@@ -4526,6 +5030,121 @@ fn render_model_picker(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
         area,
         &mut ListState::default().with_selected(Some(index)),
     );
+}
+
+/// The /rewind overlay: stage 1 lists the targets, stage 2 shows the
+/// previewFileRewind result with the scope selector.
+fn render_rewind(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let t = &state.theme;
+    let Some(overlay) = &state.rewind else {
+        return;
+    };
+    frame.render_widget(Clear, area);
+    match &overlay.preview {
+        // Stage 1: target picker.
+        None => {
+            let items = overlay
+                .targets
+                .iter()
+                .map(|(label, _)| ListItem::new(Line::from(Span::styled(label.clone(), t.text()))))
+                .collect::<Vec<_>>();
+            let title = if overlay.busy {
+                " rewind · previewing… ".to_string()
+            } else {
+                " rewind · Enter previews · Esc closes ".to_string()
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(t.frame())
+                .title(Line::from(Span::styled(title, t.dim())));
+            frame.render_stateful_widget(
+                List::new(items)
+                    .block(block)
+                    .highlight_style(t.selection())
+                    .highlight_symbol("› "),
+                area,
+                &mut ListState::default().with_selected(Some(overlay.selected)),
+            );
+        }
+        // Stage 2: preview + scope.
+        Some((target, preview)) => {
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            lines.push(Line::from(Span::styled(
+                format!("target: {}", target.label()),
+                t.text(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "restores the workspace state captured BEFORE that write ran",
+                t.dim(),
+            )));
+            lines.push(Line::default());
+            if preview.safe.is_empty() && preview.unsafe_files.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "no file changes to restore",
+                    t.dim(),
+                )));
+            }
+            for file in &preview.safe {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {} ", file.note), t.good()),
+                    Span::styled(file.path.clone(), t.text()),
+                    Span::styled(format!("  [{}]", file.tools), t.dim()),
+                ]));
+            }
+            for file in &preview.unsafe_files {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  ! {} ", file.note), t.bad()),
+                    Span::styled(file.path.clone(), t.text()),
+                    Span::styled(format!("  [{}]", file.tools), t.dim()),
+                ]));
+            }
+            if preview.ignored > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("  {} ignored file(s)", preview.ignored),
+                    t.dim(),
+                )));
+            }
+            lines.push(Line::default());
+            if !preview.can_apply {
+                lines.push(Line::from(Span::styled(
+                    "files changed outside the session — file restore is blocked \
+                     (conversation scope still works)",
+                    t.bad(),
+                )));
+            }
+            let mut scope_spans: Vec<Span<'static>> =
+                vec![Span::styled("scope: ".to_string(), t.text())];
+            for (index, scope) in REWIND_SCOPES.iter().enumerate() {
+                if index == overlay.scope {
+                    scope_spans.push(Span::styled(format!("‹{scope}› "), t.selection()));
+                } else {
+                    scope_spans.push(Span::styled(format!(" {scope}  "), t.dim()));
+                }
+            }
+            lines.push(Line::from(scope_spans));
+            lines.push(Line::from(Span::styled(
+                "workspace restores files · conversation rewinds the kernel chat · both does each",
+                t.dim(),
+            )));
+            let title = if overlay.busy {
+                " rewind preview · applying… ".to_string()
+            } else {
+                " rewind preview · Enter applies · ←/→ scope · Esc back ".to_string()
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(t.frame())
+                .title(Line::from(Span::styled(title, t.dim())));
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(block)
+                    .wrap(Wrap { trim: false }),
+                area,
+            );
+        }
+    }
 }
 
 fn render_session_picker(frame: &mut Frame<'_>, area: Rect, state: &UiState) {

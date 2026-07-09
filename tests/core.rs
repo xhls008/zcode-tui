@@ -1463,7 +1463,7 @@ fn session_lifecycle_params_and_list_parsing() {
     // runtime (resume alone leaves the session RUNTIME_MODEL_UNAVAILABLE).
     let config = r#"{
         "provider": {"bigmodel": {"kind": "anthropic", "name": "Bigmodel Coding Plan",
-            "options": {"baseURL": "https://open.bigmodel.cn/api/anthropic", "apiKey": "sk-test"},
+            "options": {"baseURL": "https://open.bigmodel.cn/api/anthropic", "apiKey": "dummy-api-key-for-test"},
             "models": {"glm-5.1": {"name": "GLM-5.1"}, "glm-4.7": {"name": "GLM-4.7"}}}},
         "model": {"main": "bigmodel/glm-5.1", "lite": "bigmodel/glm-4.7"}
     }"#;
@@ -1475,7 +1475,7 @@ fn session_lifecycle_params_and_list_parsing() {
     assert_eq!(provider["kind"], "anthropic");
     // apiKey is the kernel's credential union: inline carries the value.
     assert_eq!(provider["apiKey"]["source"], "inline");
-    assert_eq!(provider["apiKey"]["value"], "sk-test");
+    assert_eq!(provider["apiKey"]["value"], "dummy-api-key-for-test");
     assert_eq!(
         provider["baseURL"],
         "https://open.bigmodel.cn/api/anthropic"
@@ -2170,4 +2170,240 @@ fn copy_leader_key_and_local_command_routed() {
     );
     let action = classify_input("/copy").unwrap();
     assert_eq!(action, InputAction::Local(vec!["copy".to_string()]));
+}
+
+// ---- session-rewind (payload shapes pinned live 2026-07-07, kernel 0.15.0) ----
+
+#[test]
+fn checkpoint_event_surfaces_id_for_rewind_targets() {
+    use zcode_tui::{checkpoint_short_id, decode_app_message, AppServerMessage};
+    // Exact spike capture (spike_a.py): checkpoint.created payload keys.
+    let line = r#"{"method":"session/event","params":{"deliveryKind":"desktop-continuous",
+        "eventId":"bc388f32","payload":{"checkpointId":"checkpoint_90c0d5df-3e2f-4c13-b826-4842d2bd1da7",
+        "messageId":"msg_a","targetMessageId":"msg_a","toolMessageId":"msg_b","scope":"workspace",
+        "snapshotRef":"zcode-artifact://sess_x/tool-result-1","diffRef":"zcode-artifact://sess_x/tool-result-1",
+        "fileCount":1},"seq":18,"sessionId":"sess_x","type":"checkpoint.created"}}"#
+        .replace('\n', " ");
+    let Some(AppServerMessage::Event(event)) = decode_app_message(&line) else {
+        panic!("checkpoint event not decoded");
+    };
+    assert_eq!(event.kind, "checkpoint.created");
+    assert_eq!(
+        event.checkpoint_id.as_deref(),
+        Some("checkpoint_90c0d5df-3e2f-4c13-b826-4842d2bd1da7")
+    );
+    assert_eq!(event.file_count, Some(1));
+    // targetMessageId feeds the conversation-scope leg's message target.
+    assert_eq!(event.target_message_id.as_deref(), Some("msg_a"));
+    assert_eq!(
+        checkpoint_short_id("checkpoint_90c0d5df-3e2f-4c13-b826-4842d2bd1da7"),
+        "90c0d5df"
+    );
+    // Missing checkpointId: still a countable event, just not a target.
+    let bare = r#"{"method":"session/event","params":{"type":"checkpoint.created",
+        "payload":{"fileCount":1}}}"#
+        .replace('\n', " ");
+    let Some(AppServerMessage::Event(event)) = decode_app_message(&bare) else {
+        panic!("bare checkpoint event not decoded");
+    };
+    assert_eq!(event.checkpoint_id, None);
+}
+
+#[test]
+fn rewind_triggered_event_surfaces_strategy_and_reason() {
+    use zcode_tui::{decode_app_message, AppServerMessage};
+    // Spike: the failed-rewind event (success envelope lies; this doesn't).
+    let line = r#"{"method":"session/event","params":{"payload":{"rewindId":"rewind_f03466de",
+        "scope":"workspace","strategy":"unavailable","targetCheckpointId":"checkpoint_does-not-exist",
+        "reason":"target_checkpoint_not_found"},"type":"rewind.triggered"}}"#
+        .replace('\n', " ");
+    let Some(AppServerMessage::Event(event)) = decode_app_message(&line) else {
+        panic!("rewind.triggered not decoded");
+    };
+    assert_eq!(event.kind, "rewind.triggered");
+    assert_eq!(event.strategy.as_deref(), Some("unavailable"));
+    assert_eq!(event.reason.as_deref(), Some("target_checkpoint_not_found"));
+}
+
+#[test]
+fn rewind_params_match_pinned_shapes() {
+    use zcode_tui::{app_file_rewind_params, app_rewind_params, RewindTarget};
+    // previewFileRewind/applyFileRewind: {sessionId, target} (ZodError names
+    // exactly those on empty params).
+    assert_eq!(
+        app_file_rewind_params("sess_1", &RewindTarget::LatestCheckpoint),
+        serde_json::json!({"sessionId":"sess_1","target":{"kind":"latestCheckpoint"}})
+    );
+    assert_eq!(
+        app_file_rewind_params("sess_1", &RewindTarget::Checkpoint("checkpoint_a".into())),
+        serde_json::json!({"sessionId":"sess_1",
+            "target":{"kind":"checkpoint","checkpointId":"checkpoint_a"}})
+    );
+    // session/rewind: {sessionId, target, scope}; the TUI only ever sends
+    // scope:"conversation" (file scopes go through applyFileRewind — pinned
+    // live: session/rewind force-applies over external modifications).
+    assert_eq!(
+        app_rewind_params("sess_1", &RewindTarget::Turn(0), "conversation"),
+        serde_json::json!({"sessionId":"sess_1",
+            "target":{"kind":"turn","turnIndex":0},"scope":"conversation"})
+    );
+    assert_eq!(RewindTarget::LatestCheckpoint.label(), "latest checkpoint");
+    assert_eq!(
+        RewindTarget::Checkpoint("checkpoint_90c0d5df-xyz".into()).label(),
+        "checkpoint 90c0d5df"
+    );
+}
+
+#[test]
+fn rewind_preview_parses_safe_and_unsafe_shapes() {
+    use zcode_tui::parse_rewind_preview;
+    // Exact spike result: clean preview.
+    let safe = serde_json::json!({
+        "canApply": true, "ignoredFiles": [],
+        "safeFiles": [{"action":"restore","operationCount":1,"path":"/ws/a.txt","toolNames":["Write"]}],
+        "unsafeFiles": [], "sessionId": "sess_x", "target": {"kind":"latestCheckpoint"}
+    });
+    let preview = parse_rewind_preview(&safe).expect("safe preview");
+    assert!(preview.can_apply);
+    assert_eq!(preview.safe.len(), 1);
+    assert_eq!(preview.safe[0].path, "/ws/a.txt");
+    assert_eq!(preview.safe[0].note, "restore");
+    assert_eq!(preview.safe[0].tools, "Write");
+    assert!(preview.unsafe_files.is_empty());
+
+    // Exact spike result after external tamper (currentHash can also be the
+    // string "missing" when the file was deleted).
+    let unsafe_result = serde_json::json!({
+        "canApply": false, "ignoredFiles": [], "safeFiles": [],
+        "unsafeFiles": [{"operationCount":1,"path":"/ws/a.txt","reason":"external_modified",
+            "toolNames":["Write"],"expectedHash":"27dd8e","currentHash":"missing"}],
+        "sessionId": "sess_x", "target": {"kind":"checkpoint","checkpointId":"checkpoint_a"}
+    });
+    let preview = parse_rewind_preview(&unsafe_result).expect("unsafe preview");
+    assert!(!preview.can_apply);
+    assert_eq!(preview.unsafe_files.len(), 1);
+    assert_eq!(preview.unsafe_files[0].note, "external_modified");
+
+    // Not a preview shape (e.g. an unrelated result) -> None.
+    assert!(parse_rewind_preview(&serde_json::json!({"response":"ok"})).is_none());
+}
+
+#[test]
+fn apply_file_rewind_refusal_and_success_parse() {
+    use zcode_tui::parse_apply_file_rewind;
+    // Exact spike result: refusal keeps applied:false + embedded preview.
+    let refused = serde_json::json!({
+        "applied": false,
+        "preview": {"canApply": false, "ignoredFiles": [], "safeFiles": [],
+            "unsafeFiles": [{"operationCount":1,"path":"/ws/a.txt","reason":"external_modified",
+                "toolNames":["Write"],"expectedHash":"27dd8e","currentHash":"23bd61"}],
+            "sessionId":"sess_x","target":{"kind":"latestCheckpoint"}},
+        "response": "File rewind was not applied because at least one file is unsafe."
+    });
+    let outcome = parse_apply_file_rewind(&refused);
+    assert!(!outcome.applied);
+    assert!(outcome.response.contains("not applied"));
+    assert_eq!(outcome.unsafe_files.len(), 1);
+    assert_eq!(outcome.unsafe_files[0].path, "/ws/a.txt");
+
+    let applied = serde_json::json!({
+        "applied": true,
+        "preview": {"canApply": true, "ignoredFiles": [], "safeFiles": [], "unsafeFiles": []},
+        "response": "Restored 1 file."
+    });
+    assert!(parse_apply_file_rewind(&applied).applied);
+    // Missing `applied` (unknown shape) must NOT read as success.
+    assert!(!parse_apply_file_rewind(&serde_json::json!({"response":"?"})).applied);
+}
+
+#[test]
+fn rewind_outcome_judged_by_trigger_event_not_envelope() {
+    use zcode_tui::rewind_failure;
+    // Real rewind: strategy active_chain -> success.
+    assert_eq!(
+        rewind_failure(
+            Some("active_chain"),
+            Some("target_in_active_chain"),
+            "Rewound…"
+        ),
+        None
+    );
+    // Pinned live: nonexistent checkpoint returns a SUCCESS envelope whose
+    // response reads "…was not found." — only the event tells the truth.
+    let failure = rewind_failure(
+        Some("unavailable"),
+        Some("target_checkpoint_not_found"),
+        "Checkpoint checkpoint_does-not-exist was not found.",
+    )
+    .expect("unavailable is a failure");
+    assert!(failure.contains("was not found"));
+    // unavailable with no response text falls back to the reason.
+    let bare = rewind_failure(Some("unavailable"), Some("target_checkpoint_not_found"), "")
+        .expect("failure");
+    assert!(bare.contains("target_checkpoint_not_found"));
+    // No rewind.triggered observed at all: never claim success.
+    assert!(rewind_failure(None, None, "whatever").is_some());
+}
+
+#[test]
+fn rewind_is_a_local_command() {
+    let action = classify_input("/rewind").unwrap();
+    assert_eq!(action, InputAction::Local(vec!["rewind".to_string()]));
+}
+
+#[test]
+fn conversation_scope_targets_translate_to_message_kind() {
+    use zcode_tui::{conversation_target, CheckpointEntry, RewindTarget};
+    // Pinned live 2026-07-09: session/rewind COERCES checkpoint-kind targets
+    // to a forced workspace (file) rewind even under scope:"conversation"
+    // (rewind.triggered came back scope:"workspace" and the file was
+    // deleted). Only {kind:"message"} targets honor the conversation scope,
+    // so conversation legs must translate via the checkpoint's
+    // targetMessageId.
+    let checkpoints = vec![
+        CheckpointEntry {
+            id: "checkpoint_a".into(),
+            files: 1,
+            message_id: Some("msg_a".into()),
+        },
+        CheckpointEntry {
+            id: "checkpoint_b".into(),
+            files: 2,
+            message_id: Some("msg_b".into()),
+        },
+    ];
+    assert_eq!(
+        conversation_target(
+            &RewindTarget::Checkpoint("checkpoint_a".into()),
+            &checkpoints
+        ),
+        Some(RewindTarget::Message("msg_a".into()))
+    );
+    // latestCheckpoint -> the newest captured entry's message.
+    assert_eq!(
+        conversation_target(&RewindTarget::LatestCheckpoint, &checkpoints),
+        Some(RewindTarget::Message("msg_b".into()))
+    );
+    assert_eq!(
+        RewindTarget::Message("msg_a".into()).to_json(),
+        serde_json::json!({"kind":"message","messageId":"msg_a"})
+    );
+    // Unknown checkpoint or missing message id -> None (the caller refuses
+    // the conversation leg rather than sending a coercible target).
+    assert_eq!(
+        conversation_target(
+            &RewindTarget::Checkpoint("checkpoint_x".into()),
+            &checkpoints
+        ),
+        None
+    );
+    let no_msg = vec![CheckpointEntry {
+        id: "checkpoint_a".into(),
+        files: 1,
+        message_id: None,
+    }];
+    assert_eq!(
+        conversation_target(&RewindTarget::LatestCheckpoint, &no_msg),
+        None
+    );
 }
