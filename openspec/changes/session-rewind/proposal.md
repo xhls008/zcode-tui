@@ -16,16 +16,18 @@ app-server 路径已打通流式、权限确认与会话控制,但内核的检�
   snapshotRef / diffRef / fileCount,实测),按会话累积为可回滚目标列表。
 - **/rewind 命令 + 目标选择浮层**:候选 = 本会话捕获的检查点(新→旧)+
   `latestCheckpoint`;↑↓ 选择,Enter 先预览(`session/previewFileRewind`
-  结果:canApply / safeFiles / unsafeFiles),确认后应用(`session/rewind`),
-  Esc 逐级退出;应用前可选 scope(conversation / workspace / both,
-  默认 workspace)。
-- **结果回执**:显示 rewind result 的 `response` 一行文案;
-  `state.updated reason=="session_rewound"` 与 `rewind.triggered` 事件作为
-  权威回执。实测内核对"检查点不存在"返回**成功信封 + 失败文案**
+  结果:canApply / safeFiles / unsafeFiles),再选 scope
+  (workspace / conversation / both,默认 workspace)确认应用,
+  Esc 逐级退出。
+- **安全应用路径**:文件回滚走 `session/applyFileRewind`(尊重
+  canApply,拒绝覆盖被会话外修改的文件);对话回滚走
+  `session/rewind scope:"conversation"`;both = 文件段成功后再链对话段。
+  实测裸 `session/rewind` 会**无视 canApply 强制覆盖**外部修改,因此
+  文件 scope 绝不使用它,也不提供强制覆盖路径。
+- **结果回执**:显示应用回执的 `response` 一行文案;成功判定基于
+  `rewind.triggered` 事件的 `strategy`(applyFileRewind 则以 `applied`
+  布尔为权威)。实测内核对"检查点不存在"返回**成功信封 + 失败文案**
   (`rewind.triggered` payload `strategy:"unavailable"`),TUI 按失败呈现。
-- **不安全文件防呆**:预览 `canApply:false`(如 `external_modified`)时
-  默认不放行——实测 `session/rewind` 会**强制覆盖**外部修改,确认界面
-  必须显式警示后才允许继续。
 - 全部仅 app-server 流式路径;`--prompt` 路径行为不变。任何失败遵循既有
   控制命令纪律:报告错误、不 kill 会话、不影响后续 prompt。
 

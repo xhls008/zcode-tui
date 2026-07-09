@@ -34,6 +34,11 @@ spike_b.py 三发实弹)已钉死:
 - **applyFileRewind 结果形状**(实抓):`{"applied":false,"preview":
   {…同 previewFileRewind 结果…},"response":"File rewind was not applied
   because at least one file is unsafe."}`——尊重安全检查的"应用"变体。
+- **applyFileRewind 应用成功的伴随事件**(2026-07-09 实现期实弹补钉):
+  同样发 `rewind.triggered`,payload `strategy:"active_chain"`、
+  `reason:"file_summary_rewind"`;随后的状态推送 reason 为
+  **`session_file_rewind_applied`**(与 session/rewind 的
+  `session_rewound` 不同,二者都走既有控制面缓存合并即可)。
 - **rewind 的事件时序**(workspace 与 conversation 一致):
   `turn.started`(payload.input 形如 "/rewind checkpoint_…" /
   "/rewind latest" / "/rewind conversation msg_…")→ `rewind.triggered`
@@ -62,6 +67,17 @@ spike_b.py 三发实弹)已钉死:
   `{strategy:"unavailable", reason:"target_checkpoint_not_found"}`
   (无 targetMessageId),且 `state.updated reason:"session_rewound"`
   照发——不能以信封或 state 推送判成功。
+- **scope 对 checkpoint 目标不生效(2026-07-09 实现期实弹,最重要的
+  补钉)**:`session/rewind {target:{kind:"latestCheckpoint"},
+  scope:"conversation"}` 实测被内核**强制转为 workspace 文件回滚**——
+  `rewind.triggered` payload 回报 `"scope":"workspace"` +
+  restoredSnapshotRef,response 为 "Rewound workspace to checkpoint …",
+  且**删除了被外部篡改的文件**(检查点前像无该文件)。同一场景换
+  `target:{kind:"message", messageId:<checkpoint.targetMessageId>}` 则
+  scope:"conversation" 被尊重(payload 回报 `"scope":"conversation"`、
+  无 restoredSnapshotRef),文件分毫未动、session/messages 收缩到 1 条
+  synthetic notice。结论:**对话回滚必须用 message 目标**,checkpoint
+  目标只配文件回滚。
 - **错误形状**:`session/read {}` / `session/messages {}` /
   `session/applyFileRewind {}` 均为
   `{"code":-32602,"data":{"name":"ZodError","message":"[…path:[sessionId]
@@ -97,25 +113,36 @@ spike_b.py 三发实弹)已钉死:
 2. **判成功只看 rewind.triggered.strategy**:实测假成功(不存在的
    checkpointId)信封、response、session_rewound 推送全部照发,唯一可靠
    判别是 `rewind.triggered` payload `strategy=="unavailable"` +
-   `reason`。lib 纯函数 `classify_rewind_outcome(triggered_payload,
-   response_text)`,可单测。备选:匹配 response 文案——被否,文案不稳定
-   且无 schema。
+   `reason`。lib 纯函数 `rewind_failure(strategy, reason, response)`,
+   可单测;未观测到 rewind.triggered 一律不宣称成功。备选:匹配
+   response 文案——被否,文案不稳定且无 schema。
 3. **默认 scope=workspace,预览先行**:UX 主诉求是"模型写坏了,把文件
    还回去";conversation/both 改写对话,风险更高,放在显式 scope 选择步。
    Enter 一律先 previewFileRewind(实测 <0.3s,无模型参与),预览页确认
-   后才发 session/rewind——与"确认浮层"既有交互纪律一致。
-4. **unsafe 时用 session/rewind 强制、不用 applyFileRewind**:实测
-   session/rewind 无条件覆盖、applyFileRewind 尊重 canApply。取
-   "preview 把关 + 用户显式'强制应用'后走 session/rewind"一条路,
-   不引入第二条应用路径;applyFileRewind 仅作为实现期可选的
-   "安全应用"备选记录在案。备选:安全时 applyFileRewind、不安全时
-   session/rewind——被否,双路径回执形状不同(applied/preview/response
-   vs response/snapshot),状态机复杂化无收益。
-5. **conversation 回滚后的 transcript 处理**:以 result.snapshot.messages
-   为权威重建会话视图(过滤 `visibility:"model-only"` 的 synthetic 消息,
-   只标注一行"对话已回滚"),不自行按 turnIndex 裁剪本地缓存。备选:
-   本地裁剪——被否,内核裁剪点(targetMessageId 之前)与本地 turn 边界
-   可能有出入,snapshot 是现成权威。
+   后才应用——与"确认浮层"既有交互纪律一致。
+4. **文件回滚只走 applyFileRewind,不提供强制覆盖**(实现期收紧,替代
+   最初的"显式强制后走 session/rewind"设想):实测 session/rewind 无视
+   canApply 强制覆盖外部修改——把它用于文件 scope 等于给"误刷用户手工
+   改动"留后门。最终裁定:workspace/both 的文件段一律
+   `session/applyFileRewind`(`applied` 布尔为权威回执,拒绝时携带
+   unsafeFiles 原因);`session/rewind` 只承担 scope:"conversation"
+   (不动文件,无强制覆盖风险);both = applyFileRewind 成功后链
+   conversation 段,文件段被拒则不碰对话。双回执形状不同的代价由
+   ControlReq 变体各自解析承担,换来"绝不静默覆盖外部修改"的硬保证。
+8. **对话段必须翻译成 message 目标**(2026-07-09 实弹后追加):
+   `session/rewind` 对 checkpoint 类目标无视请求的 scope、一律强制文件
+   回滚(Context 实测),所以对话段把 picker 目标经
+   `conversation_target()` 翻译为 `{kind:"message", messageId:
+   <checkpoint.targetMessageId>}`(checkpoint payload 自带该 id,解码时
+   保留);拿不到 messageId 就**拒绝对话段**并提示,绝不发可能被强转的
+   checkpoint 目标。备选:直接发 checkpoint 目标 + scope 参数——被否,
+   实测会删文件。
+5. **conversation 回滚后的 transcript 处理**:transcript 保留为历史 +
+   显式标注一行"对话已回滚(内核侧目标之后的消息已不存在)",本会话
+   检查点候选按目标裁剪;不重建、不裁剪本地滚动区(spec 的"收缩**或**
+   标注"取标注)。备选:按 snapshot.messages 重建视图——被否,滚动区
+   是用户的操作历史(含工具输出/系统提示),重建丢信息且与"transcript
+   即日志"的既有语义冲突。
 6. **浮层复用 session-picker/权限浮层模式**:三态(目标列表 → 预览+scope
    → 结果),Esc 逐级回退;不引入新 UI 框架。回合进行中禁止 /rewind
    (spec 已定),避免与在途 turn 的事件流交织。
@@ -125,9 +152,9 @@ spike_b.py 三发实弹)已钉死:
 
 ## Risks / Trade-offs
 
-- [rewind 强制覆盖外部修改,用户误伤工作区] → 预览 canApply:false 时
-  默认"取消"+ 显式"强制应用"两段确认(spec 已定);预览页展示
-  expectedHash/currentHash 差异来源。
+- [rewind 强制覆盖外部修改,用户误伤工作区] → 文件回滚一律走
+  applyFileRewind(内核侧拒绝 unsafe)+ TUI 预览层同步本地拒绝并警示
+  (Decision 4);不存在强制覆盖路径。
 - [检查点是前像,用户可能预期"回到该次修改之后"] → 浮层文案按
   "还原到 <该次写入> 之前"措辞,预览页列出将被还原/删除的文件路径,
   避免语义误读(spike_a 实测回滚首个检查点会删文件)。

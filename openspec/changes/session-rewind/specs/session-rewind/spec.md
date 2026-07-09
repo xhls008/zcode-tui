@@ -43,39 +43,56 @@ SHALL 被拒绝并提示(先 Esc 取消或等回合结束),不与在途 turn 竞
 `canApply`、`safeFiles[{action, path, operationCount, toolNames}]`、
 `unsafeFiles[{path, reason, expectedHash, currentHash, operationCount,
 toolNames}]`、`ignoredFiles`。`canApply == false` 时(实测 reason 如
-`external_modified`)确认项 MUST 默认落在"取消",并显式警示:继续应用会
-**强制覆盖**磁盘上的外部修改(实测 `session/rewind` 不做安全检查,照常
-还原);用户必须显式选择"强制应用"才能继续。
+`external_modified`)文件 scope 的应用 MUST 被本地拒绝并警示——实测裸
+`session/rewind` 会**强制覆盖**磁盘上的外部修改(无视 canApply),因此
+文件回滚一律走尊重安全检查的 `session/applyFileRewind`,不提供强制覆盖
+路径(conversation scope 不动文件,仍可用)。
 
 #### Scenario: 安全预览
 - **WHEN** 选中 latestCheckpoint,预览返回 `{"canApply":true,"safeFiles":[{"action":"restore","operationCount":1,"path":"…/a.txt","toolNames":["Write"]}],"unsafeFiles":[],…}`
-- **THEN** 预览页列出将被还原的文件与来源工具,确认项默认在"应用"
+- **THEN** 预览页列出将被还原的文件与来源工具,Enter 即可应用
 
-#### Scenario: 不安全预览需显式强制
+#### Scenario: 不安全预览拒绝文件回滚
 - **WHEN** 预览返回 `canApply:false`,unsafeFiles 含 `{"reason":"external_modified","expectedHash":"…","currentHash":"…"}`
-- **THEN** 预览页警示该文件已被外部修改、继续将强制覆盖;确认项默认在"取消",仅当用户显式选中"强制应用"并 Enter 才发 session/rewind
+- **THEN** 预览页警示该文件已被会话外修改、文件 scope 应用被拒绝(不发 applyFileRewind、绝不发文件 scope 的 session/rewind);conversation scope 仍可选
 
 #### Scenario: 预览失败不中断会话
 - **WHEN** previewFileRewind 返回错误响应(如 -32602 Invalid params)
 - **THEN** push_error 显示错误,浮层退回目标选择,会话与后续 prompt 不受影响
 
 ### Requirement: scope 选择与应用
-确认应用时 TUI SHALL 允许选择 scope ∈ {conversation, workspace, both}
-(默认 workspace),发
-`session/rewind {sessionId, target, scope}`;成功后把 result 的
-`response` 一行文案落 transcript,并以 `state.updated
-reason=="session_rewound"` 的 patch 刷新控制面缓存(mode/model/
-thoughtLevel)。conversation/both 的回滚 SHALL 同步收缩本地 transcript
-的会话视图或明确标注"对话已回滚至 …"(以 result.snapshot.messages 为准),
-且本会话候选检查点列表按目标裁剪。
+确认应用时 TUI SHALL 允许选择 scope ∈ {workspace, conversation, both}
+(默认 workspace)。文件回滚(workspace 与 both 的文件段)MUST 走
+`session/applyFileRewind {sessionId, target}`(结果
+`{applied, preview, response}` 实测钉死,`applied` 为权威判据;拒绝时
+`applied:false` 携带 unsafeFiles 与原因)。对话回滚(conversation 与
+both 的对话段)MUST 把 picker 目标翻译为
+`{kind:"message", messageId:<checkpoint.targetMessageId>}` 后发
+`session/rewind {sessionId, target, scope:"conversation"}`——实测
+(2026-07-09)checkpoint 类目标会被内核**无视 scope 强制转为文件回滚**
+(rewind.triggered 回报 scope:"workspace" 并删除了外部修改过的文件),
+仅 message 目标尊重 conversation scope;拿不到 messageId 时对话段
+MUST 被拒绝并提示,不得发 checkpoint 目标。both = applyFileRewind
+成功后再链 conversation 段,文件段被拒则不动对话。成功后把 `response`
+一行文案落 transcript,`state.updated reason=="session_rewound"` 的
+patch 刷新控制面缓存;conversation 回滚成功后明确标注对话已回滚,且
+本会话候选检查点列表按目标裁剪。
 
 #### Scenario: workspace 回滚落盘
-- **WHEN** 对 latestCheckpoint 以 scope:"workspace" 应用,该检查点为最近一次 Write 的前像
-- **THEN** 磁盘文件内容原地还原(实测 a.txt 由 "two" 还原为 "one"),transcript 显示 "Rewound workspace to checkpoint …: restored 1 file.",随后收到 reason=="session_rewound" 的状态推送
+- **WHEN** 对 latestCheckpoint 以 scope workspace 应用(applyFileRewind),该检查点为最近一次 Write 的前像
+- **THEN** 磁盘文件内容原地还原(实测 a.txt 由 "two" 还原为 "one"),transcript 显示应用回执文案,随后收到 reason=="session_rewound" 的状态推送
 
-#### Scenario: conversation 回滚收缩对话
-- **WHEN** 以 target {kind:"turn", turnIndex:0}、scope:"conversation" 应用
-- **THEN** 内核对话回滚到首条用户消息之前(实测 keptMessageCount:0,session/messages 仅剩 1 条 synthetic rewind notice),TUI 标注对话已回滚,不把 model-only 的 synthetic 消息当普通消息渲染
+#### Scenario: 文件段被拒不碰对话(both)
+- **WHEN** scope both 应用时 applyFileRewind 返回 `{"applied":false,"response":"File rewind was not applied because at least one file is unsafe.",…}`
+- **THEN** 按失败呈现拒绝原因与 unsafeFiles,不再发 conversation 段的 session/rewind,会话保持可用
+
+#### Scenario: conversation 回滚收缩对话且不碰文件
+- **WHEN** 选中检查点后以 conversation scope 应用,TUI 发 `{kind:"message", messageId:<该检查点的 targetMessageId>}` + scope:"conversation"
+- **THEN** rewind.triggered 回报 scope:"conversation"(实测),对话收缩(session/messages 仅剩 synthetic rewind notice),磁盘文件分毫未动(实测外部篡改的内容原样保留),TUI 标注对话已回滚
+
+#### Scenario: 无 messageId 时对话段被拒
+- **WHEN** conversation/both scope 应用时该目标对应的检查点缺 targetMessageId
+- **THEN** 提示对话回滚不可用,不发任何 session/rewind(checkpoint 目标会被内核强制转文件回滚,实测),文件段(both)也不发
 
 ### Requirement: 回执判定与失败纪律
 TUI MUST NOT 以"收到 result 信封"作为回滚成功的判据:实测目标检查点不存在
