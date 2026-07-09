@@ -459,6 +459,10 @@ check("s16: permission overlay with options", screen_seen(raw, "Allow once"))
 check("s16: approved and turn completed", screen_seen(raw, "done ("))
 check("s16: write landed after approval",
       os.path.exists(os.path.join(wperm_dir, "w.txt")))
+# checkpoint.created events (one per gated write) roll up into a dim
+# files-changed note at finalize.
+check("s16: files-changed turn summary",
+      "file(s) changed" in plain and "/diff" in plain)
 
 # ---- scenario 17: streaming /sessions resume (session/resume handshake) ----
 # Earlier scenarios left sessions for SPIKE; picking one must resume it via
@@ -534,6 +538,80 @@ out = run_pty(
 plain = strip_ansi(out)
 check("s19: session usage rendered", "session usage" in plain and "total" in plain)
 check("s19: period stats rendered", "usage over 7d" in plain and "cache hit" in plain)
+
+# ---- scenario 20: streaming @file attachment + /copy + footer + debug log ----
+# The @mention must ride the streaming send as an attachments[] entry
+# (localPath), the model must read it; /copy must emit an OSC52 sequence;
+# the footer must show the kernel-reported model; ZCODE_TUI_LOG must capture
+# outbound method names WITHOUT any params (apiKey red line).
+print("== scenario 20: streaming attachment + /copy + footer model ==", flush=True)
+attach_dir = tempfile.mkdtemp(prefix="zcode-smoke-attach-")
+with open(os.path.join(attach_dir, "secret.txt"), "w") as fh:
+    fh.write("secret phrase: QUILL-BANJO-7371\n")
+debug_log = os.path.join(attach_dir, "tui-debug.log")
+out = run_pty(
+    {"ZCODE_TUI_LOG": debug_log}, attach_dir,
+    [
+        (1.5, b"What is the secret phrase in the attached file? "
+              b"Reply with the phrase only. @secret.txt"),
+        (0.5, b"\r"),
+        (75.0, b"/copy"),
+        (0.5, b"\r"),
+        (2.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=105,
+)
+plain = strip_ansi(out)
+raw = run_pty.last_raw
+# The sentinel STREAMS in as multiple text deltas, so the raw byte stream
+# never carries it contiguously (diff rendering) — pyte screen check needed.
+check("s20: attachment content reached the model", screen_seen(raw, "QUILL-BANJO-7371"))
+check("s20: /copy emitted an OSC52 sequence", b"\x1b]52;c;" in raw)
+check("s20: copy acknowledged", screen_seen(raw, "copied last reply"))
+check("s20: footer shows the kernel model", screen_seen(raw, "glm-"))
+with open(debug_log) as fh:
+    log_text = fh.read()
+check("s20: debug log captured outbound methods", "-> session/send" in log_text)
+check("s20: debug log carries no params/credentials",
+      "apiKey" not in log_text and "runtimeModel" not in log_text
+      and "QUILL-BANJO" not in log_text)
+
+# ---- scenario 21: resume history replay (streaming session/resume) ----
+# Phase 1 leaves a session with a known marker; phase 2 resumes it via
+# /sessions and the marker must reappear as a dim replay line WITHOUT this
+# run ever typing it.
+print("== scenario 21: resume history replay ==", flush=True)
+replay_dir = tempfile.mkdtemp(prefix="zcode-smoke-replay-")
+out = run_pty(
+    {}, replay_dir,
+    [
+        (1.5, b"Say exactly REPLAY-MARK-42 and nothing else."),
+        (0.5, b"\r"),
+        (60.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=80,
+)
+check("s21: phase-1 turn completed", screen_seen(run_pty.last_raw, "done ("))
+out = run_pty(
+    {}, replay_dir,
+    [
+        (2.5, b"/sessions"),
+        (0.8, b"\r"),      # open the picker
+        (1.5, b"\r"),      # Enter picks the newest current-dir session
+        (1.5, b"Reply with exactly: ok"),   # resume handshakes on next prompt
+        (0.5, b"\r"),
+        (75.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=100,
+)
+plain = strip_ansi(out)
+check("s21: resumed via protocol", "resumed sess_" in plain)
+check("s21: history replayed into the transcript",
+      "Say exactly REPLAY-MARK-42" in plain)
+check("s21: turn completed on resumed session", screen_seen(run_pty.last_raw, "done ("))
 
 failed = [name for name, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} checks passed", flush=True)

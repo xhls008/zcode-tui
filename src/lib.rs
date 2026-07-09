@@ -50,6 +50,8 @@ pub enum LeaderAction {
     Editor,
     ClearConversation,
     ClearInput,
+    /// Copy the last assistant reply to the system clipboard via OSC52.
+    CopyLastReply,
     Quit,
 }
 
@@ -465,7 +467,7 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
         "exit" | "quit" => Ok(InputAction::Quit),
         "help" | "clear" | "editor" | "login" | "logout" | "auth" | "status" | "diff" | "ide"
         | "sessions" | "mode" | "resume" | "new" | "model" | "think" | "compact" | "usage"
-        | "update" => Ok(InputAction::Local(parts)),
+        | "update" | "copy" => Ok(InputAction::Local(parts)),
         "skills" => {
             let mut local = parts;
             if local.len() == 1 {
@@ -615,6 +617,11 @@ pub fn command_catalog() -> &'static [CommandSpec] {
         CommandSpec {
             command: "/update",
             summary: "update the ZCode kernel from the official feed",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/copy",
+            summary: "copy the last assistant reply via OSC52",
             route: "local",
         },
         CommandSpec {
@@ -802,6 +809,7 @@ pub fn leader_action_for_key(key: char) -> Option<LeaderAction> {
         'e' => Some(LeaderAction::Editor),
         'x' => Some(LeaderAction::ClearConversation),
         'u' => Some(LeaderAction::ClearInput),
+        'y' => Some(LeaderAction::CopyLastReply),
         'q' => Some(LeaderAction::Quit),
         _ => None,
     }
@@ -1429,6 +1437,8 @@ pub fn help_text() -> &'static str {
   /compact                     compact the session context in place
   /usage [7d|30d]              show session and period token usage
   /update                      update the ZCode kernel from the official feed
+  /copy                        copy the last assistant reply to the system
+                               clipboard (OSC52; tmux needs set-clipboard on)
   /resume [sess_id]            resume latest (bare) or a specific session
   /sessions                    pick a recent session from a list
   /new                         start a fresh session; context resets
@@ -1438,7 +1448,7 @@ pub fn help_text() -> &'static str {
 
 keys:
   Ctrl+P                       command palette
-  Ctrl+X then p/h/e/x/u/q      leader shortcuts
+  Ctrl+X then p/h/e/x/u/y/q    leader shortcuts (y copies the last reply)
   Tab / Up / Down              navigate and accept suggestions
   Shift+Tab                    cycle permission mode
   Enter                        accept selected suggestion or send; plain text
@@ -2773,12 +2783,15 @@ pub fn fold_preview(text: &str, threshold: usize, head: usize) -> Option<(usize,
     (total > threshold && head < total).then(|| (head, total - head))
 }
 
-/// User config: theme token overrides plus the mouse switch. Parsing never
-/// fails — bad lines fall back to defaults so startup cannot break.
+/// User config: theme token overrides plus the mouse and notify switches.
+/// Parsing never fails — bad lines fall back to defaults so startup cannot
+/// break.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UiConfig {
     pub colors: BTreeMap<String, (u8, u8, u8)>,
     pub mouse: Option<bool>,
+    /// `notify = off` silences the >30s turn-complete terminal bell.
+    pub notify: Option<bool>,
 }
 
 pub const UI_CONFIG_COLOR_KEYS: &[&str] = &[
@@ -2820,6 +2833,12 @@ pub fn parse_ui_config(content: &str) -> UiConfig {
                 "on" | "true" | "1" => Some(true),
                 "off" | "false" | "0" => Some(false),
                 _ => config.mouse,
+            };
+        } else if key == "notify" {
+            config.notify = match value.to_ascii_lowercase().as_str() {
+                "on" | "true" | "1" => Some(true),
+                "off" | "false" | "0" => Some(false),
+                _ => config.notify,
             };
         } else if UI_CONFIG_COLOR_KEYS.contains(&key) {
             if let Some(rgb) = parse_hex_color(value) {
@@ -2885,6 +2904,104 @@ pub fn app_send_params(session_id: &str, content: &str) -> serde_json::Value {
     serde_json::json!({ "sessionId": session_id, "content": content })
 }
 
+/// `session/send` with `attachments[]`. Empty attachments MUST yield the
+/// exact same shape as [`app_send_params`] (no `attachments` key), so the
+/// no-mention path stays byte-identical to the pre-attachment behaviour.
+pub fn app_send_params_with_attachments(
+    session_id: &str,
+    content: &str,
+    attachments: &[serde_json::Value],
+) -> serde_json::Value {
+    if attachments.is_empty() {
+        return app_send_params(session_id, content);
+    }
+    serde_json::json!({
+        "sessionId": session_id,
+        "content": content,
+        "attachments": attachments,
+    })
+}
+
+/// Extensions the kernel treats as images (attachment `kind:"image"`).
+fn image_mime_for(ext: &str) -> Option<&'static str> {
+    match ext {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// Best-effort mimeType for `kind:"file"` attachments; unknown extensions
+/// fall back to text/plain (the kernel only needs a plausible type).
+fn file_mime_for(ext: &str) -> &'static str {
+    match ext {
+        "md" | "markdown" => "text/markdown",
+        "json" => "application/json",
+        "yaml" | "yml" => "application/yaml",
+        "toml" => "application/toml",
+        "xml" => "application/xml",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "csv" => "text/csv",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "svg" => "image/svg+xml",
+        "js" | "mjs" => "text/javascript",
+        _ => "text/plain",
+    }
+}
+
+/// Map `@file` mentions (already vetted by [`extract_file_mentions`]) to
+/// `session/send` attachment objects — kernel bundle schema `Pwt`, a strict
+/// union discriminated on `kind`, pinned live 2026-07-07 on kernel 0.15.0:
+/// image `{kind, filename, mimeType, sizeBytes?, dataBase64?, localPath?}`,
+/// file `{kind, filename, mimeType, sizeBytes(REQUIRED), dataBase64?,
+/// textContent?, localPath?}`. `localPath` alone is sufficient (verified:
+/// the model reads the referenced file's content); `sizeBytes` is mandatory
+/// for `kind:"file"`, so a mention whose metadata cannot be read is skipped
+/// rather than sent half-formed (a strict-schema ZodError would kill the
+/// whole send).
+pub fn build_send_attachments(mentions: &[String], cwd: &Path) -> Vec<serde_json::Value> {
+    let mut attachments = Vec::new();
+    for mention in mentions {
+        let Ok(resolved) = cwd.join(mention).canonicalize() else {
+            continue;
+        };
+        let Ok(meta) = fs::metadata(&resolved) else {
+            continue;
+        };
+        let filename = resolved
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| mention.clone());
+        let ext = resolved
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let local_path = resolved.to_string_lossy().into_owned();
+        let attachment = match image_mime_for(&ext) {
+            Some(mime) => serde_json::json!({
+                "kind": "image",
+                "filename": filename,
+                "mimeType": mime,
+                "sizeBytes": meta.len(),
+                "localPath": local_path,
+            }),
+            None => serde_json::json!({
+                "kind": "file",
+                "filename": filename,
+                "mimeType": file_mime_for(&ext),
+                "sizeBytes": meta.len(),
+                "localPath": local_path,
+            }),
+        };
+        attachments.push(attachment);
+    }
+    attachments
+}
+
 pub fn app_stop_params(session_id: &str) -> serde_json::Value {
     serde_json::json!({ "sessionId": session_id })
 }
@@ -2934,6 +3051,77 @@ pub fn app_resume_params(
             serde_json::json!({ "sessionId": session_id, "runtimeModel": runtime })
         }
         None => serde_json::json!({ "sessionId": session_id }),
+    }
+}
+
+/// Attach an `mcpServers` array to `session/create`/`session/resume` params
+/// (both schemas carry the same optional field). `None` leaves the params
+/// untouched so kernels predating the field never see an unknown key.
+pub fn with_mcp_servers(
+    mut params: serde_json::Value,
+    servers: Option<serde_json::Value>,
+) -> serde_json::Value {
+    if let (Some(list), Some(map)) = (servers, params.as_object_mut()) {
+        map.insert("mcpServers".to_string(), list);
+    }
+    params
+}
+
+/// Build the `mcpServers[]` array for `session/create`/`resume` from the
+/// project + user MCP configs. The kernel itself NEVER reads project
+/// `.mcp.json` (bundle-verified 2026-07-07: it only appears in plugin
+/// loading), so streaming sessions only get MCP servers the client passes
+/// here — schema `$xe`, strict union pinned from the kernel bundle:
+/// stdio `{name, command, args, env:[{name,value}], timeoutMs?}` (NO type
+/// key), remote `{name, type:"http"|"sse", url, headers:[{name,value}],
+/// timeoutMs?}`. Disabled servers are skipped; on a name collision the
+/// project entry wins. Returns None when nothing survives, so the params
+/// stay byte-identical to the pre-MCP shape.
+pub fn mcp_servers_param(project: &McpConfig, user: &McpConfig) -> Option<serde_json::Value> {
+    let mut merged: BTreeMap<&String, &McpServer> = BTreeMap::new();
+    for (name, server) in user.servers.iter().chain(project.servers.iter()) {
+        merged.insert(name, server); // later (project) insert wins
+    }
+    let kv_array = |map: &BTreeMap<String, String>| -> serde_json::Value {
+        serde_json::Value::Array(
+            map.iter()
+                .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+                .collect(),
+        )
+    };
+    let servers: Vec<serde_json::Value> = merged
+        .into_iter()
+        .filter(|(_, server)| !server.disabled)
+        .filter_map(|(name, server)| {
+            if let Some(url) = &server.url {
+                // Remote shape; anything that isn't exactly http/sse is
+                // normalized to http (the kernel enum allows only those two).
+                let transport = match server.transport_label() {
+                    "sse" => "sse",
+                    _ => "http",
+                };
+                Some(serde_json::json!({
+                    "name": name,
+                    "type": transport,
+                    "url": url,
+                    "headers": kv_array(&server.headers),
+                }))
+            } else if !server.command.is_empty() {
+                Some(serde_json::json!({
+                    "name": name,
+                    "command": server.command,
+                    "args": server.args,
+                    "env": kv_array(&server.env),
+                }))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if servers.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Array(servers))
     }
 }
 
@@ -3001,6 +3189,125 @@ pub fn app_usage_params(session_id: &str) -> serde_json::Value {
 /// `usage/stats` — period aggregate; kernel zod enum pins range to 7d|30d.
 pub fn usage_stats_params(range: &str) -> serde_json::Value {
     serde_json::json!({ "range": range })
+}
+
+/// `session/close` — release a session the TUI is discarding (/new, clean
+/// exit). Params pinned live 2026-07-07: `{sessionId}` strict (empty params
+/// ZodError names sessionId), result `{}`. Fire-and-forget, best-effort.
+pub fn app_close_params(session_id: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id })
+}
+
+/// One replayable history message from a `session/resume` result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayMessage {
+    /// "user" | "assistant".
+    pub role: String,
+    /// Concatenated text parts, truncated to the preview cap.
+    pub preview: String,
+}
+
+/// Extract the LAST up-to-`limit` renderable messages from a resume result's
+/// `messages[]` (shape pinned live 2026-07-07: `{info:{role,…},
+/// parts:[{type:"text", text}|{type:"reasoning"|"file"|"step-*",…}…]}`).
+/// Only user/assistant roles count; only `type:"text"` parts contribute;
+/// empty texts are skipped; previews are char-truncated to `cap` with "…".
+pub fn parse_resume_messages(
+    result: &serde_json::Value,
+    limit: usize,
+    cap: usize,
+) -> Vec<ReplayMessage> {
+    let Some(messages) = result.get("messages").and_then(|m| m.as_array()) else {
+        return Vec::new();
+    };
+    let mut replay: Vec<ReplayMessage> = messages
+        .iter()
+        .filter_map(|message| {
+            let role = message.pointer("/info/role")?.as_str()?;
+            if role != "user" && role != "assistant" {
+                return None;
+            }
+            let text = message
+                .get("parts")?
+                .as_array()?
+                .iter()
+                .filter(|part| part.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut preview: String = trimmed.chars().take(cap).collect();
+            if trimmed.chars().count() > cap {
+                preview.push('…');
+            }
+            Some(ReplayMessage {
+                role: role.to_string(),
+                preview,
+            })
+        })
+        .collect();
+    if replay.len() > limit {
+        replay.drain(..replay.len() - limit);
+    }
+    replay
+}
+
+/// Standard base64 (RFC 4648, with padding) — hand-rolled to keep the
+/// dependency tree flat; only used for the OSC52 clipboard payload.
+pub fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// OSC52 clipboard-set sequence (`ESC ] 52 ; c ; <base64> BEL`) for `text`,
+/// or None when text is empty. `max_b64` caps the encoded payload (~100KB by
+/// convention — terminals truncate or reject oversized sequences); the SOURCE
+/// text is truncated on a char boundary first so the base64 is always valid.
+pub fn osc52_copy_sequence(text: &str, max_b64: usize) -> Option<String> {
+    if text.is_empty() {
+        return None;
+    }
+    let max_src = max_b64 / 4 * 3;
+    let mut source = text;
+    if source.len() > max_src {
+        // Truncate to the last char boundary at or below the byte cap.
+        let mut cut = max_src;
+        while cut > 0 && !source.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        source = &source[..cut];
+        if source.is_empty() {
+            return None;
+        }
+    }
+    Some(format!(
+        "\x1b]52;c;{}\x07",
+        base64_encode(source.as_bytes())
+    ))
 }
 
 /// Parse a `session/list` result (`sessions[]{sessionId,title,workspace,
@@ -3348,6 +3655,9 @@ pub struct AppServerEvent {
     pub success: Option<bool>,
     /// `result.duration` — tool wall time in ms (on `kind=result`).
     pub duration_ms: Option<u64>,
+    /// `payload.fileCount` — files captured by a `checkpoint.created`
+    /// session-level event (surfaced via `params.type` passthrough).
+    pub file_count: Option<u64>,
 }
 
 /// Decode a single inbound protocol line. Unparseable lines -> None (skip).
@@ -3391,8 +3701,17 @@ pub fn decode_app_message(line: &str) -> Option<AppServerMessage> {
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
             };
+            // Streaming payloads (model.streaming) carry their own `kind`;
+            // session-level events (checkpoint.created, turn.*, …) do NOT —
+            // pass `params.type` through as the kind so they are consumable
+            // instead of dropped as unparseable (neither present -> skip).
+            let kind = payload
+                .get("kind")
+                .and_then(|k| k.as_str())
+                .or_else(|| value.pointer("/params/type").and_then(|t| t.as_str()))?
+                .to_string();
             Some(AppServerMessage::Event(AppServerEvent {
-                kind: payload.get("kind")?.as_str()?.to_string(),
+                kind,
                 delta: payload
                     .get("delta")
                     .and_then(|d| d.as_str())
@@ -3413,6 +3732,7 @@ pub fn decode_app_message(line: &str) -> Option<AppServerMessage> {
                     .pointer("/result/success")
                     .and_then(serde_json::Value::as_bool),
                 duration_ms: payload.get("duration").and_then(serde_json::Value::as_u64),
+                file_count: payload.get("fileCount").and_then(serde_json::Value::as_u64),
             }))
         }
         Some("state.updated") => Some(AppServerMessage::StateUpdated(
@@ -3831,6 +4151,10 @@ pub struct AppServerTurn {
     pub reasoning: String,
     pub tools: Vec<AppToolCall>,
     pub done: bool,
+    /// `checkpoint.created` events seen this turn (one per gated tool write).
+    pub checkpoints: u64,
+    /// Sum of those events' `fileCount` — the turn's files-changed total.
+    pub files_changed: u64,
 }
 
 impl AppServerTurn {
@@ -3902,6 +4226,14 @@ impl AppServerTurn {
                 self.done = true;
                 TurnDelta::Done
             }
+            // Session-level checkpoint (params.type passthrough): one per
+            // gated tool write; fileCount sums into the turn's change total
+            // for the finalize-time "N file(s) changed" note.
+            "checkpoint.created" => {
+                self.checkpoints += 1;
+                self.files_changed += event.file_count.unwrap_or(0);
+                TurnDelta::None
+            }
             // input_end, scheduled, started, batch, tool_result, unknown: no-op.
             _ => TurnDelta::None,
         }
@@ -3946,6 +4278,99 @@ where
     })
 }
 
+/// Append-only debug log, enabled by `ZCODE_TUI_LOG=<file path>`. Zero
+/// overhead when unset (`from_env` is checked once per owner; the disabled
+/// path is a single `is_none()`). Write failures are silently ignored —
+/// diagnostics must never break the TUI.
+///
+/// REDACTION DISCIPLINE: outbound entries carry METHOD NAMES ONLY — request
+/// params are never serialized (session/create·resume params embed
+/// `runtimeModel` with the provider apiKey). Inbound summaries are truncated
+/// and structural (class/kind/reason/id), never raw lines.
+#[derive(Clone)]
+pub struct DebugLog {
+    file: Arc<Mutex<fs::File>>,
+}
+
+impl DebugLog {
+    pub fn from_env() -> Option<Self> {
+        let path = std::env::var_os("ZCODE_TUI_LOG")?;
+        if path.is_empty() {
+            return None;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()?;
+        Some(Self {
+            file: Arc::new(Mutex::new(file)),
+        })
+    }
+
+    /// Append one timestamped line; failures are dropped on the floor.
+    pub fn line(&self, text: &str) {
+        if let Ok(mut file) = self.file.lock() {
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let day_secs = (ms / 1000) % 86_400;
+            let _ = writeln!(
+                file,
+                "{:02}:{:02}:{:02}.{:03} {text}",
+                day_secs / 3600,
+                (day_secs / 60) % 60,
+                day_secs % 60,
+                ms % 1000
+            );
+        }
+    }
+}
+
+/// Outbound request log line: the method name and id, NOTHING else — params
+/// stay out of the log by construction (see [`DebugLog`] redaction notes).
+pub fn log_line_outbound(method: &str, id: u64) -> String {
+    format!("-> {method} (id {id})")
+}
+
+/// Inbound message summary: message class + structural fields, truncated.
+/// Result/params bodies are never serialized.
+pub fn log_line_inbound(message: &AppServerMessage) -> String {
+    match message {
+        AppServerMessage::Response {
+            id,
+            error: Some(error),
+            ..
+        } => format!("<- response id {id} ERR {}", truncate_chars(error, 160)),
+        AppServerMessage::Response { id, .. } => format!("<- response id {id} ok"),
+        AppServerMessage::Event(event) => {
+            let mut line = format!("<- event {}", event.kind);
+            if !event.delta.is_empty() {
+                line.push_str(&format!(" +{}b", event.delta.len()));
+            }
+            if let Some(name) = event.tool_name.as_deref().filter(|name| !name.is_empty()) {
+                line.push_str(&format!(" tool={}", truncate_chars(name, 40)));
+            }
+            if let Some(count) = event.file_count {
+                line.push_str(&format!(" files={count}"));
+            }
+            line
+        }
+        AppServerMessage::StateUpdated(params) => format!(
+            "<- state.updated reason={}",
+            params.get("reason").and_then(|r| r.as_str()).unwrap_or("-")
+        ),
+        AppServerMessage::ServerRequest { id, method, .. } => {
+            format!(
+                "<- server-request {method} id {}",
+                truncate_chars(&id.to_string(), 40)
+            )
+        }
+        AppServerMessage::Other => "<- other".to_string(),
+    }
+}
+
 /// A long-lived connection to `zcode app-server`: one child process (own
 /// process group), a reader thread decoding inbound lines, and a stdin
 /// handle for requests. Requests get monotonic ids.
@@ -3958,6 +4383,8 @@ pub struct AppServerConn {
     pending: VecDeque<AppServerMessage>,
     next_id: u64,
     alive: bool,
+    /// ZCODE_TUI_LOG debug log (None = disabled, zero overhead).
+    log: Option<DebugLog>,
 }
 
 impl AppServerConn {
@@ -3984,18 +4411,26 @@ impl AppServerConn {
             .stdout
             .take()
             .ok_or_else(|| AppServerUnavailable::Spawn("no stdout pipe".to_string()))?;
+        let log = DebugLog::from_env();
+        let reader_log = log.clone();
         let (sender, receiver) = channel();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 let Ok(line) = line else { break };
                 if let Some(message) = decode_app_message(&line) {
+                    if let Some(log) = &reader_log {
+                        log.line(&log_line_inbound(&message));
+                    }
                     if sender.send(message).is_err() {
                         break;
                     }
                 }
             }
         });
+        if let Some(log) = &log {
+            log.line("app-server spawned");
+        }
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
             stdin,
@@ -4003,6 +4438,7 @@ impl AppServerConn {
             pending: VecDeque::new(),
             next_id: 1,
             alive: true,
+            log,
         })
     }
 
@@ -4013,6 +4449,10 @@ impl AppServerConn {
     ) -> std::result::Result<u64, AppServerUnavailable> {
         let id = self.next_id;
         self.next_id += 1;
+        // Method name only — params may carry credentials (runtimeModel).
+        if let Some(log) = &self.log {
+            log.line(&log_line_outbound(method, id));
+        }
         let line = format!("{}\n", encode_app_request(id, method, params));
         self.stdin
             .write_all(line.as_bytes())
@@ -4037,6 +4477,10 @@ impl AppServerConn {
     /// server→client requests echo the kernel's own envelope id — string ids
     /// like "server-1" — so they bypass the u64 request-id counter.
     pub fn reply(&mut self, line: &str) -> std::result::Result<(), AppServerUnavailable> {
+        // Marker only — the reply body echoes kernel-provided payloads.
+        if let Some(log) = &self.log {
+            log.line("-> interaction reply");
+        }
         self.stdin
             .write_all(format!("{line}\n").as_bytes())
             .and_then(|()| self.stdin.flush())

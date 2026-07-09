@@ -4,12 +4,15 @@
 
 ![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
 
+> **非官方声明**：`zcode-tui` 不是 ZCode / 智谱官方项目，也未获得官方背书。
+> 它是社区/个人维护的 Linux 终端 fallback，用来补齐官方包当前缺失的 TUI 体验。
+
 `zcode-tui` 是一个 **Rust 写的 ZCode 终端 TUI fallback**，专门兜住官方 Linux
 包缺少 `@zcode/tui` 的尴尬空洞。它面向 SSH、tmux、无桌面服务器和纯键盘
 工作流：普通输入走官方 `zcode --prompt`，常用 slash 命令、MCP 配置、
 shell escape、命令面板、会话选择、流式输出和编辑器工作流在本地补齐。
 
-这不是 ZCode 官方 TUI，也不伪装成官方实现。它是一个实用的终端壳。
+它不伪装成官方实现，只是一个实用的终端壳。
 
 ## 项目主题
 
@@ -59,6 +62,11 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   （build/edit/plan/yolo），欢迎框实时显示会话状态。
 - **`/sessions` 会话选择器**：浮层列出最近内核会话（标题/目录/相对时间，
   当前目录的排前），↑↓ 选择、Enter 接续、Esc 关闭。
+- **resume 历史回放**：流式续接成功后，在 "resumed sess_…" 提示下用 dim
+  紧凑行回放最近 ≤6 条对话（`›` 用户 / `·` 助手，每条 ~400 字符截断），
+  接上话头不用翻旧账。
+- **会话善后**：`/new` 丢弃活跃流式会话与 `/exit` 退出时尽力发
+  `session/close`，不留悬挂会话（fire-and-forget，失败静默）。
 
 **交互**
 
@@ -92,7 +100,9 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 - **实时补全菜单**：输入 `/` 即弹出建议（前缀 > 子串 > 子序列模糊匹配），
   上下键选择、`Tab`/`Enter` 接受、`Esc` 关闭。
 - **`@文件` 提及**：输入 `@` 补全项目内路径（跳过 .git/target/node_modules）；
-  提交时存在的 `@路径` 自动翻译成 `--attach`。
+  提交时存在的 `@路径` 在经典路径翻译成 `--attach`，在流式路径翻译成
+  `session/send` 的 `attachments[]`（图片扩展名走 image、其余按扩展名给
+  mimeType，`localPath` 直引本机文件）——两条路径都能让模型读到文件。
 - readline 式光标编辑：Left/Right、Home/End、`Ctrl+A/E`、`Ctrl+W`、Delete。
 - **持久输入历史**：启动时读入内核 `input_history`（内核记录每条 --prompt），
   Up/Down 跨进程可用；`Ctrl+R` 反向搜索（子串过滤、新→旧、Enter 取回）。
@@ -100,6 +110,15 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   `mouse = off` 关闭捕获；按住 Shift 可用终端原生文本选择。
 - **长输出折叠**：工具/系统/diff/错误单元超过 24 行默认折叠为头 8 行 +
   `… (+N lines · Ctrl+O)`，`Ctrl+O` 展开/收起；助手回复永不折叠。
+- **OSC52 复制**：`Ctrl+X` 后 `y` 或 `/copy` 把最后一条助手回复写进系统
+  剪贴板（OSC52 直发终端，SSH 远程也能落到本地剪贴板；负载 ~100KB 截断）。
+  tmux 里需 `set -g set-clipboard on`。
+- **回合完成铃**：流式回合或经典 prompt 任务收尾且耗时 >30s 响一声终端铃
+  （BEL），切走干别的也知道跑完了；配置 `notify = off` 关闭，取消不响。
+- **文件变更小结**：流式回合里被门禁工具落盘会产生 checkpoint，收尾时
+  显示 `N file(s) changed · /diff to review`，改没改文件一眼可知。
+- **状态栏模型/模式**：footer 右侧常驻当前模型与权限模式
+  （如 `glm-5.1 · build`，取内核状态推送；首推送前只显示模式）。
 - bracketed paste：多行粘贴不会误触发提交。
 - `Ctrl+P` 命令面板；OpenCode 风格 leader key：`Ctrl+X` 后接 `p/h/e/x/u/q`。
 - `Ctrl+G` 或 `/editor` 调 `$VISUAL`/`$EDITOR` 编辑长 prompt；`Ctrl+J` 多行输入。
@@ -121,6 +140,10 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 **MCP 配置**（`.mcp.json` 与 Claude Code 格式兼容）
 
 - 两级 scope：项目 `.mcp.json` 和用户级 `~/.config/zcode/mcp.json`（`--scope user`）。
+- **流式会话真生效**：内核自身不读项目 `.mcp.json`（实测 0.15.0）；TUI 在
+  `session/create`/`resume` 时把两级配置翻译成协议的 `mcpServers[]` 传给
+  内核（disabled 跳过、同名项目级优先），模型在会话内拿到
+  `mcp__<name>__<tool>` 工具。
 - stdio 与远程 server：`/mcp add --transport http|sse <name> <url>`。
 - `/mcp add-json`、`/mcp get`、`/mcp enable`、`/mcp disable`（软开关，不删配置）。
 - `/mcp status` 等运行态命令继续转发给 ZCode。
@@ -273,7 +296,10 @@ text                         通过 zcode --prompt 发送 prompt
                              直连内核 compact；否则转发 CLI）
 /usage [7d|30d]              显示当前会话与周期 token 用量（app-server）
 /update                      从官方 feed 更新 ZCode 内核（下载 + sha512 校验）
-/resume [sess_id]            恢复最近（不带参数）或指定会话
+/copy                        复制最后一条助手回复到系统剪贴板（OSC52；
+                             tmux 需 set -g set-clipboard on）
+/resume [sess_id]            恢复最近（不带参数）或指定会话；流式路径续接
+                             后回放最近对话
 /sessions                    浮层选择最近会话并接续
 /new                         重开会话，上下文重置
 /diff [args]                 git diff 语法着色（--staged、路径等）
@@ -289,7 +315,8 @@ text                         通过 zcode --prompt 发送 prompt
 
 ```text
 Ctrl+P                       命令面板
-Ctrl+X then p/h/e/x/u/q      leader：面板/帮助/编辑器/清会话/清输入/退出
+Ctrl+X then p/h/e/x/u/y/q    leader：面板/帮助/编辑器/清会话/清输入/
+                             复制最后回复(OSC52)/退出
 Tab / Up / Down              建议菜单：接受 / 选择
 Shift+Tab                    循环切换权限模式
 Enter                        发送；菜单导航中则接受选中项；流式回合进行中
@@ -332,6 +359,10 @@ ZCODE_TUI_SKYLINE            欢迎页 ZCODE logo 渲染：默认探测终端图
                              braille / wire 可强制走文本天际线（跳过图形探测），
                              off 关闭天际线。若点阵显示成方块/发虚，设 wire
 ZCODE_TUI_CONFIG             配置文件路径（默认 ~/.config/zcode-tui/config）
+ZCODE_TUI_LOG                设为文件路径开启协议调试日志（追加式：入站
+                             摘要、出站只记方法名、握手/收尾/降级转换；
+                             绝不记录请求 params——runtimeModel/apiKey
+                             不落盘；未设时零开销）
 ZCODE_APP                    wrapper：指定 ZCode 桌面包目录（覆盖自动探测）
 ZCODE_FALLBACK_TUI           wrapper：指定 fallback TUI 二进制路径
 ZCODE_FORCE_SYSTEM_NODE      wrapper：置 1 强制用系统 Node 运行内核
@@ -349,6 +380,8 @@ ZCODE_FORCE_SYSTEM_NODE      wrapper：置 1 强制用系统 Node 运行内核
 accent = #6088ff
 # 关闭鼠标捕获
 mouse = off
+# 关闭 >30s 回合完成铃（默认开启）
+notify = off
 ```
 
 `NO_COLOR`/`--no-color` 优先级最高，设置后所有颜色（含自定义）全部退化。

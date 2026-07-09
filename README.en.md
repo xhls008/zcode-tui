@@ -4,12 +4,17 @@
 
 ![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
 
+> **Unofficial notice**: `zcode-tui` is not an official ZCode / Zhipu project
+> and is not endorsed by ZCode or Zhipu. It is a community/personal Linux
+> terminal fallback for the TUI experience currently missing from the official
+> package.
+
 `zcode-tui` is a Rust terminal-first fallback TUI for ZCode on Linux. It exists
 for the gap where the official Linux package exposes a `tui` command, but does
 not ship the terminal UI runtime (`@zcode/tui`).
 
-This is not the official ZCode TUI, and it does not pretend to be one. It is a
-practical terminal shell around the official ZCode CLI path: normal prompts go
+It does not pretend to be an official implementation. It is a practical
+terminal shell around the official ZCode CLI path: normal prompts go
 through `zcode --prompt`, while slash commands, MCP config, shell escapes,
 session selection, streaming output, command palette, and editor workflows are
 handled locally.
@@ -44,13 +49,46 @@ for details.
 - Optional official update check using the same Linux update feed as the
   desktop app.
 
+**True streaming (default on)**
+
+- Prompts run through the kernel's `zcode app-server` protocol and the answer
+  streams into the transcript token by token — single-turn Q&A included.
+- Any failure (spawn, handshake timeout, schema mismatch, disconnect)
+  permanently and seamlessly downgrades the process to the classic
+  `--prompt` path; set `ZCODE_TUI_APP_SERVER=0` to force the classic path.
+- Tool permission approval: gated side-effect tools (Write in build mode,
+  plan approval in plan mode) raise an approval overlay (arrows + Enter to
+  answer, Esc to decline) instead of hanging; approved tools continue within
+  the same turn.
+- Session controls on the live session: `/model` picker, `/think` thought
+  level, `/compact` in-place context compaction; `/mode` and Shift+Tab apply
+  immediately via `session/setMode`.
+- Steering: plain text typed while a turn is streaming is injected into that
+  turn (`session/steer`) instead of being queued.
+- `/usage [7d|30d]` shows session and period token usage; `/update`
+  self-updates the kernel from the official feed (sha512-verified).
+- `@file` mentions become `session/send` attachments (image/file kinds,
+  `localPath`-based), so the model reads them on the streaming path too.
+- Project `.mcp.json` and user-level MCP config are passed to
+  `session/create`/`resume` as `mcpServers` — the kernel does not read
+  project `.mcp.json` on its own, so this is what makes MCP servers work in
+  streaming sessions.
+- Turn comfort: a terminal bell after >30s turns (`notify = off` disables),
+  a `N file(s) changed · /diff to review` note when a turn wrote files, and
+  the current model + mode in the footer (e.g. `glm-5.1 · build`).
+
 **Sessions**
 
-- Multi-turn continuity: after the first successful prompt, later prompts use
-  `--continue` automatically unless a specific resume target is set.
+- Multi-turn continuity: after the first successful prompt, later prompts
+  reuse the live streaming session (classic path: `--continue`).
 - `/new`, `/resume [sess_id]`, `/mode`, and Shift+Tab mode cycling.
 - `/sessions` picker for recent kernel sessions, sorted with current-directory
-  sessions first.
+  sessions first; streaming resumes go through `session/resume` with the
+  runtime-model fix (bare resumes used to fail their first send).
+- After a resume, the last few exchanges replay as dim compact lines so the
+  restored context is visible.
+- Discarded live sessions (`/new`, clean exit) get a best-effort
+  `session/close`.
 
 **Interaction**
 
@@ -69,6 +107,9 @@ for details.
 - Long output folding via Ctrl+O.
 - Bracketed paste support.
 - Ctrl+P command palette, Ctrl+X leader shortcuts, Ctrl+G external editor.
+- `/copy` (or Ctrl+X then y) copies the last assistant reply to the system
+  clipboard via OSC52 — works over SSH; in tmux enable
+  `set -g set-clipboard on`.
 
 **Live progress**
 
@@ -197,6 +238,12 @@ text                         send a prompt through zcode --prompt
 /mcp enable|disable <name>
 /mcp remove <name>
 /mode [build|edit|plan|yolo]
+/model
+/think
+/compact
+/usage [7d|30d]
+/update
+/copy
 /resume [sess_id]
 /new
 /diff [args]
@@ -223,6 +270,9 @@ accent = #6088ff
 
 # Disable mouse capture.
 mouse = off
+
+# Disable the >30s turn-complete terminal bell.
+notify = off
 ```
 
 `NO_COLOR` and `--no-color` take precedence over theme colors.
@@ -235,7 +285,12 @@ ZCODE_TUI_LOGIN_CMD
 ZCODE_TUI_LOGOUT_CMD
 ZCODE_TUI_IDE_CMD
 ZCODE_TUI_NO_UPDATE_CHECK
+ZCODE_TUI_APP_SERVER        (set 0/off/false to force the classic --prompt path)
+ZCODE_TUI_LOG               (file path: append-only protocol debug log;
+                             outbound entries are method names only — request
+                             params, runtimeModel, and apiKey never touch disk)
 ZCODE_TUI_NO_MOUSE
+ZCODE_TUI_SKYLINE
 ZCODE_TUI_CONFIG
 ZCODE_APP
 ZCODE_FALLBACK_TUI

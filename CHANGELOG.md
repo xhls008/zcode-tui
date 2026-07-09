@@ -6,6 +6,58 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ## [Unreleased]
 
+### 修复(openspec 变更 streaming-attachments-and-comfort,协议形状全部对真内核 0.15.0 实弹钉死)
+
+- **流式路径 @文件 附件失效**(真 bug):经典路径把 `@路径` 翻译成
+  `--attach`,流式 send 只发 content——附件被无声丢掉。现按内核 bundle
+  schema `Pwt` 构造 `attachments[]`(kind 按扩展名分 image/file、
+  `filename`=basename、`localPath`=绝对路径;`kind:"file"` 的
+  `sizeBytes` 为 strict 必填,元数据读不到则跳过该项)。**实测 localPath
+  单独可用**(不带 dataBase64,模型逐 token 流回附件里的哨兵串),握手
+  首发与会话复用快路径都已接上;无 @提及时 params 逐字节不变。
+- **流式会话 MCP 配置失效**(真 bug):内核 bundle 里 `.mcp.json` 只出现
+  在 plugin 加载路径——内核自身从不读项目 `.mcp.json`,含配置目录裸
+  create 后 `mcp/list` 返回空 statuses(实弹证实)。现 `session/create`/
+  `resume` 附上由项目级 `.mcp.json` + 用户级 `~/.config/zcode/mcp.json`
+  构造的 `mcpServers[]`(bundle schema `$xe`:stdio 形状无 type 字段、
+  远程 http/sse 带 url/headers;disabled 跳过、同名项目级优先)。
+  实弹证实:create 带数组后同会话模型报出 `mcp__<name>__<tool>` 工具,
+  `mcp/list` 显示 connected + toolCount。
+- **/update 加固**:feed 提供的 deb 文件名过 `basename` 再拼下载路径,
+  防恶意 feed 以 `../` 路径穿越写盘;正常 feed 行为不变。
+
+### 新增(同变更)
+
+- **resume 历史回放**:流式续接成功后,"resumed sess_…(N messages)"
+  提示下回放最近 ≤6 条 user/assistant 对话(dim 紧凑行,`›` 用户/`·`
+  助手,每条 ~400 字符截断;resume 结果 `messages[]` 形状实弹钉死:
+  `{info:{role}, parts:[{type:"text",text}…]}`,非文本 parts 跳过)。
+- **OSC52 复制**:`Ctrl+X` 后 `y` 或 `/copy` 把最后一条助手回复经
+  `ESC ] 52 ; c ; <base64> BEL` 直写终端落系统剪贴板(SSH 远程可用;
+  base64 负载 ~100KB 按源文本字符边界截断,序列恒合法;base64 手撸,
+  零新依赖)。tmux 需 `set -g set-clipboard on`(README 已注明,
+  不做 passthrough 包裹)。
+- **状态栏模型/模式**:footer 右侧常驻 `glm-5.1 · build`(取内核
+  state 推送缓存的 model_current/mode;首推送前回退显示配置的 mode,
+  不猜模型名)。
+- **回合完成铃**:流式回合或经典 prompt 任务收尾且耗时 >30s 响一声
+  终端铃(BEL);取消不响;配置文件 `notify = off` 关闭。
+- **文件变更小结**:按回合统计 `checkpoint.created` 事件(每次被门禁
+  工具落盘一条,payload 带 fileCount),收尾时 >0 显示
+  `N file(s) changed · /diff to review`。解码层配套扩展:无
+  `payload.kind` 的 session/event 以 `params.type` 直通(此前这类
+  会话级事件被当无法解析的行丢弃)。
+- **ZCODE_TUI_LOG 调试日志**:设为文件路径开启追加式协议日志(入站
+  解码摘要、出站只记方法名与 id、握手/收尾/降级转换)。**红线**:
+  绝不序列化请求 params——`session/create`/`resume` 的 runtimeModel
+  携带 provider apiKey,出站日志行由方法名拼接、结构上不触碰 params
+  (单测断言);未设时零开销(启动判定一次)。
+- **session/close 善后**:/new 丢弃活跃流式会话与 /exit 带活会话时
+  尽力发 `session/close {sessionId}`(params 实弹钉死:空 params
+  ZodError 点名 sessionId,结果 `{}`);fire-and-forget,失败静默。
+- README.en.md 补同步近期功能(默认流式、权限确认、会话控制、steer、
+  /usage /update、resume 修复)与本批新增。
+
 ## [0.5.1] - 2026-07-07
 
 ### 修复(0.5.0 tag 打在修复落地之前,补丁版补上)

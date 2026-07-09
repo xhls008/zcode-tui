@@ -1895,3 +1895,279 @@ fn unavailable_reasons_display() {
         .to_string()
         .contains("closed"));
 }
+
+// ---- streaming-attachments-and-comfort batch -----------------------------
+
+#[test]
+fn send_attachments_map_mentions_by_extension() {
+    use zcode_tui::{app_send_params_with_attachments, build_send_attachments};
+    let dir = std::env::temp_dir().join(format!("zcode-attach-{}", std::process::id()));
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("notes.txt"), "hello sentinel").unwrap();
+    fs::write(dir.join("shot.PNG"), [0u8; 9]).unwrap();
+    fs::write(dir.join("sub/config.weird"), "x").unwrap();
+
+    let mentions = vec![
+        "notes.txt".to_string(),
+        "shot.PNG".to_string(),
+        "sub/config.weird".to_string(),
+        "missing.txt".to_string(), // metadata unreadable -> skipped
+    ];
+    let attachments = build_send_attachments(&mentions, &dir);
+    assert_eq!(attachments.len(), 3);
+
+    let file = &attachments[0];
+    assert_eq!(file["kind"], "file");
+    assert_eq!(file["filename"], "notes.txt");
+    assert_eq!(file["mimeType"], "text/plain");
+    // kind:"file" REQUIRES sizeBytes (kernel Pwt schema is strict).
+    assert_eq!(file["sizeBytes"], 14);
+    assert!(file["localPath"].as_str().unwrap().ends_with("/notes.txt"));
+    assert!(file.get("dataBase64").is_none());
+
+    let image = &attachments[1];
+    assert_eq!(image["kind"], "image");
+    assert_eq!(image["mimeType"], "image/png"); // extension case-folded
+
+    let unknown = &attachments[2];
+    assert_eq!(unknown["kind"], "file");
+    assert_eq!(unknown["mimeType"], "text/plain"); // fallback
+    assert_eq!(unknown["filename"], "config.weird"); // basename, not the path
+
+    // Empty attachments -> byte-identical to the plain send params.
+    let plain = app_send_params_with_attachments("sess_1", "hi", &[]);
+    assert_eq!(
+        plain,
+        serde_json::json!({"sessionId":"sess_1","content":"hi"})
+    );
+    let with = app_send_params_with_attachments("sess_1", "hi", &attachments);
+    assert_eq!(with["attachments"].as_array().unwrap().len(), 3);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn mcp_servers_param_builds_kernel_shapes() {
+    use zcode_tui::{mcp_servers_param, with_mcp_servers, McpConfig};
+    let project: McpConfig = serde_json::from_str(
+        r#"{"mcpServers":{
+            "files":{"command":"npx","args":["-y","server-files"],"env":{"TOKEN":"t1"}},
+            "off":{"command":"nope","disabled":true},
+            "shared":{"command":"project-wins"}
+        }}"#,
+    )
+    .unwrap();
+    let user: McpConfig = serde_json::from_str(
+        r#"{"mcpServers":{
+            "web":{"type":"sse","url":"https://mcp.example/sse","headers":{"X-Key":"k"}},
+            "shared":{"command":"user-loses"}
+        }}"#,
+    )
+    .unwrap();
+
+    let servers = mcp_servers_param(&project, &user).unwrap();
+    let list = servers.as_array().unwrap();
+    assert_eq!(list.len(), 3); // files, shared, web — disabled skipped
+
+    let files = list.iter().find(|s| s["name"] == "files").unwrap();
+    // stdio shape has NO type key (kernel $xe union is strict).
+    assert!(files.get("type").is_none());
+    assert_eq!(files["command"], "npx");
+    assert_eq!(files["args"], serde_json::json!(["-y", "server-files"]));
+    assert_eq!(
+        files["env"],
+        serde_json::json!([{"name":"TOKEN","value":"t1"}])
+    );
+
+    let shared = list.iter().find(|s| s["name"] == "shared").unwrap();
+    assert_eq!(shared["command"], "project-wins");
+
+    let web = list.iter().find(|s| s["name"] == "web").unwrap();
+    assert_eq!(web["type"], "sse");
+    assert_eq!(web["url"], "https://mcp.example/sse");
+    assert_eq!(
+        web["headers"],
+        serde_json::json!([{"name":"X-Key","value":"k"}])
+    );
+
+    // Empty configs -> None; with_mcp_servers(None) leaves params untouched.
+    assert!(mcp_servers_param(&McpConfig::default(), &McpConfig::default()).is_none());
+    let base = serde_json::json!({"sessionId":"sess_1"});
+    assert_eq!(with_mcp_servers(base.clone(), None), base);
+    let with = with_mcp_servers(base, Some(servers));
+    assert_eq!(with["mcpServers"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn resume_messages_replay_filters_and_truncates() {
+    use zcode_tui::parse_resume_messages;
+    // Shape as captured live 2026-07-07: info.role + parts[].type/text.
+    let long = "长".repeat(450);
+    let result = serde_json::json!({"messages": [
+        {"info": {"role": "user"}, "parts": [
+            {"type": "text", "text": "What is the secret phrase?"},
+            {"type": "file", "filename": "attach_me.txt"}
+        ]},
+        {"info": {"role": "assistant"}, "parts": [
+            {"type": "text", "text": long},
+            {"type": "step-start"}, {"type": "step-finish"}
+        ]},
+        {"info": {"role": "assistant"}, "parts": [
+            {"type": "reasoning", "text": "thinking only"}
+        ]},
+    ]});
+    let replay = parse_resume_messages(&result, 6, 400);
+    assert_eq!(replay.len(), 2); // reasoning-only message skipped
+    assert_eq!(replay[0].role, "user");
+    assert_eq!(replay[0].preview, "What is the secret phrase?");
+    assert_eq!(replay[1].role, "assistant");
+    assert_eq!(replay[1].preview.chars().count(), 401); // 400 + '…'
+    assert!(replay[1].preview.ends_with('…'));
+
+    // Limit keeps the LAST messages.
+    let many = serde_json::json!({"messages": (0..9).map(|i| serde_json::json!(
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": format!("m{i}")}]}
+    )).collect::<Vec<_>>()});
+    let tail = parse_resume_messages(&many, 6, 400);
+    assert_eq!(tail.len(), 6);
+    assert_eq!(tail[0].preview, "m3");
+    assert_eq!(tail[5].preview, "m8");
+
+    // Missing messages -> empty.
+    assert!(parse_resume_messages(&serde_json::json!({}), 6, 400).is_empty());
+}
+
+#[test]
+fn osc52_sequence_encodes_and_caps() {
+    use zcode_tui::{base64_encode, osc52_copy_sequence};
+    // RFC 4648 vectors.
+    assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+    assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+    assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    assert_eq!(base64_encode(b""), "");
+
+    let seq = osc52_copy_sequence("hello", 100_000).unwrap();
+    assert_eq!(seq, "\x1b]52;c;aGVsbG8=\x07");
+
+    // Cap truncates the SOURCE on a char boundary; sequence stays valid.
+    let capped = osc52_copy_sequence(&"号".repeat(100), 40).unwrap();
+    let b64 = capped
+        .strip_prefix("\x1b]52;c;")
+        .unwrap()
+        .strip_suffix('\x07')
+        .unwrap();
+    assert!(b64.len() <= 40);
+    assert!(b64.len().is_multiple_of(4)); // valid base64 framing
+
+    assert!(osc52_copy_sequence("", 100_000).is_none());
+}
+
+#[test]
+fn session_event_type_passthrough_and_checkpoint_count() {
+    use zcode_tui::{decode_app_message, AppServerMessage, AppServerTurn, TurnDelta};
+    // checkpoint.created has NO payload.kind — params.type passes through
+    // (previously dropped as unparseable).
+    let line = r#"{"method":"session/event","params":{"type":"checkpoint.created",
+        "payload":{"checkpointId":"chk_1","scope":"workspace","fileCount":2}}}"#
+        .replace('\n', " ");
+    let Some(AppServerMessage::Event(event)) = decode_app_message(&line) else {
+        panic!("checkpoint event not decoded");
+    };
+    assert_eq!(event.kind, "checkpoint.created");
+    assert_eq!(event.file_count, Some(2));
+
+    // Streaming payloads keep their own kind even when params.type is set.
+    let stream = r#"{"method":"session/event","params":{"type":"model.streaming",
+        "payload":{"kind":"text_delta","delta":"hi"}}}"#
+        .replace('\n', " ");
+    let Some(AppServerMessage::Event(event)) = decode_app_message(&stream) else {
+        panic!("stream event not decoded");
+    };
+    assert_eq!(event.kind, "text_delta");
+
+    // Neither kind nor type -> still skipped quietly.
+    let bare = r#"{"method":"session/event","params":{"payload":{"x":1}}}"#;
+    assert!(decode_app_message(bare).is_none());
+
+    // Turn accumulator: checkpoints and fileCount sum; no UI delta.
+    let mut turn = AppServerTurn::default();
+    let mut chk = zcode_tui::AppServerEvent {
+        kind: "checkpoint.created".to_string(),
+        file_count: Some(2),
+        ..Default::default()
+    };
+    assert_eq!(turn.apply(&chk), TurnDelta::None);
+    chk.file_count = None; // tolerated: counts the checkpoint, adds 0 files
+    assert_eq!(turn.apply(&chk), TurnDelta::None);
+    assert_eq!(turn.checkpoints, 2);
+    assert_eq!(turn.files_changed, 2);
+}
+
+#[test]
+fn close_params_and_notify_config() {
+    use zcode_tui::{app_close_params, parse_ui_config as parse};
+    // session/close params pinned live 2026-07-07: {sessionId} strict.
+    assert_eq!(
+        app_close_params("sess_9"),
+        serde_json::json!({"sessionId":"sess_9"})
+    );
+
+    assert_eq!(parse("notify = off").notify, Some(false));
+    assert_eq!(parse("notify = on").notify, Some(true));
+    assert_eq!(parse("notify = maybe").notify, None); // bad value ignored
+    assert_eq!(parse("").notify, None); // default: bell enabled
+}
+
+#[test]
+fn debug_log_lines_redact_params() {
+    use zcode_tui::{log_line_inbound, log_line_outbound, AppServerMessage};
+    // Outbound: METHOD NAME ONLY — a resume carries runtimeModel/apiKey in
+    // its params, which must never appear.
+    let line = log_line_outbound("session/resume", 7);
+    assert_eq!(line, "-> session/resume (id 7)");
+    assert!(!line.contains("apiKey") && !line.contains("runtimeModel"));
+
+    // Inbound summaries: structural only, errors truncated.
+    let ok = AppServerMessage::Response {
+        id: 3,
+        result: Some(serde_json::json!({"secret": "value-not-logged"})),
+        error: None,
+    };
+    let logged = log_line_inbound(&ok);
+    assert_eq!(logged, "<- response id 3 ok");
+    assert!(!logged.contains("value-not-logged"));
+
+    let err = AppServerMessage::Response {
+        id: 4,
+        result: None,
+        error: Some("x".repeat(500)),
+    };
+    assert!(log_line_inbound(&err).chars().count() < 200);
+
+    let event = AppServerMessage::Event(zcode_tui::AppServerEvent {
+        kind: "text_delta".to_string(),
+        delta: "top secret token".to_string(),
+        ..Default::default()
+    });
+    let logged = log_line_inbound(&event);
+    assert_eq!(logged, "<- event text_delta +16b"); // length, not content
+
+    let state = AppServerMessage::StateUpdated(
+        serde_json::json!({"reason":"prompt_completed","patch":{"big":"blob"}}),
+    );
+    assert_eq!(
+        log_line_inbound(&state),
+        "<- state.updated reason=prompt_completed"
+    );
+}
+
+#[test]
+fn copy_leader_key_and_local_command_routed() {
+    // Ctrl+X y -> CopyLastReply; /copy classifies as a local command.
+    assert_eq!(
+        leader_action_for_key('y'),
+        Some(LeaderAction::CopyLastReply)
+    );
+    let action = classify_input("/copy").unwrap();
+    assert_eq!(action, InputAction::Local(vec!["copy".to_string()]));
+}

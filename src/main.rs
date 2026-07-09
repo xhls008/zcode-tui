@@ -1,7 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::fs;
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write as _};
 use std::path::PathBuf;
 use std::process::{self, Command, ExitStatus};
 use std::sync::mpsc::TryRecvError;
@@ -30,26 +30,30 @@ use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::StatefulImage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zcode_tui::{
-    app_compact_params, app_create_params, app_resume_params, app_send_params, app_server_enabled,
-    app_session_id_from_result, app_set_mode_params, app_set_model_params, app_set_thought_params,
-    app_state_controls, app_state_is_turn_end, app_state_turn_error, app_state_watermark,
-    app_steer_params, app_stop_params, app_subscribe_params, app_usage_params, build_runtime_model,
-    classify_input, command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
-    detect_auth_status, diff_line_role, encode_interaction_reply, env_is_headless,
-    file_suggestions, fold_preview, format_context_watermark, git_diff_command,
-    handle_local_command, help_text, history_search, is_newer_version, kernel_config_path_from,
-    kernel_db_path_from, latest_assistant_text, latest_reasoning, latest_session_for_dir,
-    leader_action_for_key, list_recent_sessions, live_tool_chips, load_ui_config, login_command,
-    markdown_lines, open_kernel_db_ro, parse_cli_args, parse_interaction_request,
-    parse_kernel_slash_commands, parse_prompt_summary, parse_session_list, parse_steer_result,
-    parse_stream_event, parse_todos, parse_update_feed, parse_update_feed_url, prompt_command_for,
-    recent_input_history, relative_age, run_command, shorten_home, skyline_braille,
-    skyline_graphics_wanted, skyline_lines, skyline_mode, slash_suggestions_merged,
-    spawn_streaming_command, tool_input_summary, usage_stats_params, wrap_display, AppConfig,
-    AppServerConn, AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, DbBaseline,
-    DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction, LiveToolChip,
-    MdLineKind, SessionControls, SessionRow, SkylineMode, SpanRole, SteerOutcome, StreamEvent,
-    StreamingJob, TodoItem, ToolChipStatus, TurnDelta, UiConfig, UpdateFeed, SKYLINE_LOGO_W,
+    app_close_params, app_compact_params, app_create_params, app_resume_params,
+    app_send_params_with_attachments, app_server_enabled, app_session_id_from_result,
+    app_set_mode_params, app_set_model_params, app_set_thought_params, app_state_controls,
+    app_state_is_turn_end, app_state_turn_error, app_state_watermark, app_steer_params,
+    app_stop_params, app_subscribe_params, app_usage_params, build_runtime_model,
+    build_send_attachments, classify_input, command_palette_rows, context_watermark_warn,
+    db_baseline, db_schema_supported, detect_auth_status, diff_line_role, encode_interaction_reply,
+    env_is_headless, extract_file_mentions, file_suggestions, fold_preview,
+    format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
+    is_newer_version, kernel_config_path_from, kernel_db_path_from, latest_assistant_text,
+    latest_reasoning, latest_session_for_dir, leader_action_for_key, list_recent_sessions,
+    live_tool_chips, load_mcp_config, load_ui_config, login_command, markdown_lines,
+    mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence, parse_cli_args,
+    parse_interaction_request, parse_kernel_slash_commands, parse_prompt_summary,
+    parse_resume_messages, parse_session_list, parse_steer_result, parse_stream_event, parse_todos,
+    parse_update_feed, parse_update_feed_url, prompt_command_for, recent_input_history,
+    relative_age, run_command, shorten_home, skyline_braille, skyline_graphics_wanted,
+    skyline_lines, skyline_mode, slash_suggestions_merged, spawn_streaming_command,
+    tool_input_summary, usage_stats_params, user_mcp_config_path, with_mcp_servers, wrap_display,
+    AppConfig, AppServerConn, AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus,
+    DbBaseline, DebugLog, DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand,
+    LeaderAction, LiveToolChip, MdLineKind, SessionControls, SessionRow, SkylineMode, SpanRole,
+    SteerOutcome, StreamEvent, StreamingJob, TodoItem, ToolChipStatus, TurnDelta, UiConfig,
+    UpdateFeed, SKYLINE_LOGO_W,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -60,6 +64,15 @@ const SUGGESTION_LIMIT: usize = 8;
 const FOLD_THRESHOLD: usize = 24;
 const FOLD_HEAD: usize = 8;
 const HISTORY_SEARCH_LIMIT: usize = 8;
+/// OSC52 clipboard payload cap (base64 bytes) — larger sequences get
+/// truncated or rejected by terminals.
+const OSC52_MAX_B64: usize = 100_000;
+/// Turns/jobs longer than this ring the terminal bell at finalize
+/// (`notify = off` in the config file opts out).
+const NOTIFY_AFTER_SECS: f32 = 30.0;
+/// Resume history replay: how many messages, and the per-message char cap.
+const REPLAY_LIMIT: usize = 6;
+const REPLAY_CAP: usize = 400;
 
 /// The ZCODE block wordmark. Rendered bright (`█` blocks) over a dim/shadow
 /// secondary layer; the responsive Beijing-skyline wireframe (`skyline_lines`)
@@ -150,6 +163,11 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
             _ => {}
         }
     }
+
+    // Clean exit with a live streaming session: tell the kernel it is done
+    // with (best-effort fire-and-forget; the process-group kill in Drop
+    // remains the backstop for the connection itself).
+    state.close_app_session();
 
     Ok(())
 }
@@ -674,6 +692,11 @@ struct UiState {
     /// In-flight fire-and-forget control requests (setMode/setModel/…), by
     /// request id, so an error response can name the command it failed.
     control_requests: std::collections::HashMap<u64, ControlReq>,
+    /// ZCODE_TUI_LOG state-transition log (protocol traffic is logged by the
+    /// connection itself); None = disabled, zero overhead.
+    debug_log: Option<DebugLog>,
+    /// Turn-complete bell (>30s turns); `notify = off` in the config disables.
+    notify_enabled: bool,
 }
 
 /// The approval overlay's state: the parsed request, the freshest envelope id
@@ -703,6 +726,7 @@ impl UiState {
         let ui_config = load_ui_config();
         let mouse_enabled =
             env::var_os("ZCODE_TUI_NO_MOUSE").is_none() && ui_config.mouse != Some(false);
+        let notify_enabled = ui_config.notify != Some(false);
         let app_mode = if app_server_enabled(|key| env::var(key).ok()) {
             AppMode::Ready
         } else {
@@ -755,6 +779,16 @@ impl UiState {
             kernel_commands: Vec::new(),
             todos: Vec::new(),
             control_requests: std::collections::HashMap::new(),
+            debug_log: DebugLog::from_env(),
+            notify_enabled,
+        }
+    }
+
+    /// State-transition line into the ZCODE_TUI_LOG debug log (no-op when
+    /// the env var is unset). Protocol traffic is logged by AppServerConn.
+    fn log_debug(&self, text: &str) {
+        if let Some(log) = &self.debug_log {
+            log.line(text);
         }
     }
 
@@ -1061,8 +1095,9 @@ impl UiState {
             }
             KeyCode::Char('x') if ctrl => {
                 self.leader_pending = true;
-                self.status = "leader: p palette | h help | e editor | x clear | u input | q quit"
-                    .to_string();
+                self.status =
+                    "leader: p palette | h help | e editor | x clear | u input | y copy | q quit"
+                        .to_string();
             }
             KeyCode::Char('g') if ctrl => return Some(UiEffect::Editor),
             KeyCode::Char('j') if ctrl => self.insert_char('\n'),
@@ -1187,6 +1222,7 @@ impl UiState {
                 self.clear_input();
                 self.status = "input cleared".to_string();
             }
+            Some(LeaderAction::CopyLastReply) => self.copy_last_reply(),
             Some(LeaderAction::Quit) => return Some(UiEffect::Quit),
             None => self.status = "unknown leader key".to_string(),
         }
@@ -1330,6 +1366,10 @@ impl UiState {
                 self.update_kernel();
                 return None;
             }
+            Some("copy") => {
+                self.copy_last_reply();
+                return None;
+            }
             Some("resume") => {
                 self.set_resume(command.get(1).map(String::as_str));
                 return None;
@@ -1433,8 +1473,14 @@ impl UiState {
             Some(session_id) => {
                 // Drop any stray tail from a previously cancelled turn.
                 self.drain_app_events();
+                // @file mentions ride along as attachments (streaming path
+                // equivalent of the classic --attach translation).
+                let attachments = self.app_attachments_for(prompt);
                 let conn = self.app_conn.as_mut().expect("app_conn set above");
-                let send_id = conn.send("session/send", app_send_params(&session_id, prompt))?;
+                let send_id = conn.send(
+                    "session/send",
+                    app_send_params_with_attachments(&session_id, prompt, &attachments),
+                )?;
                 self.begin_app_turn(send_id);
             }
             // First prompt of the run: kick off the (resume|create)+subscribe
@@ -1452,15 +1498,22 @@ impl UiState {
                 // Built from the kernel's own config.json; None falls back to
                 // a bare resume + the create-fallback path.
                 let runtime = resume.as_ref().and_then(|_| load_runtime_model());
+                // Project + user MCP config rides along on create AND resume
+                // (the kernel never reads project .mcp.json on its own).
+                let mcp_servers = self.mcp_servers_for_session();
                 let conn = self.app_conn.as_mut().expect("app_conn set above");
                 let phase = match resume {
                     Some(session_id) => ConnectPhase::Resume(conn.send(
                         "session/resume",
-                        app_resume_params(&session_id, runtime.as_ref()),
+                        with_mcp_servers(
+                            app_resume_params(&session_id, runtime.as_ref()),
+                            mcp_servers,
+                        ),
                     )?),
-                    None => ConnectPhase::Create(
-                        conn.send("session/create", app_create_params(&workspace))?,
-                    ),
+                    None => ConnectPhase::Create(conn.send(
+                        "session/create",
+                        with_mcp_servers(app_create_params(&workspace), mcp_servers),
+                    )?),
                 };
                 self.app_connect = Some(AppConnect {
                     phase,
@@ -1493,6 +1546,78 @@ impl UiState {
             .unwrap_or_else(|_| self.resolve_cwd())
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// `@file` mentions of a streaming prompt as `session/send` attachments —
+    /// same extraction + traversal vetting as the classic `--attach` path.
+    fn app_attachments_for(&self, prompt: &str) -> Vec<serde_json::Value> {
+        let cwd = self.resolve_cwd();
+        let mentions = extract_file_mentions(prompt, &cwd);
+        build_send_attachments(&mentions, &cwd)
+    }
+
+    /// `mcpServers[]` for `session/create`/`resume`, re-read from the project
+    /// `.mcp.json` + user config at handshake time (the kernel itself never
+    /// loads project MCP config — pinned live 2026-07-07). None when empty.
+    fn mcp_servers_for_session(&self) -> Option<serde_json::Value> {
+        let project = mcp_config_path(&self.config)
+            .ok()
+            .and_then(|path| load_mcp_config(&path).ok())
+            .unwrap_or_default();
+        let user = user_mcp_config_path()
+            .ok()
+            .and_then(|path| load_mcp_config(&path).ok())
+            .unwrap_or_default();
+        mcp_servers_param(&project, &user)
+    }
+
+    /// Best-effort `session/close` for a live session being discarded
+    /// (/new, clean exit). Fire-and-forget: errors and the response are
+    /// ignored; a dead connection skips silently.
+    fn close_app_session(&mut self) {
+        if let (Some(conn), Some(session_id)) = (self.app_conn.as_mut(), self.app_session.clone()) {
+            if conn.is_alive() {
+                let _ = conn.send("session/close", app_close_params(&session_id));
+                self.log_debug("session/close sent (discarding live session)");
+            }
+        }
+    }
+
+    /// Copy the last assistant reply to the system clipboard via OSC52
+    /// (Ctrl+X y or /copy). Written straight to the raw stdout the TUI owns;
+    /// terminals consume the sequence without displaying anything. tmux
+    /// needs `set -g set-clipboard on` (documented in the README).
+    fn copy_last_reply(&mut self) {
+        let text = self
+            .log
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == LogKind::Assistant && !entry.text.trim().is_empty())
+            .map(|entry| entry.text.clone());
+        let Some(text) = text else {
+            self.status = "nothing to copy yet".to_string();
+            return;
+        };
+        match osc52_copy_sequence(&text, OSC52_MAX_B64) {
+            Some(sequence) => {
+                let mut out = io::stdout();
+                let _ = out.write_all(sequence.as_bytes());
+                let _ = out.flush();
+                self.status = "copied last reply (OSC52)".to_string();
+            }
+            None => self.status = "nothing to copy yet".to_string(),
+        }
+    }
+
+    /// Terminal bell when a turn/job that ran past the threshold finalizes
+    /// (opt-out via `notify = off`); cancelled turns stay silent.
+    fn ring_bell_if_long(&self, elapsed_secs: f32, cancelled: bool) {
+        if cancelled || !self.notify_enabled || elapsed_secs <= NOTIFY_AFTER_SECS {
+            return;
+        }
+        let mut out = io::stdout();
+        let _ = out.write_all(b"\x07");
+        let _ = out.flush();
     }
 
     /// Open the assistant turn: text and tool entries are created lazily as
@@ -1547,9 +1672,14 @@ impl UiState {
                 if matches!(stage, ConnectStage::Resume) {
                     self.config.resume = None;
                     self.push_system(&format!("resume failed ({why}); starting a fresh session"));
+                    self.log_debug("handshake: resume failed, falling back to create");
                     let workspace = self.app_workspace();
+                    let mcp_servers = self.mcp_servers_for_session();
                     let conn = self.app_conn.as_mut().expect("alive checked above");
-                    match conn.send("session/create", app_create_params(&workspace)) {
+                    match conn.send(
+                        "session/create",
+                        with_mcp_servers(app_create_params(&workspace), mcp_servers),
+                    ) {
                         Ok(create_id) => {
                             if let Some(connect) = &mut self.app_connect {
                                 connect.phase = ConnectPhase::Create(create_id);
@@ -1590,6 +1720,18 @@ impl UiState {
                         self.push_system(&format!(
                             "resumed {session_id} ({count} messages of history)"
                         ));
+                        // Compact history replay: the last few exchanges as
+                        // dim one-liners under the header, so the resumed
+                        // context is visible without re-rendering the turn.
+                        for message in parse_resume_messages(&result, REPLAY_LIMIT, REPLAY_CAP) {
+                            let prefix = if message.role == "user" {
+                                "› "
+                            } else {
+                                "· "
+                            };
+                            let flat = message.preview.replace('\n', " ");
+                            self.push_system(&format!("{prefix}{flat}"));
+                        }
                         self.refresh_banner();
                     }
                     let conn = self.app_conn.as_mut().expect("alive checked above");
@@ -1621,10 +1763,18 @@ impl UiState {
                             ControlReq::Command("/mode"),
                         );
                     }
+                    // First-prompt send carries @file attachments too (the
+                    // fast path does the same for later prompts).
+                    let attachments = self.app_attachments_for(&connect.prompt);
+                    self.log_debug("handshake: subscribed, sending first prompt");
                     let conn = self.app_conn.as_mut().expect("alive checked above");
                     match conn.send(
                         "session/send",
-                        app_send_params(&session_id, &connect.prompt),
+                        app_send_params_with_attachments(
+                            &session_id,
+                            &connect.prompt,
+                            &attachments,
+                        ),
                     ) {
                         Ok(send_id) => self.begin_app_turn(send_id),
                         Err(err) => {
@@ -1668,6 +1818,7 @@ impl UiState {
 
     /// Retire the app-server path for the rest of this run and note it once.
     fn downgrade_app_server(&mut self, reason: AppServerUnavailable) {
+        self.log_debug(&format!("downgrade: {reason}"));
         self.app_mode = AppMode::Downgraded;
         self.app_turn = None;
         self.app_connect = None;
@@ -1793,6 +1944,7 @@ echo "feed: $FEED"
 YML=$(curl -fsSL --max-time 15 "$FEED")
 VER=$(printf '%s' "$YML" | sed -n 's/^version:[[:space:]]*//p' | head -1)
 DEB=$(printf '%s' "$YML" | sed -n 's/^[[:space:]]*-*[[:space:]]*url:[[:space:]]*//p' | grep '\.deb$' | head -1)
+DEB=$(basename "$DEB")
 SHA=$(printf '%s' "$YML" | awk '/url:.*\.deb$/{{f=1;next}} f&&/sha512:/{{sub(/^[[:space:]]*sha512:[[:space:]]*/,"");print;exit}}')
 INSTALLED=$(dpkg-query -W -f='${{Version}}' zcode 2>/dev/null | cut -d- -f1 || echo 0)
 echo "installed: $INSTALLED   latest: $VER"
@@ -2148,12 +2300,26 @@ fi"#
             self.log
                 .push(LogLine::new(LogKind::Assistant, "(no output)"));
         }
+        // Files-changed turn summary from checkpoint.created events (one per
+        // gated write; fileCount summed). Shown even on cancel — the files
+        // DID change and /diff is exactly what the user wants next.
+        if turn.turn.files_changed > 0 {
+            self.push_system(&format!(
+                "{} file(s) changed · /diff to review",
+                turn.turn.files_changed
+            ));
+        }
         if turn.cancel_requested {
             self.status = "cancelled".to_string();
             self.push_system("app-server turn cancelled");
         } else {
             self.status = format!("done ({elapsed:.1}s)");
         }
+        self.log_debug(&format!(
+            "turn finalized ({elapsed:.1}s, cancelled={})",
+            turn.cancel_requested
+        ));
+        self.ring_bell_if_long(elapsed, turn.cancel_requested);
         // A turn landed in a live kernel session: keep continuity by reusing
         // the same sessionId for later prompts (already stored in app_session).
         self.session_active = true;
@@ -2946,6 +3112,11 @@ fi"#
         let (success, detail) = active
             .finished
             .unwrap_or((false, "job ended unexpectedly".to_string()));
+        // Classic-path prompt jobs get the same >30s completion bell as
+        // streaming turns (shell/diff jobs stay silent).
+        if active.kind == LogKind::Assistant {
+            self.ring_bell_if_long(elapsed, active.cancel_requested);
+        }
         if active.cancel_requested {
             self.status = "cancelled".to_string();
             self.push_system(&format!("{} cancelled", active.label));
@@ -3086,8 +3257,10 @@ fi"#
         self.config.resume = None;
         self.config.continue_session = false;
         self.session_active = false;
-        // Drop the app-server session so the next prompt creates a fresh one;
-        // the connection itself is reused.
+        // Tell the kernel the discarded session is done with (best-effort),
+        // then drop it so the next prompt creates a fresh one; the
+        // connection itself is reused.
+        self.close_app_session();
         self.app_session = None;
         self.clear_log();
         self.push_system("fresh session: context resets on the next prompt");
@@ -4136,6 +4309,18 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             right.push_str(" · /compact or /new?");
         }
         right.push_str(" · ");
+    }
+    // Current model + permission mode: authoritative from the kernel's state
+    // pushes (SessionControls cache); before the first push fall back to the
+    // configured mode alone (never guess a model name).
+    let mode = state
+        .controls
+        .mode
+        .clone()
+        .unwrap_or_else(|| display_mode(&state.config).to_string());
+    match &state.controls.model_current {
+        Some(model) => right.push_str(&format!("{model} · {mode} · ")),
+        None => right.push_str(&format!("{mode} · ")),
     }
     right.push_str(&format!("auth {} ", state.auth_label));
     frame.render_widget(
