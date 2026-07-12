@@ -2137,6 +2137,21 @@ fi"#
                     // Retain checkpoint ids as /rewind targets (the turn
                     // itself only counts them for the files-changed note).
                     self.capture_rewind_event(&event);
+                    // ZCode 3.3.4 background tasks (subagent/bash backgrounding).
+                    // Surface lifecycle events as a safe system line when an
+                    // app-server version emits them.
+                    if matches!(
+                        event.kind.as_str(),
+                        "background_task_started"
+                            | "background_task_updated"
+                            | "background_task_completed"
+                    ) {
+                        self.log.push(LogLine::new(
+                            LogKind::System,
+                            &format_background_task(&event),
+                        ));
+                        return;
+                    }
                     let Some(turn) = &mut self.app_turn else {
                         return;
                     };
@@ -4537,6 +4552,39 @@ fn log_to_items(
                     items.push(ListItem::new(Line::from(spans)));
                     continue;
                 }
+                if styled.kind == MdLineKind::CodeBlock {
+                    // Editor-style panel: a 2-col inset to align under prose, an
+                    // accent left rule, then a uniform code_bg band padded flush
+                    // to the right edge — so the block reads as one container
+                    // instead of ragged, character-hugging highlight.
+                    let bar_style = if theme.plain {
+                        Style::default()
+                    } else {
+                        theme.accent_dim().bg(theme.code_bg)
+                    };
+                    let mut row = vec![
+                        Span::raw("  ".to_string()),
+                        Span::styled("▎".to_string(), bar_style),
+                        Span::styled(" ".to_string(), theme.code()),
+                    ];
+                    let mut used = 2usize; // left rule + lead space, inside the band
+                    for span in styled.spans {
+                        let mut style = md_style(theme, styled.kind, span.role);
+                        if let Some((r, g, b)) = span.color {
+                            if !theme.plain {
+                                style = style.fg(Color::Rgb(r, g, b));
+                            }
+                        }
+                        used += span.text.as_str().width();
+                        row.push(Span::styled(span.text, style));
+                    }
+                    let pad = content_width.saturating_sub(used);
+                    if pad > 0 && !theme.plain {
+                        row.push(Span::styled(" ".repeat(pad), theme.code()));
+                    }
+                    items.push(ListItem::new(Line::from(row)));
+                    continue;
+                }
                 for span in styled.spans {
                     let mut style = md_style(theme, styled.kind, span.role);
                     if let Some((r, g, b)) = span.color {
@@ -4596,14 +4644,45 @@ fn log_to_items(
     items
 }
 
+/// One-line summary of a `background_task_*` event for a system transcript line.
+fn format_background_task(event: &AppServerEvent) -> String {
+    let verb = match event.kind.as_str() {
+        "background_task_started" => "started",
+        "background_task_completed" => event.status.as_deref().unwrap_or("completed"),
+        _ => "updated",
+    };
+    let tool = event.tool_name.as_deref().unwrap_or("task");
+    let mut line = format!("background {tool} {verb}");
+    if let Some(task_id) = &event.task_id {
+        let short: String = task_id.chars().take(17).collect();
+        if task_id.chars().count() > 20 {
+            line.push_str(&format!(" · {short}…"));
+        } else {
+            line.push_str(&format!(" · {task_id}"));
+        }
+    }
+    if let Some(pid) = event.pid {
+        line.push_str(&format!(" (pid {pid})"));
+    }
+    line
+}
+
 fn md_style(theme: &Theme, kind: MdLineKind, role: SpanRole) -> Style {
     match kind {
-        MdLineKind::Heading => theme.text().bold(),
+        MdLineKind::Heading => theme.accent().bold(),
         MdLineKind::CodeBlock => {
-            if role == SpanRole::Marker {
+            // Gutter numbers and the language tag (Marker) are dim, but every
+            // cell of a code line sits on the code band so the panel stays
+            // seamless — no default-bg holes punched through the fill.
+            let base = if role == SpanRole::Marker {
                 theme.dim()
             } else {
                 theme.code()
+            };
+            if theme.plain {
+                base
+            } else {
+                base.bg(theme.code_bg)
             }
         }
         MdLineKind::DiffBlock => theme.text(),

@@ -1709,9 +1709,13 @@ pub fn markdown_lines(input: &str, width: usize) -> Vec<StyledLine> {
                     CodeBlockKind::Fenced(lang) => lang.trim().to_string(),
                     CodeBlockKind::Indented => String::new(),
                 };
-                if !code_lang.is_empty() {
+                // Language tag as a header row of the panel; the accent left
+                // rule (drawn by the renderer) is the block marker now, so the
+                // old `· ` prefix is dropped. Diff fences color their own lines,
+                // so they get no banded header.
+                if !code_lang.is_empty() && !code_lang.eq_ignore_ascii_case("diff") {
                     out.push(StyledLine {
-                        spans: vec![StyledSpan::new(format!("· {code_lang}"), SpanRole::Marker)],
+                        spans: vec![StyledSpan::new(code_lang.clone(), SpanRole::Marker)],
                         kind: MdLineKind::CodeBlock,
                     });
                 }
@@ -3852,6 +3856,10 @@ pub fn app_state_controls(params: &serde_json::Value) -> Option<SessionControls>
 /// A decoded inbound line: a response to one of our requests, a session
 /// event (the token stream), a session-level state update, a server→client
 /// request (the kernel asking *us* something), or ignorable.
+// The Event variant (AppServerEvent) is the largest, but every message is
+// decoded and matched immediately (never stored in bulk), so boxing it would
+// only add a heap allocation per streamed event on the hot path.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppServerMessage {
     /// Response to request `id`; `error` set means the request failed.
@@ -3913,6 +3921,16 @@ pub struct AppServerEvent {
     /// `payload.reason` (`rewind.triggered`) — e.g. "target_in_active_chain",
     /// "target_checkpoint_not_found".
     pub reason: Option<String>,
+    /// `payload.taskId` — `background_task_*` events used by ZCode 3.3.4
+    /// subagent/bash backgrounding. Decoded so future app-server deliveries are
+    /// never silently dropped.
+    pub task_id: Option<String>,
+    /// `payload.command` — the backgrounded shell command.
+    pub command: Option<String>,
+    /// `payload.status` — background task status (running|completed|lost…).
+    pub status: Option<String>,
+    /// `payload.pid` — background task process id.
+    pub pid: Option<u64>,
 }
 
 /// Decode a single inbound protocol line. Unparseable lines -> None (skip).
@@ -3992,6 +4010,10 @@ pub fn decode_app_message(line: &str) -> Option<AppServerMessage> {
                 target_message_id: str_field("targetMessageId").or_else(|| str_field("messageId")),
                 strategy: str_field("strategy"),
                 reason: str_field("reason"),
+                task_id: str_field("taskId"),
+                command: str_field("command"),
+                status: str_field("status"),
+                pid: payload.get("pid").and_then(serde_json::Value::as_u64),
             }))
         }
         Some("state.updated") => Some(AppServerMessage::StateUpdated(

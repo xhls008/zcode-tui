@@ -2407,3 +2407,21 @@ fn conversation_scope_targets_translate_to_message_kind() {
         None
     );
 }
+
+#[test]
+fn decodes_background_task_event() {
+    use zcode_tui::{decode_app_message, AppServerMessage};
+    // ZCode 3.3.4 background tasks: the event must decode so a future
+    // app-server delivery is never silently dropped.
+    let line = r#"{"method":"session/event","params":{"type":"background_task_started","payload":{"taskId":"bg-1","toolName":"Bash","toolCallId":"t9","command":"sleep 12","status":"running","pid":4242}}}"#;
+    match decode_app_message(line).expect("decodes") {
+        AppServerMessage::Event(event) => {
+            assert_eq!(event.kind, "background_task_started");
+            assert_eq!(event.command.as_deref(), Some("sleep 12"));
+            assert_eq!(event.status.as_deref(), Some("running"));
+            assert_eq!(event.pid, Some(4242));
+            assert_eq!(event.task_id.as_deref(), Some("bg-1"));
+        }
+        other => panic!("expected Event, got {other:?}"),
+    }
+}
