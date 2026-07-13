@@ -6,6 +6,24 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-07-13
+
+### 新增
+
+- **代码块面板样式**:普通 fenced code block 现在使用缩进、强调色左边线和
+  填满内容宽度的 `code_bg` 背景，语言标签作为面板首行显示；`diff` fence
+  继续使用逐行增删配色，不额外增加语言标题。Markdown 标题同步使用强调色。
+- **后台任务生命周期兼容**:解码 ZCode 3.3.4 的
+  `background_task_started`、`background_task_updated`、
+  `background_task_completed` 事件及 `taskId/status/pid` 字段。当
+  app-server 下发这些 session-level 事件时，以工具名、短 task ID、状态和
+  PID 显示安全系统提示，不重复回显完整 shell command。
+
+### 验证
+
+- 已在 ZCode 3.3.4 / CLI kernel 0.15.2 上验证 app-server 流式会话、
+  session resume 和后台 Bash 的标准 Bash/Read tool event 流程。
+
 ## [0.5.2] - 2026-07-10
 
 ### 新增(openspec 变更 session-rewind,协议形状 2026-07-07 对真内核 0.15.0 实弹钉死)
