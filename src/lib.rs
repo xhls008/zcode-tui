@@ -3148,7 +3148,10 @@ pub fn mcp_servers_param(project: &McpConfig, user: &McpConfig) -> Option<serde_
 pub fn build_runtime_model(config_json: &str, generated_at: u64) -> Option<serde_json::Value> {
     let config: serde_json::Value = serde_json::from_str(config_json).ok()?;
     // `model.main` is "provider/modelId".
-    let main = config.pointer("/model/main")?.as_str()?;
+    let main = config
+        .pointer("/model/main")
+        .and_then(|v| v.as_str())
+        .or_else(|| config.get("model").and_then(|v| v.as_str()))?;
     let (provider_id, model_id) = main.split_once('/')?;
     let provider = config.pointer(&format!("/provider/{provider_id}"))?;
     let kind = provider.get("kind")?.as_str()?;
