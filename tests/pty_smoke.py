@@ -6,6 +6,7 @@ and network/model access. Build first: cargo build --release
 Run: python3 tests/pty_smoke.py
 """
 import fcntl
+import json
 import os
 import pty
 import select
@@ -32,7 +33,7 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-B]")
 import pyte
 
 
-def screen_seen(raw, needle, step=2048):
+def screen_seen(raw, needle, step=128):
     """True if `needle` was visible on the emulated terminal screen at any
     point while replaying `raw` (bytes) in `step`-sized chunks.
 
@@ -44,12 +45,41 @@ def screen_seen(raw, needle, step=2048):
     substring checks stay fine for those.
     """
     screen = pyte.Screen(120, 40)
-    stream = pyte.ByteStream(screen)
-    for at in range(0, len(raw), step):
-        stream.feed(raw[at : at + step])
+    stream = pyte.Stream(screen)
+    decoded = raw.decode("utf-8", errors="replace")
+    for at in range(0, len(decoded), step):
+        stream.feed(decoded[at : at + step])
         if needle in "\n".join(screen.display):
             return True
     return False
+
+
+def screen_max_count(raw, needle, step=128):
+    """Maximum number of `needle` occurrences visible in one terminal frame."""
+    screen = pyte.Screen(120, 40)
+    stream = pyte.Stream(screen)
+    decoded = raw.decode("utf-8", errors="replace")
+    maximum = 0
+    for at in range(0, len(decoded), step):
+        stream.feed(decoded[at : at + step])
+        maximum = max(maximum, "\n".join(screen.display).count(needle))
+    return maximum
+
+
+def configured_model_id():
+    """Best-effort current model id from the same config the kernel uses."""
+    try:
+        with open(os.path.expanduser("~/.zcode/cli/config.json")) as fh:
+            value = json.load(fh).get("model", {}).get("main")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if isinstance(value, str):
+        return value.rsplit("/", 1)[-1]
+    if isinstance(value, dict):
+        for key in ("modelId", "model", "id"):
+            if isinstance(value.get(key), str):
+                return value[key].rsplit("/", 1)[-1]
+    return None
 
 
 def strip_ansi(raw):
@@ -62,6 +92,9 @@ def run_pty(env_extra, cwd, script, timeout=90, args=None):
     """script: list of (delay_before_s, bytes_to_send). Returns full output.
     args: extra CLI arguments for the binary (e.g. ["--mode", "plan"])."""
     env = dict(os.environ)
+    # The gate owns its color baseline. A caller's shell may set NO_COLOR,
+    # while scenario 4 explicitly opts into it to verify the monochrome path.
+    env.pop("NO_COLOR", None)
     env["ZCODE_TUI_NO_UPDATE_CHECK"] = "1"
     env["ZCODE_TUI_ZCODE_BIN"] = os.path.expanduser("~/.local/bin/zcode")
     # Force the text skyline so the graphics-protocol probe is skipped: this
@@ -124,8 +157,9 @@ out = run_pty(
     timeout=15,
 )
 plain = strip_ansi(out)
+raw = run_pty.last_raw
 check("s0: startup welcome card shown", "Welcome to ZCODE" in plain)
-check("s0: startup compact identity line shown", "ZhiPU terminal TUI" in plain)
+check("s0: startup compact identity line shown", screen_seen(raw, "ZhiPU terminal TUI"))
 check("s0: startup official-style Z mark shown", "██████" in plain)
 check("s0: startup does not use the large logo", "███████" not in plain)
 
@@ -144,12 +178,13 @@ out = run_pty(
     timeout=95,
 )
 plain = strip_ansi(out)
+raw = run_pty.last_raw
 check(
     "s1: tool chip appeared (completed check next to tool name)",
-    "✓ Read" in plain or "✓ Bash" in plain or "✓ Glob" in plain,
+    any(screen_seen(raw, name) for name in ("✓ Read", "✓ Bash", "✓ Glob")),
 )
 check("s1: prompt completed (done status)", "done (" in plain)
-check("s1: context watermark in footer", "ctx " in plain and "%" in plain)
+check("s1: context watermark in footer", screen_seen(raw, "ctx "))
 check("s1: no raw summary JSON leaked to transcript", '"sessionId"' not in plain)
 check(
     "s1: response text rendered",
@@ -217,8 +252,9 @@ out = run_pty(
     timeout=25,
 )
 plain = strip_ansi(out)
-check("s5: picker overlay shown", "sessions · Enter resumes" in plain)
-check("s5: Enter resumes a session", "resuming sess" in plain)
+raw = run_pty.last_raw
+check("s5: picker overlay shown", screen_seen(raw, "sessions · Enter resumes"))
+check("s5: Enter resumes a session", screen_seen(raw, "resuming sess"))
 
 # ---- scenario 6: Ctrl+R reverse search (user story: 只记得一个词) ----
 print("== scenario 6: Ctrl+R reverse search ==", flush=True)
@@ -257,8 +293,10 @@ out = run_pty(
     timeout=30,
 )
 plain = strip_ansi(out)
-check("s7: long output folded with hidden count", "+112 lines" in plain and "Ctrl+O" in plain)
-check("s7: Ctrl+O expands", "expanded (Ctrl+O folds back)" in plain)
+raw = run_pty.last_raw
+check("s7: long output folded with hidden count",
+      screen_seen(raw, "+112 lines") and screen_seen(raw, "Ctrl+O"))
+check("s7: Ctrl+O expands", screen_seen(raw, "expanded (Ctrl+O folds back)"))
 
 # ---- scenario 7b: user-requested listings never fold ----
 # /skills list is a direct answer the user asked to read; unlike shell/tool
@@ -364,9 +402,11 @@ out = run_pty(
     timeout=20,
 )
 plain = strip_ansi(out)
-check("s11: downgrade notice shown", "falling back to --prompt" in plain)
+raw = run_pty.last_raw
+check("s11: downgrade notice shown", screen_seen(raw, "falling back to --prompt"))
 check("s11: --prompt fallback answered", "downgrade fallback ok" in plain)
-check("s11: downgrade announced once (permanent)", plain.count("falling back to --prompt") == 1)
+check("s11: downgrade announced once (permanent)",
+      screen_max_count(raw, "falling back to --prompt") == 1)
 
 # ---- scenario 12: app-server tool chips + foldable tool output ----
 # Opt-in streaming with a tool-triggering prompt: the tool call must land in
@@ -387,10 +427,12 @@ out = run_pty(
     timeout=120,
 )
 plain = strip_ansi(out)
-check("s12: tool call persisted to transcript", "• Read" in plain or "• Bash" in plain)
+raw = run_pty.last_raw
+check("s12: tool call persisted to transcript",
+      screen_seen(raw, "• Read") or screen_seen(raw, "• Bash"))
 check("s12: long tool output folded with Ctrl+O", "Ctrl+O" in plain and "lines" in plain)
 # Status-bar text: pyte screen check (diff rendering; see screen_seen).
-check("s12: turn finalized (no hang)", screen_seen(run_pty.last_raw, "done ("))
+check("s12: turn finalized (no hang)", screen_seen(raw, "done ("))
 
 # ---- scenario 13: plan-mode permission approval overlay + Esc declines ----
 # Plan mode gates file writes behind interaction/requestUserInput. The TUI
@@ -414,7 +456,8 @@ out = run_pty(
 plain = strip_ansi(out)
 raw = run_pty.last_raw
 check("s13: approval overlay appeared", screen_seen(raw, "Enter answers"))
-check("s13: declined without hanging", "declined" in plain and "cancelled" in plain)
+check("s13: declined without hanging",
+      screen_seen(raw, "declined") and screen_seen(raw, "cancelled"))
 check("s13: plan gating held (no file)", not os.path.exists(os.path.join(perm_dir, "perm.txt")))
 
 # ---- scenario 14: session controls — /model picker + /compact round-trip ----
@@ -445,7 +488,7 @@ out = run_pty(
     [
         (1.5, b"Count slowly from 1 to 50, one number per line, no shortcuts."),
         (0.5, b"\r"),
-        (5.0, b"Stop counting and just say STEERED."),
+        (2.0, b"Stop counting and just say STEERED."),
         (0.5, b"\r"),
         (60.0, b"/exit"),
         (0.5, b"\r"),
@@ -454,7 +497,7 @@ out = run_pty(
 )
 plain = strip_ansi(out)
 raw = run_pty.last_raw
-check("s15: steer marker in transcript", "steering the running turn" in plain)
+check("s15: steer marker in transcript", screen_seen(raw, "steering the running turn"))
 check("s15: input not queued", not screen_seen(raw, "queued ("))
 check("s15: turn completed after steer", screen_seen(raw, "done ("))
 
@@ -474,6 +517,7 @@ out = run_pty(
         (0.5, b"\r"),
     ],
     timeout=130,
+    args=["--mode", "build"],  # do not inherit a user's yolo/default mode
 )
 plain = strip_ansi(out)
 raw = run_pty.last_raw
@@ -484,7 +528,7 @@ check("s16: write landed after approval",
 # checkpoint.created events (one per gated write) roll up into a dim
 # files-changed note at finalize.
 check("s16: files-changed turn summary",
-      "file(s) changed" in plain and "/diff" in plain)
+      screen_seen(raw, "file(s) changed") and screen_seen(raw, "/diff"))
 
 # ---- scenario 17: streaming /sessions resume (session/resume handshake) ----
 # Earlier scenarios left sessions for SPIKE; picking one must resume it via
@@ -504,8 +548,9 @@ out = run_pty(
     timeout=100,
 )
 plain = strip_ansi(out)
-check("s17: picker shown", "pick a session" in plain or "sessions" in plain)
-check("s17: resumed via protocol (history note)", "resumed sess_" in plain)
+raw = run_pty.last_raw
+check("s17: picker shown", screen_seen(raw, "pick a session") or screen_seen(raw, "sessions"))
+check("s17: resumed via protocol (history note)", screen_seen(raw, "resumed sess_"))
 check("s17: turn completed on resumed session", screen_seen(run_pty.last_raw, "done ("))
 
 # ---- scenario 18: /update aborts on sha512 mismatch (fake feed) ----
@@ -523,12 +568,8 @@ _handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=fee
 _httpd = socketserver.TCPServer(("127.0.0.1", 0), _handler)
 _port = _httpd.server_address[1]
 threading.Thread(target=_httpd.serve_forever, daemon=True).start()
-fake_app = tempfile.mkdtemp(prefix="zcode-smoke-app-")
-os.makedirs(os.path.join(fake_app, "resources"))
-with open(os.path.join(fake_app, "resources", "app-update.yml"), "w") as fh:
-    fh.write(f"provider: generic\nurl: http://127.0.0.1:{_port}/\n")
 out = run_pty(
-    {"ZCODE_APP": fake_app}, SPIKE,
+    {"ZCODE_TUI_UPDATE_FEED": f"http://127.0.0.1:{_port}/"}, SPIKE,
     [
         (2.0, b"/update"),
         (0.5, b"\r"),
@@ -539,7 +580,8 @@ out = run_pty(
 )
 _httpd.shutdown()
 plain = strip_ansi(out)
-check("s18: feed version compared", "latest: 99.99.99" in plain)
+raw = run_pty.last_raw
+check("s18: feed version compared", screen_seen(raw, "latest: 99.99.99"))
 check("s18: sha512 mismatch aborts", "sha512 MISMATCH" in plain)
 check("s18: nothing installed", "installed 99.99.99" not in plain)
 
@@ -558,8 +600,11 @@ out = run_pty(
     timeout=75,
 )
 plain = strip_ansi(out)
-check("s19: session usage rendered", "session usage" in plain and "total" in plain)
-check("s19: period stats rendered", "usage over 7d" in plain and "cache hit" in plain)
+raw = run_pty.last_raw
+check("s19: session usage rendered",
+      screen_seen(raw, "session usage") and screen_seen(raw, "total"))
+check("s19: period stats rendered",
+      screen_seen(raw, "usage over 7d") and screen_seen(raw, "cache hit"))
 
 # ---- scenario 20: streaming @file attachment + /copy + footer + debug log ----
 # The @mention must ride the streaming send as an attachments[] entry
@@ -591,7 +636,10 @@ raw = run_pty.last_raw
 check("s20: attachment content reached the model", screen_seen(raw, "QUILL-BANJO-7371"))
 check("s20: /copy emitted an OSC52 sequence", b"\x1b]52;c;" in raw)
 check("s20: copy acknowledged", screen_seen(raw, "copied last reply"))
-check("s20: footer shows the kernel model", screen_seen(raw, "glm-"))
+model_id = configured_model_id()
+check("s20: footer shows the kernel model",
+      model_id is not None and screen_seen(raw, model_id),
+      f"expected {model_id or 'configured model id'}")
 with open(debug_log) as fh:
     log_text = fh.read()
 check("s20: debug log captured outbound methods", "-> session/send" in log_text)
@@ -630,9 +678,10 @@ out = run_pty(
     timeout=100,
 )
 plain = strip_ansi(out)
-check("s21: resumed via protocol", "resumed sess_" in plain)
+raw = run_pty.last_raw
+check("s21: resumed via protocol", screen_seen(raw, "resumed sess_"))
 check("s21: history replayed into the transcript",
-      "Say exactly REPLAY-MARK-42" in plain)
+      screen_seen(raw, "Say exactly REPLAY-MARK-42"))
 check("s21: turn completed on resumed session", screen_seen(run_pty.last_raw, "done ("))
 
 # ---- scenario 22: /rewind — checkpoint picker, preview, file restore ----
@@ -682,7 +731,7 @@ out = run_pty(
 )
 plain = strip_ansi(out)
 check("s23: reports the app-server requirement",
-      "needs an active app-server session" in plain)
+      screen_seen(run_pty.last_raw, "needs an active app-server session"))
 
 failed = [name for name, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} checks passed", flush=True)

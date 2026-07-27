@@ -6,6 +6,33 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ## [Unreleased]
 
+### 新增
+
+- **ZCode 3.3.6 会话工具策略适配**:`--allowed-tools` 与
+  `--disallowed-tools`/`--disallowedTools` 在经典路径透传给 `--prompt`,
+  app-server 路径按 3.3.6 strict schema 写入 `session/create`/`resume` 的
+  `toolAllowlist[]`/`toolDenylist[]`;resume 失败回退 create 时策略不丢。
+  `--permission-mode` 接为 `--mode` 旧别名(`default` 映射 build)。
+- **活跃内核目录统一发现**:Rust 启动探针与 `/update` 现在识别
+  `$ZCODE_APP`、`/opt/ZCode` 和 rootless
+  `~/.local/opt/zcode/<ver>/opt/ZCode`;wrapper 多版本选择改用数字版本排序并
+  把选中的 `ZCODE_APP` 传给 fallback TUI。
+
+### 修复
+
+- **3.3.6 更新源占位兼容**:观察到的 3.3.6 包把 `app-update.yml` 指向
+  `http://localhost:8081`;未显式覆盖时该 loopback 占位地址会回退项目记录的
+  官方 Linux feed。新增 `ZCODE_TUI_UPDATE_FEED` 显式覆盖(允许本地冒烟源),
+  rootless 安装的已装版本从活跃路径取得；`/update` 插入 feed/版本前做 shell
+  quoting，既有 basename + sha512 + 进程组取消安全属性不变。
+
+### 验证
+
+- 3.3.4/3.3.6 的已知 app-server 方法集合一致且 `session/list {}` 均成功；
+  3.3.6 bundle 实证 create/resume 新增 toolAllowlist/toolDenylist。其 help
+  出现的 `--settings`/`--max-turns` 仍被 0.15.2 parser 拒绝且无 session
+  schema，本版本不虚构对应行为。
+
 ## [0.5.3] - 2026-07-13
 
 ### 新增

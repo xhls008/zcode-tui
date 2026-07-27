@@ -2,7 +2,7 @@ use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{self, Stdout, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command, ExitStatus};
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
@@ -37,20 +37,21 @@ use zcode_tui::{
     app_steer_params, app_stop_params, app_subscribe_params, app_usage_params, build_runtime_model,
     build_send_attachments, checkpoint_short_id, classify_input, command_palette_rows,
     context_watermark_warn, conversation_target, db_baseline, db_schema_supported,
-    detect_auth_status, diff_line_role, encode_interaction_reply, env_is_headless,
-    extract_file_mentions, file_suggestions, fold_preview, format_context_watermark,
-    git_diff_command, handle_local_command, help_text, history_search, is_newer_version,
-    kernel_config_path_from, kernel_db_path_from, latest_assistant_text, latest_reasoning,
-    latest_session_for_dir, leader_action_for_key, list_recent_sessions, live_tool_chips,
-    load_mcp_config, load_ui_config, login_command, markdown_lines, mcp_config_path,
-    mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence, parse_apply_file_rewind,
-    parse_cli_args, parse_interaction_request, parse_kernel_slash_commands, parse_prompt_summary,
-    parse_resume_messages, parse_rewind_preview, parse_session_list, parse_steer_result,
-    parse_stream_event, parse_todos, parse_update_feed, parse_update_feed_url, prompt_command_for,
-    recent_input_history, relative_age, rewind_failure, run_command, shorten_home, skyline_braille,
-    skyline_graphics_wanted, skyline_lines, skyline_mode, slash_suggestions_merged,
-    spawn_streaming_command, tool_input_summary, usage_stats_params, user_mcp_config_path,
-    with_mcp_servers, wrap_display, AppConfig, AppServerConn, AppServerEvent, AppServerMessage,
+    detect_auth_status, diff_line_role, discover_zcode_app_dir, encode_interaction_reply,
+    env_is_headless, extract_file_mentions, file_suggestions, fold_preview,
+    format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
+    is_newer_version, kernel_config_path_from, kernel_db_path_from, latest_assistant_text,
+    latest_reasoning, latest_session_for_dir, leader_action_for_key, list_recent_sessions,
+    live_tool_chips, load_mcp_config, load_ui_config, login_command, markdown_lines,
+    mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence,
+    parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
+    parse_kernel_slash_commands, parse_prompt_summary, parse_resume_messages, parse_rewind_preview,
+    parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
+    prompt_command_for, recent_input_history, relative_age, rewind_failure, run_command,
+    select_update_feed_url, shorten_home, skyline_braille, skyline_graphics_wanted, skyline_lines,
+    skyline_mode, slash_suggestions_merged, spawn_streaming_command, tool_input_summary,
+    usage_stats_params, user_mcp_config_path, with_mcp_servers, with_tool_policy, wrap_display,
+    zcode_app_version_from_path, AppConfig, AppServerConn, AppServerEvent, AppServerMessage,
     AppServerTurn, AppServerUnavailable, AuthStatus, CheckpointEntry, DbBaseline, DebugLog,
     DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction, LiveToolChip,
     MdLineKind, RewindPreview, RewindTarget, SessionControls, SessionRow, SkylineMode, SpanRole,
@@ -238,6 +239,44 @@ struct StartupReport {
     db: DbProbe,
 }
 
+fn active_zcode_app_dir() -> Option<PathBuf> {
+    let explicit = env::var_os("ZCODE_APP").map(PathBuf::from);
+    let home = env::var_os("HOME").map(PathBuf::from);
+    discover_zcode_app_dir(
+        explicit.as_deref(),
+        Some(Path::new("/opt/ZCode")),
+        home.as_deref(),
+    )
+}
+
+fn installed_zcode_version(app_dir: Option<&Path>) -> Option<String> {
+    app_dir.and_then(zcode_app_version_from_path).or_else(|| {
+        run_command(&[
+            "dpkg-query".to_string(),
+            "-W".to_string(),
+            "-f=${Version}".to_string(),
+            "zcode".to_string(),
+        ])
+        .ok()
+        .map(|version| {
+            version
+                .trim()
+                .split('-')
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .filter(|version| !version.is_empty())
+    })
+}
+
+fn update_feed_url_for(app_dir: Option<&Path>) -> Option<String> {
+    let app_update = app_dir
+        .and_then(|app_dir| fs::read_to_string(app_dir.join("resources/app-update.yml")).ok());
+    let explicit = env::var("ZCODE_TUI_UPDATE_FEED").ok();
+    select_update_feed_url(app_update.as_deref(), explicit.as_deref())
+}
+
 /// Read-only schema check for the kernel db. Missing file is the normal
 /// fresh-install state (silent); an unrecognized schema disables every
 /// db-derived feature for this run.
@@ -271,49 +310,23 @@ fn spawn_startup_probe(zcode_bin: String) -> std::sync::mpsc::Receiver<StartupRe
                     .find(|line| line.chars().next().is_some_and(|c| c.is_ascii_digit()))
                     .map(str::to_string)
             });
-        let installed = run_command(&[
-            "dpkg-query".to_string(),
-            "-W".to_string(),
-            "-f=${Version}".to_string(),
-            "zcode".to_string(),
-        ])
-        .ok()
-        .map(|version| {
-            version
-                .trim()
-                .split('-')
-                .next()
-                .unwrap_or_default()
-                .to_string()
-        })
-        .filter(|version| !version.is_empty());
+        let app_dir = active_zcode_app_dir();
+        let installed = installed_zcode_version(app_dir.as_deref());
 
         let mut feed = None;
         let mut feed_base = None;
         if env::var_os("ZCODE_TUI_NO_UPDATE_CHECK").is_none() {
-            let candidates = [
-                env::var("ZCODE_APP")
-                    .ok()
-                    .map(|app| format!("{app}/resources/app-update.yml")),
-                Some("/opt/ZCode/resources/app-update.yml".to_string()),
-            ];
-            for path in candidates.into_iter().flatten() {
-                let Ok(content) = fs::read_to_string(&path) else {
-                    continue;
-                };
-                if let Some(url) = parse_update_feed_url(&content) {
-                    feed_base = Some(url.trim_end_matches("latest-linux.yml").to_string());
-                    feed = run_command(&[
-                        "curl".to_string(),
-                        "-fsSL".to_string(),
-                        "--max-time".to_string(),
-                        "5".to_string(),
-                        url,
-                    ])
-                    .ok()
-                    .and_then(|body| parse_update_feed(&body));
-                }
-                break;
+            if let Some(url) = update_feed_url_for(app_dir.as_deref()) {
+                feed_base = Some(url.trim_end_matches("latest-linux.yml").to_string());
+                feed = run_command(&[
+                    "curl".to_string(),
+                    "-fsSL".to_string(),
+                    "--max-time".to_string(),
+                    "5".to_string(),
+                    url,
+                ])
+                .ok()
+                .and_then(|body| parse_update_feed(&body));
             }
         }
         let _ = sender.send(StartupReport {
@@ -1561,19 +1574,21 @@ impl UiState {
                 // Project + user MCP config rides along on create AND resume
                 // (the kernel never reads project .mcp.json on its own).
                 let mcp_servers = self.mcp_servers_for_session();
+                let resume_params = resume.as_ref().map(|session_id| {
+                    self.session_handshake_params(
+                        app_resume_params(session_id, runtime.as_ref()),
+                        mcp_servers.clone(),
+                    )
+                });
+                let create_params =
+                    self.session_handshake_params(app_create_params(&workspace), mcp_servers);
                 let conn = self.app_conn.as_mut().expect("app_conn set above");
                 let phase = match resume {
-                    Some(session_id) => ConnectPhase::Resume(conn.send(
+                    Some(_) => ConnectPhase::Resume(conn.send(
                         "session/resume",
-                        with_mcp_servers(
-                            app_resume_params(&session_id, runtime.as_ref()),
-                            mcp_servers,
-                        ),
+                        resume_params.expect("resume params built for resume branch"),
                     )?),
-                    None => ConnectPhase::Create(conn.send(
-                        "session/create",
-                        with_mcp_servers(app_create_params(&workspace), mcp_servers),
-                    )?),
+                    None => ConnectPhase::Create(conn.send("session/create", create_params)?),
                 };
                 self.app_connect = Some(AppConnect {
                     phase,
@@ -1629,6 +1644,18 @@ impl UiState {
             .and_then(|path| load_mcp_config(&path).ok())
             .unwrap_or_default();
         mcp_servers_param(&project, &user)
+    }
+
+    fn session_handshake_params(
+        &self,
+        params: serde_json::Value,
+        mcp_servers: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        with_tool_policy(
+            with_mcp_servers(params, mcp_servers),
+            &self.config.tool_allowlist,
+            &self.config.tool_denylist,
+        )
     }
 
     /// Best-effort `session/close` for a live session being discarded
@@ -1735,11 +1762,10 @@ impl UiState {
                     self.log_debug("handshake: resume failed, falling back to create");
                     let workspace = self.app_workspace();
                     let mcp_servers = self.mcp_servers_for_session();
+                    let create_params =
+                        self.session_handshake_params(app_create_params(&workspace), mcp_servers);
                     let conn = self.app_conn.as_mut().expect("alive checked above");
-                    match conn.send(
-                        "session/create",
-                        with_mcp_servers(app_create_params(&workspace), mcp_servers),
-                    ) {
+                    match conn.send("session/create", create_params) {
                         Ok(create_id) => {
                             if let Some(connect) = &mut self.app_connect {
                                 connect.phase = ConnectPhase::Create(create_id);
@@ -1976,39 +2002,32 @@ impl UiState {
     /// passwordless sudo or print the no-root unpack path. Runs as a shell
     /// job: streaming output in the transcript, Esc cancels the download.
     fn update_kernel(&mut self) {
-        let candidates = [
-            env::var("ZCODE_APP")
-                .ok()
-                .map(|app| format!("{app}/resources/app-update.yml")),
-            Some("/opt/ZCode/resources/app-update.yml".to_string()),
-        ];
-        let feed_url = candidates.into_iter().flatten().find_map(|path| {
-            fs::read_to_string(&path)
-                .ok()
-                .as_deref()
-                .and_then(parse_update_feed_url)
-        });
+        let app_dir = active_zcode_app_dir();
+        let feed_url = update_feed_url_for(app_dir.as_deref());
         let Some(feed_url) = feed_url else {
             self.push_error(
-                "no app-update.yml found (is the ZCode desktop package installed?); \
-                 set ZCODE_APP to its app directory",
+                "no update feed found (is the ZCode desktop package installed?); \
+                 set ZCODE_APP or ZCODE_TUI_UPDATE_FEED",
             );
             return;
         };
+        let installed = installed_zcode_version(app_dir.as_deref()).unwrap_or_else(|| "0".into());
+        let feed_arg = shell_words::join([feed_url.as_str()]);
+        let installed_arg = shell_words::join([installed.as_str()]);
         // Everything network/versioned happens inside the job so the UI never
         // blocks: yml fetch, version compare (dpkg --compare-versions), deb
         // download, sha512 check, install. The awk mirrors parse_update_feed:
         // the sha512 belongs to the files[] entry whose url is the .deb.
         let script = format!(
             r#"set -eu
-FEED='{feed_url}'
+FEED={feed_arg}
 echo "feed: $FEED"
 YML=$(curl -fsSL --max-time 15 "$FEED")
 VER=$(printf '%s' "$YML" | sed -n 's/^version:[[:space:]]*//p' | head -1)
 DEB=$(printf '%s' "$YML" | sed -n 's/^[[:space:]]*-*[[:space:]]*url:[[:space:]]*//p' | grep '\.deb$' | head -1)
 DEB=$(basename "$DEB")
 SHA=$(printf '%s' "$YML" | awk '/url:.*\.deb$/{{f=1;next}} f&&/sha512:/{{sub(/^[[:space:]]*sha512:[[:space:]]*/,"");print;exit}}')
-INSTALLED=$(dpkg-query -W -f='${{Version}}' zcode 2>/dev/null | cut -d- -f1 || echo 0)
+INSTALLED={installed_arg}
 echo "installed: $INSTALLED   latest: $VER"
 if ! dpkg --compare-versions "$VER" gt "$INSTALLED"; then
   echo "already up to date"

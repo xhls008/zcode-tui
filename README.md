@@ -90,6 +90,11 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   批准后工具同回合继续执行；plan 计划批准后自动切 build 并续跑。
   edit/plan/build 模式的权限门禁在流式路径上**真正生效**（不再是 headless
   一律 yolo）。
+- **会话工具策略（ZCode 3.3.6）**：启动参数 `--allowed-tools`、
+  `--disallowed-tools`/`--disallowedTools` 在经典路径继续传给 `--prompt`，
+  流式路径则翻译成 `session/create`/`resume` 的
+  `toolAllowlist[]`/`toolDenylist[]`，不会再被 app-server 静默忽略；
+  `--permission-mode` 作为 `--mode` 的旧别名接入（`default` = `build`）。
 - **会话控制（app-server 路径）**：`/model` 浮层切换模型、`/think` 循环思考
   级别、`/compact` 原地压缩上下文保住会话、`/mode`/Shift+Tab 即刻切换活跃
   会话的权限模式；**流式回合进行中直接输入文本＝转向（steer）当前回合**，
@@ -246,7 +251,10 @@ Cannot find package '@zcode/tui'
    dpkg-deb -x ZCode-<ver>.deb ~/.local/opt/zcode/<ver>/
    ```
 
-   wrapper 自动探测 `$ZCODE_APP` → `/opt/ZCode` → `~/.local/opt/zcode/*/opt/ZCode`。
+   wrapper 自动探测 `$ZCODE_APP` → `/opt/ZCode` →
+   `~/.local/opt/zcode/*/opt/ZCode`；多个免 root 版本并存时按数字版本排序
+   （`3.10` 高于 `3.9`），并把实际目录通过 `ZCODE_APP` 传给 fallback TUI，
+   启动检查与 `/update` 因而对应正在运行的内核。
 
 2. **运行内核**：极简服务器往往缺 Electron 加载所需的桌面库（libgtk-3、
    libnss3 等，即使 `ELECTRON_RUN_AS_NODE=1` 也要先过动态链接）。wrapper 会
@@ -354,6 +362,9 @@ ZCODE_TUI_LOGIN_CMD          覆盖 /login 执行的命令
 ZCODE_TUI_LOGOUT_CMD         覆盖 /logout 执行的命令
 ZCODE_TUI_IDE_CMD            覆盖 /ide 启动的 IDE 命令
 ZCODE_TUI_NO_UPDATE_CHECK    置 1 关闭启动时的官方更新检测
+ZCODE_TUI_UPDATE_FEED        显式覆盖 latest-linux.yml URL（也可给目录基址）；
+                             显式 localhost/127.0.0.1 可用于冒烟测试。包内未显式
+                             配置的 loopback 占位 feed 会回退官方 Linux CDN
 ZCODE_TUI_APP_SERVER         默认启用真流式（走 zcode app-server，逐 token
                              流式；失败无缝降级回 --prompt）。工具权限确认
                              浮层、/model /think /compact、/mode 即刻切换与

@@ -32,12 +32,13 @@ detect_app_dir() {
         printf '%s\n' /opt/ZCode
         return 0
     fi
-    local dir latest=""
+    local dir
+    local -a candidates=()
     for dir in "$HOME"/.local/opt/zcode/*/opt/ZCode; do
-        [ -f "${dir}/resources/glm/zcode.cjs" ] && latest="$dir"
+        [ -f "${dir}/resources/glm/zcode.cjs" ] && candidates+=("$dir")
     done
-    if [ -n "$latest" ]; then
-        printf '%s\n' "$latest"
+    if [ "${#candidates[@]}" -gt 0 ]; then
+        printf '%s\n' "${candidates[@]}" | sort -V | tail -n 1
         return 0
     fi
     return 1
@@ -151,12 +152,13 @@ find_app_dir() {
         printf '%s\n' /opt/ZCode
         return 0
     fi
-    local dir latest=""
+    local dir
+    local -a candidates=()
     for dir in "$HOME"/.local/opt/zcode/*/opt/ZCode; do
-        [ -f "${dir}/resources/glm/zcode.cjs" ] && latest="$dir"
+        [ -f "${dir}/resources/glm/zcode.cjs" ] && candidates+=("$dir")
     done
-    if [ -n "$latest" ]; then
-        printf '%s\n' "$latest"
+    if [ "${#candidates[@]}" -gt 0 ]; then
+        printf '%s\n' "${candidates[@]}" | sort -V | tail -n 1
         return 0
     fi
     return 1
@@ -220,6 +222,7 @@ if $wants_tui && [ -x "$FALLBACK_TUI" ]; then
     if ! (cd "$(dirname "$ZCODE_CJS")" &&
         run_node --input-type=module -e "import('@zcode/tui').then(()=>process.exit(0),()=>process.exit(3))" >/dev/null 2>&1); then
         exec env \
+            ZCODE_APP="$APP_DIR" \
             ZCODE_TUI_ZCODE_BIN="$0" \
             ZCODE_TUI_APP_SERVER="${ZCODE_TUI_APP_SERVER:-1}" \
             "$FALLBACK_TUI" "$@"

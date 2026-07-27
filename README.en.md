@@ -67,6 +67,10 @@ for details.
   turn (`session/steer`) instead of being queued.
 - `/usage [7d|30d]` shows session and period token usage; `/update`
   self-updates the kernel from the official feed (sha512-verified).
+- ZCode 3.3.6 tool-policy flags (`--allowed-tools`, `--disallowed-tools`, and
+  `--disallowedTools`) apply to both classic prompts and app-server
+  create/resume sessions; `--permission-mode` is accepted as a legacy alias
+  for `--mode` (`default` maps to `build`).
 - `@file` mentions become `session/send` attachments (image/file kinds,
   `localPath`-based), so the model reads them on the streaming path too.
 - Project `.mcp.json` and user-level MCP config are passed to
@@ -197,9 +201,11 @@ ZCode kernel.
    ```
 
 2. Run the kernel. The wrapper probes `$ZCODE_APP`, `/opt/ZCode`, and
-   `~/.local/opt/zcode/*/opt/ZCode`. It prefers Electron's embedded Node when
-   possible, then falls back to system Node. The kernel requires Node >= 22.5
-   because it uses `node:sqlite`.
+   `~/.local/opt/zcode/*/opt/ZCode`. Multiple rootless versions are compared
+   numerically (`3.10` is newer than `3.9`), and the selected directory is
+   exported to the fallback TUI as `ZCODE_APP`. It prefers Electron's embedded
+   Node when possible, then falls back to system Node. The kernel requires
+   Node >= 22.5 because it uses `node:sqlite`.
 
 3. Log in. In headless environments, use one of:
 
@@ -285,6 +291,8 @@ ZCODE_TUI_LOGIN_CMD
 ZCODE_TUI_LOGOUT_CMD
 ZCODE_TUI_IDE_CMD
 ZCODE_TUI_NO_UPDATE_CHECK
+ZCODE_TUI_UPDATE_FEED       (explicit latest-linux.yml URL or base; explicit
+                             loopback URLs are supported for smoke tests)
 ZCODE_TUI_APP_SERVER        (set 0/off/false to force the classic --prompt path)
 ZCODE_TUI_LOG               (file path: append-only protocol debug log;
                              outbound entries are method names only — request

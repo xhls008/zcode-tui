@@ -36,6 +36,30 @@ fn parse_args_ignores_tui_and_preserves_session_options() {
 }
 
 #[test]
+fn parse_args_carries_zcode_336_tool_policy_and_permission_alias() {
+    let config = parse_cli_args([
+        "tui",
+        "--allowed-tools",
+        "Read,Glob",
+        "Bash(git *)",
+        "--disallowedTools",
+        "Write",
+        "Bash(rm *)",
+        "--mode",
+        "edit",
+        "--permission-mode=default",
+    ])
+    .unwrap();
+
+    assert_eq!(config.tool_allowlist, vec!["Read", "Glob", "Bash(git *)"]);
+    assert_eq!(config.tool_denylist, vec!["Write", "Bash(rm *)"]);
+    assert_eq!(config.mode.as_deref(), Some("build"));
+
+    assert!(parse_cli_args(["--allowed-tools", "--mode", "plan"]).is_err());
+    assert!(parse_cli_args(["--permission-mode", "anything"]).is_err());
+}
+
+#[test]
 fn build_prompt_command_uses_headless_zcode_cli_options() {
     let config = parse_cli_args([
         "--cwd",
@@ -67,6 +91,31 @@ fn build_prompt_command_uses_headless_zcode_cli_options() {
             "--json",
             "--prompt",
             "explain this",
+        ]
+    );
+}
+
+#[test]
+fn classic_prompt_preserves_tool_policy_rules() {
+    let config = parse_cli_args([
+        "--allowed-tools=Read,Glob",
+        "--disallowed-tools",
+        "Bash(git *)",
+    ])
+    .unwrap();
+    let command = build_prompt_command("zcode", &config, "inspect");
+    assert_eq!(
+        command,
+        vec![
+            "zcode",
+            "--allowed-tools",
+            "Read",
+            "Glob",
+            "--disallowed-tools",
+            "Bash(git *)",
+            "--json",
+            "--prompt",
+            "inspect",
         ]
     );
 }
@@ -678,7 +727,8 @@ fn markdown_diff_fences_become_diff_blocks() {
 
 #[test]
 fn update_feed_parsing_and_version_compare() {
-    use zcode_tui::{is_newer_version, parse_update_feed, parse_update_feed_url};
+    use std::cmp::Ordering;
+    use zcode_tui::{compare_versions, is_newer_version, parse_update_feed, parse_update_feed_url};
 
     let feed_url = parse_update_feed_url(
         "provider: generic\nurl: https://cdn.example.com/update/linux/x64/\n",
@@ -700,6 +750,73 @@ fn update_feed_parsing_and_version_compare() {
     assert!(is_newer_version("3.10.0", "3.9.9"));
     assert!(!is_newer_version("3.2.3", "3.2.3"));
     assert!(!is_newer_version("3.2.3", "3.2.5"));
+    assert_eq!(compare_versions("3.3.6-2288", "3.3.4"), Ordering::Greater);
+}
+
+#[test]
+fn discovers_semver_latest_rootless_kernel_and_honours_precedence() {
+    use zcode_tui::{discover_zcode_app_dir, zcode_app_version_from_path};
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let versions = home.join(".local/opt/zcode");
+    let make_app = |version: &str| {
+        let app = versions.join(version).join("opt/ZCode");
+        fs::create_dir_all(app.join("resources/glm")).unwrap();
+        fs::write(app.join("resources/glm/zcode.cjs"), "// kernel").unwrap();
+        app
+    };
+    let old = make_app("3.9.9");
+    let latest = make_app("3.10.0");
+    let missing_system = temp.path().join("missing-system");
+
+    assert_eq!(
+        discover_zcode_app_dir(None, Some(&missing_system), Some(&home)),
+        Some(latest.clone())
+    );
+    assert_eq!(
+        zcode_app_version_from_path(&latest).as_deref(),
+        Some("3.10.0")
+    );
+
+    let explicit = make_app("3.1.0");
+    assert_eq!(
+        discover_zcode_app_dir(Some(&explicit), Some(&missing_system), Some(&home)),
+        Some(explicit)
+    );
+
+    let system = temp.path().join("opt/ZCode");
+    fs::create_dir_all(system.join("resources/glm")).unwrap();
+    fs::write(system.join("resources/glm/zcode.cjs"), "// system").unwrap();
+    assert_eq!(
+        discover_zcode_app_dir(None, Some(&system), Some(&home)),
+        Some(system)
+    );
+    assert!(old.is_dir());
+}
+
+#[test]
+fn update_feed_selection_falls_back_from_implicit_loopback_only() {
+    use zcode_tui::{select_update_feed_url, OFFICIAL_ZCODE_LINUX_UPDATE_FEED};
+
+    let local_package = "provider: generic\nurl: http://localhost:8081\n";
+    assert_eq!(
+        select_update_feed_url(Some(local_package), None).as_deref(),
+        Some(OFFICIAL_ZCODE_LINUX_UPDATE_FEED)
+    );
+    assert_eq!(
+        select_update_feed_url(Some(local_package), Some("http://127.0.0.1:9123/")).as_deref(),
+        Some("http://127.0.0.1:9123/latest-linux.yml")
+    );
+    assert!(select_update_feed_url(Some(local_package), Some("not-a-url")).is_none());
+    assert_eq!(
+        select_update_feed_url(
+            Some("provider: generic\nurl: https://mirror.example/zcode/\n"),
+            None
+        )
+        .as_deref(),
+        Some("https://mirror.example/zcode/latest-linux.yml")
+    );
 }
 
 #[test]
@@ -1996,6 +2113,24 @@ fn mcp_servers_param_builds_kernel_shapes() {
     assert_eq!(with_mcp_servers(base.clone(), None), base);
     let with = with_mcp_servers(base, Some(servers));
     assert_eq!(with["mcpServers"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn zcode_336_tool_policy_attaches_to_create_and_resume_only_when_nonempty() {
+    use zcode_tui::{app_create_params, app_resume_params, with_tool_policy};
+
+    let allow = vec!["Read".to_string(), "Glob".to_string()];
+    let deny = vec!["Bash(git *)".to_string()];
+    let create = with_tool_policy(app_create_params("/proj"), &allow, &deny);
+    assert_eq!(create["toolAllowlist"], serde_json::json!(["Read", "Glob"]));
+    assert_eq!(create["toolDenylist"], serde_json::json!(["Bash(git *)"]));
+
+    let resume = with_tool_policy(app_resume_params("sess_1", None), &allow, &deny);
+    assert_eq!(resume["sessionId"], "sess_1");
+    assert_eq!(resume["toolAllowlist"], serde_json::json!(["Read", "Glob"]));
+
+    let bare = app_create_params("/proj");
+    assert_eq!(with_tool_policy(bare.clone(), &[], &[]), bare);
 }
 
 #[test]

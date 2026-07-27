@@ -23,6 +23,8 @@ pub struct AppConfig {
     pub continue_session: bool,
     pub no_color: bool,
     pub attach: Vec<String>,
+    pub tool_allowlist: Vec<String>,
+    pub tool_denylist: Vec<String>,
     pub passthrough: Vec<String>,
     pub initial_prompts: Vec<String>,
 }
@@ -311,15 +313,44 @@ where
             "--no-color" => config.no_color = true,
             "--cwd" => config.cwd = Some(next_value(&mut iter, "--cwd")?),
             "--mode" => config.mode = Some(next_value(&mut iter, "--mode")?),
+            "--permission-mode" => {
+                config.mode = Some(normalize_permission_mode(&next_value(
+                    &mut iter,
+                    "--permission-mode",
+                )?)?)
+            }
             "--resume" => config.resume = Some(next_value(&mut iter, "--resume")?),
             "--locale" => config.locale = Some(next_value(&mut iter, "--locale")?),
             "--attach" => config.attach.push(next_value(&mut iter, "--attach")?),
+            "--allowed-tools" => append_tool_values(
+                &mut config.tool_allowlist,
+                next_tool_values(&mut iter, "--allowed-tools")?,
+            ),
+            "--disallowed-tools" | "--disallowedTools" => append_tool_values(
+                &mut config.tool_denylist,
+                next_tool_values(&mut iter, arg.as_str())?,
+            ),
             "--target" => target = Some(next_value(&mut iter, "--target")?),
             _ if arg.starts_with("--cwd=") => config.cwd = Some(split_equals(&arg)),
             _ if arg.starts_with("--mode=") => config.mode = Some(split_equals(&arg)),
+            _ if arg.starts_with("--permission-mode=") => {
+                config.mode = Some(normalize_permission_mode(&split_equals(&arg))?)
+            }
             _ if arg.starts_with("--resume=") => config.resume = Some(split_equals(&arg)),
             _ if arg.starts_with("--locale=") => config.locale = Some(split_equals(&arg)),
             _ if arg.starts_with("--attach=") => config.attach.push(split_equals(&arg)),
+            _ if arg.starts_with("--allowed-tools=") => append_tool_values(
+                &mut config.tool_allowlist,
+                parse_tool_values(&split_equals(&arg), "--allowed-tools")?,
+            ),
+            _ if arg.starts_with("--disallowed-tools=")
+                || arg.starts_with("--disallowedTools=") =>
+            {
+                append_tool_values(
+                    &mut config.tool_denylist,
+                    parse_tool_values(&split_equals(&arg), "--disallowed-tools")?,
+                )
+            }
             _ if arg.starts_with("--target=") => target = Some(split_equals(&arg)),
             _ => config.passthrough.push(arg),
         }
@@ -354,6 +385,55 @@ fn split_equals(arg: &str) -> String {
     arg.split_once('=')
         .map(|(_, value)| value.to_string())
         .unwrap_or_default()
+}
+
+fn normalize_permission_mode(value: &str) -> Result<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "default" => Ok("build".to_string()),
+        "build" | "edit" | "plan" | "yolo" | "auto" => Ok(value.trim().to_ascii_lowercase()),
+        _ => Err(anyhow!(
+            "--permission-mode expects default, build, edit, plan, yolo, or auto"
+        )),
+    }
+}
+
+fn parse_tool_values(value: &str, option: &str) -> Result<Vec<String>> {
+    let values: Vec<String> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect();
+    if values.is_empty() {
+        Err(anyhow!("{option} requires at least one tool rule"))
+    } else {
+        Ok(values)
+    }
+}
+
+fn next_tool_values<I>(iter: &mut std::iter::Peekable<I>, option: &str) -> Result<Vec<String>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut values = Vec::new();
+    while iter.peek().is_some_and(|value| !value.starts_with('-')) {
+        if let Some(value) = iter.next() {
+            values.extend(parse_tool_values(&value, option)?);
+        }
+    }
+    if values.is_empty() {
+        Err(anyhow!("{option} requires at least one tool rule"))
+    } else {
+        Ok(values)
+    }
+}
+
+fn append_tool_values(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
 }
 
 pub fn build_prompt_command(zcode_bin: &str, config: &AppConfig, prompt: &str) -> Vec<String> {
@@ -391,6 +471,14 @@ pub fn build_prompt_command_with_attachments(
     }
     for attach in attachments {
         command.extend(["--attach".to_string(), attach.clone()]);
+    }
+    if !config.tool_allowlist.is_empty() {
+        command.push("--allowed-tools".to_string());
+        command.extend(config.tool_allowlist.iter().cloned());
+    }
+    if !config.tool_denylist.is_empty() {
+        command.push("--disallowed-tools".to_string());
+        command.extend(config.tool_denylist.iter().cloned());
     }
     command.extend(config.passthrough.iter().cloned());
     // The end-of-run summary object (response/sessionId/usage/contextUsed)
@@ -1410,6 +1498,12 @@ fn handle_mcp_command(command: &[String], config: &AppConfig) -> Result<String> 
 
 pub fn help_text() -> &'static str {
     r#"zcode-tui fallback commands:
+launch options:
+  --allowed-tools <tools...>   allow only these tools for the session
+  --disallowed-tools <tools...>
+                               deny these tools for the session
+  --permission-mode <mode>     legacy alias for --mode (default = build)
+
   text                         send a prompt with zcode --prompt
   @<path> in a prompt          auto-attach existing files via --attach
   ! <cmd>                      run a local shell command
@@ -2066,6 +2160,83 @@ pub fn shorten_home(path: &str, home: Option<&str>) -> String {
 
 // ---- official update check ---------------------------------------------
 
+pub const OFFICIAL_ZCODE_LINUX_UPDATE_FEED: &str =
+    "https://cdn-zcode.z.ai/zcode/electron/releases/update/linux/x64/latest-linux.yml";
+
+fn zcode_app_has_kernel(app_dir: &Path) -> bool {
+    app_dir.join("resources/glm/zcode.cjs").is_file()
+}
+
+/// Extract `<version>` from the documented rootless layout
+/// `~/.local/opt/zcode/<version>/opt/ZCode`.
+pub fn zcode_app_version_from_path(app_dir: &Path) -> Option<String> {
+    if app_dir.file_name()?.to_str()? != "ZCode" {
+        return None;
+    }
+    let opt = app_dir.parent()?;
+    if opt.file_name()?.to_str()? != "opt" {
+        return None;
+    }
+    let version = opt.parent()?.file_name()?.to_str()?.trim();
+    version
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_digit())
+        .then(|| version.to_string())
+}
+
+/// Numeric segment comparison used for package directories and update feeds.
+/// Non-numeric separators/suffixes are ignored consistently with the original
+/// `is_newer_version` implementation.
+pub fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    fn segments(version: &str) -> Vec<u64> {
+        version
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    }
+    let left = segments(left);
+    let right = segments(right);
+    for index in 0..left.len().max(right.len()) {
+        let a = left.get(index).copied().unwrap_or(0);
+        let b = right.get(index).copied().unwrap_or(0);
+        match a.cmp(&b) {
+            std::cmp::Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// Resolve the application directory used by the wrapper/TUI. The system
+/// directory is an argument so the precedence can be tested without depending
+/// on the host's real `/opt/ZCode`.
+pub fn discover_zcode_app_dir(
+    explicit: Option<&Path>,
+    system_dir: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(app_dir) = explicit.filter(|path| zcode_app_has_kernel(path)) {
+        return Some(app_dir.to_path_buf());
+    }
+    if let Some(app_dir) = system_dir.filter(|path| zcode_app_has_kernel(path)) {
+        return Some(app_dir.to_path_buf());
+    }
+    let versions_root = home?.join(".local/opt/zcode");
+    let entries = fs::read_dir(versions_root).ok()?;
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("opt/ZCode"))
+        .filter(|path| zcode_app_has_kernel(path))
+        .max_by(|left, right| {
+            let left_version = zcode_app_version_from_path(left).unwrap_or_default();
+            let right_version = zcode_app_version_from_path(right).unwrap_or_default();
+            compare_versions(&left_version, &right_version)
+                .then_with(|| left.as_os_str().cmp(right.as_os_str()))
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateFeed {
     pub version: String,
@@ -2088,6 +2259,60 @@ pub fn parse_update_feed_url(app_update_yml: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn normalize_update_feed_url(value: &str) -> Option<String> {
+    let value = value.trim().trim_matches(|c| c == '\'' || c == '"');
+    if !(value.starts_with("http://") || value.starts_with("https://")) {
+        return None;
+    }
+    if value.ends_with(".yml") || value.ends_with(".yaml") {
+        Some(value.to_string())
+    } else {
+        Some(format!("{}/latest-linux.yml", value.trim_end_matches('/')))
+    }
+}
+
+fn update_feed_is_loopback(url: &str) -> bool {
+    let Some((_, authority_and_path)) = url.split_once("://") else {
+        return false;
+    };
+    let authority = authority_and_path
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default()
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host.starts_with("127.")
+        || host == "0.0.0.0"
+}
+
+/// Resolve an update feed while distinguishing package metadata from an
+/// explicit test/operator override. The observed 3.3.6 package carries a
+/// localhost placeholder; implicit loopback metadata falls back to the
+/// documented official Linux channel, while an explicit loopback override is
+/// preserved for deterministic PTY tests.
+pub fn select_update_feed_url(
+    app_update_yml: Option<&str>,
+    explicit_override: Option<&str>,
+) -> Option<String> {
+    if let Some(value) = explicit_override {
+        return normalize_update_feed_url(value);
+    }
+    let url = parse_update_feed_url(app_update_yml?)?;
+    if update_feed_is_loopback(&url) {
+        Some(OFFICIAL_ZCODE_LINUX_UPDATE_FEED.to_string())
+    } else {
+        Some(url)
+    }
 }
 
 pub fn parse_update_feed(yaml: &str) -> Option<UpdateFeed> {
@@ -2139,23 +2364,7 @@ pub fn parse_update_feed(yaml: &str) -> Option<UpdateFeed> {
 
 /// Numeric segment-wise version comparison: `3.2.5` > `3.2.3`, `3.10` > `3.9`.
 pub fn is_newer_version(latest: &str, installed: &str) -> bool {
-    fn segments(version: &str) -> Vec<u64> {
-        version
-            .split(|c: char| !c.is_ascii_digit())
-            .filter(|part| !part.is_empty())
-            .map(|part| part.parse().unwrap_or(0))
-            .collect()
-    }
-    let latest = segments(latest);
-    let installed = segments(installed);
-    for index in 0..latest.len().max(installed.len()) {
-        let a = latest.get(index).copied().unwrap_or(0);
-        let b = installed.get(index).copied().unwrap_or(0);
-        if a != b {
-            return a > b;
-        }
-    }
-    false
+    compare_versions(latest, installed) == std::cmp::Ordering::Greater
 }
 
 // ---- /ide ----------------------------------------------------------------
@@ -3074,6 +3283,27 @@ pub fn with_mcp_servers(
 ) -> serde_json::Value {
     if let (Some(list), Some(map)) = (servers, params.as_object_mut()) {
         map.insert("mcpServers".to_string(), list);
+    }
+    params
+}
+
+/// Attach the ZCode 3.3.6 app-server session policy fields. Both create and
+/// resume use the same strict optional keys. Empty lists deliberately leave
+/// the request untouched so the no-policy path stays compatible with older
+/// kernels and byte-identical to the pre-adaptation shape.
+pub fn with_tool_policy(
+    mut params: serde_json::Value,
+    allowlist: &[String],
+    denylist: &[String],
+) -> serde_json::Value {
+    let Some(map) = params.as_object_mut() else {
+        return params;
+    };
+    if !allowlist.is_empty() {
+        map.insert("toolAllowlist".to_string(), serde_json::json!(allowlist));
+    }
+    if !denylist.is_empty() {
+        map.insert("toolDenylist".to_string(), serde_json::json!(denylist));
     }
     params
 }
