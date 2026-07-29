@@ -25,6 +25,11 @@ pub struct AppConfig {
     pub attach: Vec<String>,
     pub tool_allowlist: Vec<String>,
     pub tool_denylist: Vec<String>,
+    /// ZCode 3.5.3 Browser Use. The fallback TUI routes these prompts through
+    /// the official classic CLI because the app-server strict schemas do not
+    /// expose a browser runtime switch.
+    pub browser_use: Option<String>,
+    pub browser_executable: Option<String>,
     pub passthrough: Vec<String>,
     pub initial_prompts: Vec<String>,
 }
@@ -330,6 +335,15 @@ where
                 &mut config.tool_denylist,
                 next_tool_values(&mut iter, arg.as_str())?,
             ),
+            "--browser-use" => {
+                config.browser_use = Some(normalize_browser_use(&next_value(
+                    &mut iter,
+                    "--browser-use",
+                )?)?)
+            }
+            "--browser-executable" => {
+                config.browser_executable = Some(next_value(&mut iter, "--browser-executable")?)
+            }
             "--target" => target = Some(next_value(&mut iter, "--target")?),
             _ if arg.starts_with("--cwd=") => config.cwd = Some(split_equals(&arg)),
             _ if arg.starts_with("--mode=") => config.mode = Some(split_equals(&arg)),
@@ -351,9 +365,25 @@ where
                     parse_tool_values(&split_equals(&arg), "--disallowed-tools")?,
                 )
             }
+            _ if arg.starts_with("--browser-use=") => {
+                config.browser_use = Some(normalize_browser_use(&split_equals(&arg))?)
+            }
+            _ if arg.starts_with("--browser-executable=") => {
+                let value = split_equals(&arg);
+                if value.is_empty() {
+                    return Err(anyhow!("--browser-executable requires a value"));
+                }
+                config.browser_executable = Some(value);
+            }
             _ if arg.starts_with("--target=") => target = Some(split_equals(&arg)),
             _ => config.passthrough.push(arg),
         }
+    }
+
+    if config.browser_executable.is_some() && config.browser_use.as_deref() != Some("headless") {
+        return Err(anyhow!(
+            "--browser-executable requires --browser-use headless"
+        ));
     }
 
     if let Some(goal) = target {
@@ -393,6 +423,16 @@ fn normalize_permission_mode(value: &str) -> Result<String> {
         "build" | "edit" | "plan" | "yolo" | "auto" => Ok(value.trim().to_ascii_lowercase()),
         _ => Err(anyhow!(
             "--permission-mode expects default, build, edit, plan, yolo, or auto"
+        )),
+    }
+}
+
+fn normalize_browser_use(value: &str) -> Result<String> {
+    match value.trim() {
+        "headless" => Ok("headless".to_string()),
+        "" => Err(anyhow!("--browser-use requires a value")),
+        other => Err(anyhow!(
+            "unsupported --browser-use mode: {other} (ZCode 3.5.3 supports headless)"
         )),
     }
 }
@@ -479,6 +519,12 @@ pub fn build_prompt_command_with_attachments(
     if !config.tool_denylist.is_empty() {
         command.push("--disallowed-tools".to_string());
         command.extend(config.tool_denylist.iter().cloned());
+    }
+    if let Some(mode) = &config.browser_use {
+        command.extend(["--browser-use".to_string(), mode.clone()]);
+    }
+    if let Some(executable) = &config.browser_executable {
+        command.extend(["--browser-executable".to_string(), executable.clone()]);
     }
     command.extend(config.passthrough.iter().cloned());
     // The end-of-run summary object (response/sessionId/usage/contextUsed)
@@ -1503,6 +1549,8 @@ launch options:
   --disallowed-tools <tools...>
                                deny these tools for the session
   --permission-mode <mode>     legacy alias for --mode (default = build)
+  --browser-use headless       Browser Use via official classic --prompt path
+  --browser-executable <path>  browser binary (requires --browser-use headless)
 
   text                         send a prompt with zcode --prompt
   @<path> in a prompt          auto-attach existing files via --attach
@@ -3256,6 +3304,343 @@ pub fn app_steer_params(session_id: &str, content: &str) -> serde_json::Value {
     serde_json::json!({ "sessionId": session_id, "content": content })
 }
 
+/// Subscribe to the ZCode 3.5.3 conversation control plane while keeping the
+/// legacy session subscription for token/body events.
+pub fn v4_conversation_subscribe_params(
+    session_id: &str,
+    connection_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "topic": format!("conversation/{session_id}"),
+        "connectionId": connection_id,
+        "clientMode": APP_SERVER_DELIVERY_KIND,
+        "visibility": "foreground",
+    })
+}
+
+/// Generic V4 command envelope. Only commands whose bundle schema requires a
+/// CAS field receive it: setFollowupMode needs baseRevision, while
+/// applyFileRewind needs both revision and log epoch. sendText deliberately
+/// works without a CAS base and is judged by the semantic delivery frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V4CommandBase<'a> {
+    None,
+    Revision(u64),
+    RevisionAndEpoch { revision: u64, log_epoch: &'a str },
+}
+
+pub fn v4_command_params(
+    command_id: &str,
+    client_id: &str,
+    session_id: &str,
+    command_type: &str,
+    payload: serde_json::Value,
+    base: V4CommandBase<'_>,
+    issued_at: u64,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "commandId": command_id,
+        "clientId": client_id,
+        "sessionId": session_id,
+        "type": command_type,
+        "payload": payload,
+        "issuedAt": issued_at,
+    });
+    let map = value
+        .as_object_mut()
+        .expect("v4 command envelope is object");
+    match base {
+        V4CommandBase::None => {}
+        V4CommandBase::Revision(revision) => {
+            map.insert("baseRevision".to_string(), serde_json::json!(revision));
+        }
+        V4CommandBase::RevisionAndEpoch {
+            revision,
+            log_epoch,
+        } => {
+            map.insert("baseRevision".to_string(), serde_json::json!(revision));
+            map.insert("baseLogEpoch".to_string(), serde_json::json!(log_epoch));
+        }
+    }
+    value
+}
+
+/// V4 row identity used by preview/apply (strict `{rowId, entityId}`).
+pub fn v4_rewind_target(row_id: u64, entity_id: &str) -> serde_json::Value {
+    serde_json::json!({ "rowId": row_id, "entityId": entity_id })
+}
+
+pub fn v4_file_rewind_preview_params(
+    session_id: &str,
+    row_id: u64,
+    entity_id: &str,
+    base_revision: u64,
+    base_log_epoch: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "sessionId": session_id,
+        "target": v4_rewind_target(row_id, entity_id),
+        "baseRevision": base_revision,
+        "baseLogEpoch": base_log_epoch,
+    })
+}
+
+/// A V4 conversation row reduced to the fields needed by `/rewind`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V4ConversationRow {
+    pub row_id: u64,
+    pub entity_id: String,
+    pub kind: String,
+    pub state: String,
+    pub files: u64,
+    pub additions: u64,
+    pub deletions: u64,
+    pub file_state: Option<String>,
+    pub can_rewind_files: bool,
+}
+
+fn parse_v4_row(value: &serde_json::Value) -> Option<V4ConversationRow> {
+    let changes = value.get("fileChanges");
+    Some(V4ConversationRow {
+        row_id: value.get("rowId")?.as_u64()?,
+        entity_id: value.get("entityId")?.as_str()?.to_string(),
+        kind: str_at(value, "kind"),
+        state: str_at(value, "state"),
+        files: changes
+            .and_then(|v| v.get("files"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        additions: changes
+            .and_then(|v| v.get("additions"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        deletions: changes
+            .and_then(|v| v.get("deletions"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        file_state: changes
+            .and_then(|v| v.get("state"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        can_rewind_files: value
+            .pointer("/actions/canRewindFiles")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+/// Minimal snapshot/delta cache for the hybrid V4 control plane. The V4
+/// frame's `toSeq` is an event sequence, not the command CAS revision; only
+/// `snapshot.revision` and `state.updated.patch.revision` update `revision`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct V4ConversationState {
+    pub revision: Option<u64>,
+    pub log_epoch: Option<String>,
+    pub input_routing: Option<String>,
+    pub followup_mode: Option<String>,
+    pub set_followup_allowed: Option<bool>,
+    pub rows: Vec<V4ConversationRow>,
+    /// Command id -> admitted delivery, retained so a frame that races ahead
+    /// of its response can still settle the pending steer once the ack lands.
+    pub input_deliveries: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct V4FrameEffect {
+    pub deliveries: Vec<(String, String)>,
+}
+
+impl V4ConversationState {
+    fn apply_queue(&mut self, value: &serde_json::Value, effect: &mut V4FrameEffect) {
+        let Some(items) = value.get("items").and_then(|v| v.as_array()) else {
+            return;
+        };
+        for item in items {
+            let Some(command_id) = item.get("sourceCommandId").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(delivery) = item.pointer("/delivery/admitted").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            self.input_deliveries
+                .insert(command_id.to_string(), delivery.to_string());
+            effect
+                .deliveries
+                .push((command_id.to_string(), delivery.to_string()));
+        }
+    }
+
+    fn apply_state_patch(&mut self, patch: &serde_json::Value, effect: &mut V4FrameEffect) {
+        if let Some(revision) = patch.get("revision").and_then(serde_json::Value::as_u64) {
+            self.revision = Some(revision);
+        }
+        if let Some(mode) = patch.pointer("/inputRouting/mode").and_then(|v| v.as_str()) {
+            self.input_routing = Some(mode.to_string());
+        }
+        if let Some(mode) = patch
+            .pointer("/config/followupMode")
+            .and_then(|v| v.as_str())
+        {
+            self.followup_mode = Some(mode.to_string());
+        }
+        if let Some(allowed) = patch
+            .pointer("/availability/setFollowupMode/allowed")
+            .and_then(serde_json::Value::as_bool)
+        {
+            self.set_followup_allowed = Some(allowed);
+        }
+        if let Some(queue) = patch.get("queue") {
+            self.apply_queue(queue, effect);
+        }
+    }
+
+    fn upsert_row(&mut self, row: V4ConversationRow) {
+        if let Some(existing) = self.rows.iter_mut().find(|old| old.row_id == row.row_id) {
+            *existing = row;
+        } else {
+            self.rows.push(row);
+            self.rows.sort_by_key(|row| row.row_id);
+        }
+    }
+
+    /// Apply one complete `v4/conversation/frame` params object. Fragmented
+    /// transport frames are ignored safely; the conversation window is bounded
+    /// and normal CLI frames are complete in observed 3.5.3 sessions.
+    pub fn apply_frame(&mut self, params: &serde_json::Value) -> V4FrameEffect {
+        let mut effect = V4FrameEffect::default();
+        let Some(payload) = params.pointer("/frame/payload") else {
+            return effect;
+        };
+        match payload.get("kind").and_then(|v| v.as_str()) {
+            Some("snapshot") => {
+                let Some(snapshot) = payload.get("snapshot") else {
+                    return effect;
+                };
+                self.revision = snapshot.get("revision").and_then(serde_json::Value::as_u64);
+                self.log_epoch = snapshot
+                    .get("logEpoch")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                self.input_routing = snapshot
+                    .pointer("/inputRouting/mode")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                self.followup_mode = snapshot
+                    .pointer("/config/followupMode")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                self.set_followup_allowed = snapshot
+                    .pointer("/availability/setFollowupMode/allowed")
+                    .and_then(serde_json::Value::as_bool);
+                self.rows = snapshot
+                    .pointer("/rows/window")
+                    .and_then(|v| v.as_array())
+                    .map(|rows| rows.iter().filter_map(parse_v4_row).collect())
+                    .unwrap_or_default();
+                self.input_deliveries.clear();
+                if let Some(queue) = snapshot.get("queue") {
+                    self.apply_queue(queue, &mut effect);
+                }
+            }
+            Some("deltas") => {
+                let Some(deltas) = payload.get("deltas").and_then(|v| v.as_array()) else {
+                    return effect;
+                };
+                for delta in deltas {
+                    match delta.get("op").and_then(|v| v.as_str()) {
+                        Some("state.updated") => {
+                            if let Some(patch) = delta.get("patch") {
+                                self.apply_state_patch(patch, &mut effect);
+                            }
+                        }
+                        Some("row.appended") | Some("row.upserted") => {
+                            if let Some(row) = delta.get("row").and_then(parse_v4_row) {
+                                self.upsert_row(row);
+                            }
+                        }
+                        Some("row.removed") => {
+                            if let Some(row_id) =
+                                delta.get("rowId").and_then(serde_json::Value::as_u64)
+                            {
+                                self.rows.retain(|row| row.row_id != row_id);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        effect
+    }
+
+    pub fn rewind_rows(&self) -> Vec<&V4ConversationRow> {
+        self.rows
+            .iter()
+            .rev()
+            .filter(|row| {
+                row.kind == "turnHeader"
+                    && row.can_rewind_files
+                    && row.files > 0
+                    && row.file_state.as_deref() != Some("reverted")
+            })
+            .collect()
+    }
+
+    pub fn delivery_for(&self, command_id: &str) -> Option<&str> {
+        self.input_deliveries.get(command_id).map(String::as_str)
+    }
+}
+
+/// Semantic acknowledgement returned by `v4/command`. A successful response
+/// envelope may still carry status stale/rejected/failed, so callers must
+/// inspect this object before changing UI state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct V4CommandAck {
+    pub command_id: String,
+    pub status: String,
+    pub reason_code: Option<String>,
+    pub message: Option<String>,
+    pub revision_at_decision: u64,
+    pub result: Option<serde_json::Value>,
+}
+
+impl V4CommandAck {
+    pub fn accepted(&self) -> bool {
+        matches!(self.status.as_str(), "accepted" | "duplicate" | "noop")
+    }
+
+    pub fn input_delivery(&self) -> Option<&str> {
+        self.result
+            .as_ref()
+            .filter(|result| {
+                result.get("type").and_then(|v| v.as_str()) == Some("inputDisposition")
+            })
+            .and_then(|result| result.get("delivery"))
+            .and_then(|v| v.as_str())
+    }
+}
+
+pub fn parse_v4_command_ack(result: &serde_json::Value) -> Option<V4CommandAck> {
+    Some(V4CommandAck {
+        command_id: result.get("commandId")?.as_str()?.to_string(),
+        status: result.get("status")?.as_str()?.to_string(),
+        reason_code: result
+            .get("reasonCode")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        message: result
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        revision_at_decision: result
+            .get("revisionAtDecision")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        result: result.get("result").cloned(),
+    })
+}
+
 /// `session/resume` — reopen an existing session; the result is shaped like
 /// `session/create`'s (verified live: messages/projection/session/todos).
 /// `runtime_model` (from [`build_runtime_model`]) MUST accompany the resume:
@@ -3479,6 +3864,8 @@ pub enum RewindTarget {
     Message(String),
     /// `{kind:"turn", turnIndex}` — conversation rewind to before that turn.
     Turn(u64),
+    /// ZCode 3.5.3 V4 stable row target `{rowId, entityId}`.
+    V4Row { row_id: u64, entity_id: String },
 }
 
 impl RewindTarget {
@@ -3490,6 +3877,7 @@ impl RewindTarget {
             }
             Self::Message(id) => serde_json::json!({ "kind": "message", "messageId": id }),
             Self::Turn(index) => serde_json::json!({ "kind": "turn", "turnIndex": index }),
+            Self::V4Row { row_id, entity_id } => v4_rewind_target(*row_id, entity_id),
         }
     }
 
@@ -3500,7 +3888,12 @@ impl RewindTarget {
             Self::Checkpoint(id) => format!("checkpoint {}", checkpoint_short_id(id)),
             Self::Message(id) => format!("message {}", &id[..id.len().min(16)]),
             Self::Turn(index) => format!("turn {index}"),
+            Self::V4Row { row_id, .. } => format!("turn row {row_id}"),
         }
+    }
+
+    pub fn is_v4(&self) -> bool {
+        matches!(self, Self::V4Row { .. })
     }
 }
 
@@ -3517,6 +3910,7 @@ pub fn conversation_target(
         RewindTarget::LatestCheckpoint => checkpoints.last(),
         // Already conversation-shaped.
         RewindTarget::Message(_) | RewindTarget::Turn(_) => return Some(picker.clone()),
+        RewindTarget::V4Row { .. } => return None,
     }?;
     entry.message_id.clone().map(RewindTarget::Message)
 }
@@ -4102,6 +4496,8 @@ pub enum AppServerMessage {
     Event(AppServerEvent),
     /// `state.updated` — session status/mode/model/context watermark.
     StateUpdated(serde_json::Value),
+    /// ZCode 3.5.3 V4 conversation snapshot/delta transport frame.
+    V4Frame(serde_json::Value),
     /// Server→client request: carries `method` AND an envelope `id` we must
     /// echo back in the reply. The kernel uses STRING ids here (`"server-1"`,
     /// `"server-2"`, …) so the id is kept as raw JSON and returned verbatim
@@ -4247,6 +4643,12 @@ pub fn decode_app_message(line: &str) -> Option<AppServerMessage> {
             }))
         }
         Some("state.updated") => Some(AppServerMessage::StateUpdated(
+            value
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )),
+        Some("v4/conversation/frame") => Some(AppServerMessage::V4Frame(
             value
                 .get("params")
                 .cloned()
@@ -4845,6 +5247,22 @@ pub fn log_line_outbound(method: &str, id: u64) -> String {
     format!("-> {method} (id {id})")
 }
 
+/// Structural outbound request log. V4 commands add type/revision only; the
+/// payload is deliberately never serialized because sendText contains the
+/// user's prompt and other commands may grow credential-bearing fields.
+pub fn log_line_outbound_request(method: &str, id: u64, params: &serde_json::Value) -> String {
+    if method != "v4/command" {
+        return log_line_outbound(method, id);
+    }
+    let kind = params.get("type").and_then(|v| v.as_str()).unwrap_or("-");
+    let revision = params
+        .get("baseRevision")
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format!("-> v4/command type={kind} rev={revision} (id {id})")
+}
+
 /// Inbound message summary: message class + structural fields, truncated.
 /// Result/params bodies are never serialized.
 pub fn log_line_inbound(message: &AppServerMessage) -> String {
@@ -4872,6 +5290,31 @@ pub fn log_line_inbound(message: &AppServerMessage) -> String {
             "<- state.updated reason={}",
             params.get("reason").and_then(|r| r.as_str()).unwrap_or("-")
         ),
+        AppServerMessage::V4Frame(params) => {
+            let payload = params.pointer("/frame/payload");
+            let kind = payload
+                .and_then(|value| value.get("kind"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("-");
+            let revision = payload
+                .and_then(|value| value.pointer("/snapshot/revision"))
+                .and_then(serde_json::Value::as_u64)
+                .or_else(|| {
+                    payload
+                        .and_then(|value| value.get("deltas"))
+                        .and_then(|value| value.as_array())
+                        .and_then(|deltas| {
+                            deltas.iter().rev().find_map(|delta| {
+                                delta
+                                    .pointer("/patch/revision")
+                                    .and_then(serde_json::Value::as_u64)
+                            })
+                        })
+                })
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            format!("<- v4/conversation/frame kind={kind} rev={revision}")
+        }
         AppServerMessage::ServerRequest { id, method, .. } => {
             format!(
                 "<- server-request {method} id {}",
@@ -4962,7 +5405,7 @@ impl AppServerConn {
         self.next_id += 1;
         // Method name only — params may carry credentials (runtimeModel).
         if let Some(log) = &self.log {
-            log.line(&log_line_outbound(method, id));
+            log.line(&log_line_outbound_request(method, id, &params));
         }
         let line = format!("{}\n", encode_app_request(id, method, params));
         self.stdin

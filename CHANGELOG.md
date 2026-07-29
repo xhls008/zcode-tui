@@ -8,6 +8,23 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ### 新增
 
+- **ZCode 3.5.3 混合 V4 控制面适配**:legacy
+  `session/create|resume|subscribe|send|event` 继续承担已验证的正文流，取得
+  sessionId 后自动协商 `v4/conversation/subscribe`，缓存 snapshot/delta 的
+  revision、logEpoch、input routing 与 rows。3.3.6 对 V4 返回 Method not
+  found 时保留旧控制路径，不把可用正文流降级掉。
+- **3.5.3 V4 steer**:流式回合中输入改走
+  `setFollowupMode {mode:"guide"}` + `sendText`；成功必须等随后 frame 的
+  queue delivery 明确为 guide，stale/rejected 才退回本地队列。协议日志记录
+  command type/revision/delivery 且不记录文本。
+- **3.5.3 V4 文件回滚**:`/rewind` 从 V4 turnHeader rows 选择稳定
+  `{rowId,entityId}`，先调 `v4/conversation/fileRewindPreview`，再用带
+  revision/logEpoch 的 `v4/command applyFileRewind` 安全应用；已回滚 row 从
+  候选移除。3.3.6 的 checkpoint/legacy 安全路径继续保留。
+- **Browser Use 路由**:显式解析 `--browser-use headless` 与
+  `--browser-executable`；相关 prompt 强制进入官方经典 CLI，避免 strict
+  app-server 路径静默丢参，并明确提示该 turn 无 app-server 流式控制。
+
 - **ZCode 3.3.6 会话工具策略适配**:`--allowed-tools` 与
   `--disallowed-tools`/`--disallowedTools` 在经典路径透传给 `--prompt`,
   app-server 路径按 3.3.6 strict schema 写入 `session/create`/`resume` 的
@@ -20,6 +37,13 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ### 修复
 
+- **PTY steer 假阳性**:旧场景只断言本地 optimistic “steering” 文案，3.5.3
+  实际随后返回 Method not found 并把输入退回队列也会通过。现改为断言 V4
+  semantic delivery=guide、未调用 `session/steer` 且无隐藏协议错误。
+- **3.5.3 rewind 方法删除**:不再调用已移除的
+  `session/previewFileRewind`/`session/applyFileRewind`/`session/rewind`；
+  V4 内核拒绝/陈旧时不会再尝试危险的 legacy 兜底。
+
 - **3.3.6 更新源占位兼容**:观察到的 3.3.6 包把 `app-update.yml` 指向
   `http://localhost:8081`;未显式覆盖时该 loopback 占位地址会回退项目记录的
   官方 Linux feed。新增 `ZCODE_TUI_UPDATE_FEED` 显式覆盖(允许本地冒烟源),
@@ -27,6 +51,11 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
   quoting，既有 basename + sha512 + 进程组取消安全属性不变。
 
 ### 验证
+
+- 对真实 3.5.3 临时会话验证 V4 guide delivery；新建两轮写文件会话后，V4
+  preview 返回 `canApply:true`，apply ack 为 `applied:true`，磁盘 `r.txt`
+  实际从 `two` 恢复为 `one`。Browser Use 使用确定性 fake CLI 验证参数到达
+  `--prompt` 且 app-server 未启动。
 
 - 3.3.4/3.3.6 的已知 app-server 方法集合一致且 `session/list {}` 均成功；
   3.3.6 bundle 实证 create/resume 新增 toolAllowlist/toolDenylist。其 help

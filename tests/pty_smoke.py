@@ -33,6 +33,20 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-B]")
 import pyte
 
 
+def screen_text(screen):
+    """Render pyte cells without assuming every cell carries a character.
+
+    pyte 0.8.x's Screen.display indexes char[0]; ratatui can leave an empty
+    wide-character stub cell after differential redraws, which makes the test
+    helper crash with IndexError. Empty stubs occupy a terminal cell, so a
+    space is the correct substring-search representation.
+    """
+    return "\n".join(
+        "".join((screen.buffer[y][x].data or " ") for x in range(screen.columns))
+        for y in range(screen.lines)
+    )
+
+
 def screen_seen(raw, needle, step=128):
     """True if `needle` was visible on the emulated terminal screen at any
     point while replaying `raw` (bytes) in `step`-sized chunks.
@@ -49,7 +63,7 @@ def screen_seen(raw, needle, step=128):
     decoded = raw.decode("utf-8", errors="replace")
     for at in range(0, len(decoded), step):
         stream.feed(decoded[at : at + step])
-        if needle in "\n".join(screen.display):
+        if needle in screen_text(screen):
             return True
     return False
 
@@ -62,7 +76,7 @@ def screen_max_count(raw, needle, step=128):
     maximum = 0
     for at in range(0, len(decoded), step):
         stream.feed(decoded[at : at + step])
-        maximum = max(maximum, "\n".join(screen.display).count(needle))
+        maximum = max(maximum, screen_text(screen).count(needle))
     return maximum
 
 
@@ -483,12 +497,13 @@ check("s14: compact round-trip acknowledged", screen_seen(raw, "compacted"))
 
 # ---- scenario 15: steer — typing mid-turn steers instead of queueing ----
 print("== scenario 15: steer mid-turn (app-server) ==", flush=True)
+steer_log = os.path.join(tempfile.mkdtemp(prefix="zcode-smoke-steer-"), "protocol.log")
 out = run_pty(
-    {}, SPIKE,
+    {"ZCODE_TUI_LOG": steer_log}, SPIKE,
     [
         (1.5, b"Count slowly from 1 to 50, one number per line, no shortcuts."),
         (0.5, b"\r"),
-        (2.0, b"Stop counting and just say STEERED."),
+        (3.0, b"Stop counting and just say STEERED."),
         (0.5, b"\r"),
         (60.0, b"/exit"),
         (0.5, b"\r"),
@@ -497,7 +512,14 @@ out = run_pty(
 )
 plain = strip_ansi(out)
 raw = run_pty.last_raw
-check("s15: steer marker in transcript", screen_seen(raw, "steering the running turn"))
+with open(steer_log) as fh:
+    steer_log_text = fh.read()
+check("s15: semantic V4 guide marker in transcript",
+      screen_seen(raw, "steered the running turn (V4 guide)"))
+check("s15: V4 frame confirmed guide delivery",
+      "v4 steer command=" in steer_log_text and "delivery=guide" in steer_log_text)
+check("s15: removed legacy steer was not called", "-> session/steer" not in steer_log_text)
+check("s15: no hidden Method not found", "Method not found" not in steer_log_text)
 check("s15: input not queued", not screen_seen(raw, "queued ("))
 check("s15: turn completed after steer", screen_seen(raw, "done ("))
 
@@ -690,8 +712,9 @@ check("s21: turn completed on resumed session", screen_seen(run_pty.last_raw, "d
 # applyFileRewind — r.txt must be back to "one" on disk afterwards.
 print("== scenario 22: /rewind file restore (app-server) ==", flush=True)
 rewind_dir = tempfile.mkdtemp(prefix="zcode-smoke-rewind-")
+rewind_log = os.path.join(rewind_dir, "protocol.log")
 out = run_pty(
-    {}, rewind_dir,
+    {"ZCODE_TUI_LOG": rewind_log}, rewind_dir,
     [
         (1.5, b"Create a file named r.txt containing one. Just do it."),
         (0.5, b"\r"),
@@ -709,9 +732,19 @@ out = run_pty(
     timeout=260,
 )
 raw = run_pty.last_raw
-check("s22: rewind picker listed targets", screen_seen(raw, "latest checkpoint"))
+with open(rewind_log) as fh:
+    rewind_log_text = fh.read()
+check("s22: rewind picker listed V4 row targets", screen_seen(raw, "turn row"))
 check("s22: preview stage rendered", screen_seen(raw, "rewind preview"))
 check("s22: file restore acknowledged", screen_seen(raw, "rewound (files)"))
+check("s22: V4 preview method used",
+      "-> v4/conversation/fileRewindPreview" in rewind_log_text)
+check("s22: V4 apply command used",
+      "-> v4/command type=applyFileRewind" in rewind_log_text)
+check("s22: removed legacy rewind methods not used",
+      "-> session/previewFileRewind" not in rewind_log_text
+      and "-> session/applyFileRewind" not in rewind_log_text
+      and "-> session/rewind" not in rewind_log_text)
 r_path = os.path.join(rewind_dir, "r.txt")
 r_content = open(r_path).read().strip() if os.path.exists(r_path) else "<absent>"
 check("s22: file reverted on disk (two -> one)", r_content == "one",
@@ -732,6 +765,50 @@ out = run_pty(
 plain = strip_ansi(out)
 check("s23: reports the app-server requirement",
       screen_seen(run_pty.last_raw, "needs an active app-server session"))
+
+# ---- scenario 24: Browser Use routes to official classic CLI ----
+# Deterministic fake: Browser flags must reach --prompt and app-server must
+# never be spawned, otherwise they would be silently ignored by strict
+# session schemas.
+print("== scenario 24: Browser Use classic routing ==", flush=True)
+browser_dir = tempfile.mkdtemp(prefix="zcode-smoke-browser-")
+browser_args = os.path.join(browser_dir, "args.txt")
+browser_app_server = os.path.join(browser_dir, "app-server-called")
+browser_fake = os.path.join(browser_dir, "fake-zcode")
+with open(browser_fake, "w") as fh:
+    fh.write(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  version) echo 0.15.2 ;;\n"
+        f"  app-server) touch {browser_app_server}; exit 9 ;;\n"
+        f"  *) printf '%s\\n' \"$@\" > {browser_args}; "
+        "printf '%s\\n' "
+        "'{\"type\":\"result\",\"response\":\"browser route ok\",\"sessionId\":\"sess_browser\"}' ;;\n"
+        "esac\n"
+    )
+os.chmod(browser_fake, 0o755)
+out = run_pty(
+    {"ZCODE_TUI_ZCODE_BIN": browser_fake}, browser_dir,
+    [
+        (1.5, b"open the example page"),
+        (0.5, b"\r"),
+        (3.0, b"/exit"),
+        (0.5, b"\r"),
+    ],
+    timeout=20,
+    args=["--browser-use", "headless", "--browser-executable", "/tmp/fake-chrome"],
+)
+plain = strip_ansi(out)
+browser_argv = open(browser_args).read().splitlines() if os.path.exists(browser_args) else []
+check("s24: Browser Use limitation is visible",
+      screen_seen(run_pty.last_raw, "Browser Use is running through the classic ZCode CLI"))
+check("s24: classic prompt returned", "browser route ok" in plain)
+check("s24: browser flags reached official CLI",
+      "--browser-use" in browser_argv and "headless" in browser_argv
+      and "--browser-executable" in browser_argv and "/tmp/fake-chrome" in browser_argv)
+check("s24: prompt reached official CLI",
+      "--prompt" in browser_argv and "open the example page" in browser_argv)
+check("s24: app-server was not spawned", not os.path.exists(browser_app_server))
 
 failed = [name for name, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} checks passed", flush=True)

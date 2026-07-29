@@ -96,6 +96,39 @@ fn build_prompt_command_uses_headless_zcode_cli_options() {
 }
 
 #[test]
+fn browser_use_is_explicit_and_preserved_on_classic_prompt() {
+    let config = parse_cli_args([
+        "--browser-use=headless",
+        "--browser-executable",
+        "/opt/chrome/chrome",
+    ])
+    .unwrap();
+    assert_eq!(config.browser_use.as_deref(), Some("headless"));
+    assert_eq!(
+        config.browser_executable.as_deref(),
+        Some("/opt/chrome/chrome")
+    );
+    assert!(config.passthrough.is_empty());
+    let command = build_prompt_command("zcode", &config, "browse docs");
+    assert_eq!(
+        command,
+        vec![
+            "zcode",
+            "--browser-use",
+            "headless",
+            "--browser-executable",
+            "/opt/chrome/chrome",
+            "--json",
+            "--prompt",
+            "browse docs",
+        ]
+    );
+    assert!(parse_cli_args(["--browser-use", "invalid"]).is_err());
+    assert!(parse_cli_args(["--browser-executable", "/opt/chrome"]).is_err());
+    assert!(parse_cli_args(["--browser-use="]).is_err());
+}
+
+#[test]
 fn classic_prompt_preserves_tool_policy_rules() {
     let config = parse_cli_args([
         "--allowed-tools=Read,Glob",
@@ -2387,6 +2420,143 @@ fn rewind_params_match_pinned_shapes() {
         RewindTarget::Checkpoint("checkpoint_90c0d5df-xyz".into()).label(),
         "checkpoint 90c0d5df"
     );
+}
+
+#[test]
+fn v4_353_subscribe_command_and_rewind_shapes() {
+    use zcode_tui::{
+        v4_command_params, v4_conversation_subscribe_params, v4_file_rewind_preview_params,
+        v4_rewind_target, V4CommandBase,
+    };
+    assert_eq!(
+        v4_conversation_subscribe_params("sess_1", "zcode-tui-7"),
+        serde_json::json!({
+            "topic":"conversation/sess_1",
+            "connectionId":"zcode-tui-7",
+            "clientMode":"desktop-continuous",
+            "visibility":"foreground"
+        })
+    );
+    assert_eq!(
+        v4_command_params(
+            "cmd_1",
+            "zcode-tui-7",
+            "sess_1",
+            "setFollowupMode",
+            serde_json::json!({"mode":"guide"}),
+            V4CommandBase::Revision(12),
+            99,
+        ),
+        serde_json::json!({
+            "commandId":"cmd_1","clientId":"zcode-tui-7","sessionId":"sess_1",
+            "baseRevision":12,"type":"setFollowupMode","payload":{"mode":"guide"},
+            "issuedAt":99
+        })
+    );
+    assert_eq!(
+        v4_file_rewind_preview_params("sess_1", 6, "msg_x", 26, "epoch_x"),
+        serde_json::json!({
+            "sessionId":"sess_1","target":{"rowId":6,"entityId":"msg_x"},
+            "baseRevision":26,"baseLogEpoch":"epoch_x"
+        })
+    );
+    assert_eq!(
+        v4_rewind_target(6, "msg_x"),
+        serde_json::json!({"rowId":6,"entityId":"msg_x"})
+    );
+}
+
+#[test]
+fn v4_frames_track_revision_rows_and_semantic_guide_delivery() {
+    use zcode_tui::V4ConversationState;
+    let mut state = V4ConversationState::default();
+    let snapshot = serde_json::json!({
+        "wireVersion":3,"kind":"complete","frame":{"payload":{"kind":"snapshot","snapshot":{
+            "revision":0,"logEpoch":"epoch_a","inputRouting":{"mode":"startNow"},
+            "config":{"followupMode":"queue"},
+            "availability":{"setFollowupMode":{"allowed":true}},
+            "queue":{"items":[]},"rows":{"window":[]}
+        }}}
+    });
+    assert!(state.apply_frame(&snapshot).deliveries.is_empty());
+    assert_eq!(state.revision, Some(0));
+    assert_eq!(state.log_epoch.as_deref(), Some("epoch_a"));
+    assert_eq!(state.input_routing.as_deref(), Some("startNow"));
+
+    let delta = serde_json::json!({
+        "wireVersion":3,"kind":"complete","frame":{"payload":{"kind":"deltas","deltas":[
+            {"op":"row.appended","row":{"rowId":6,"entityId":"msg_x","kind":"turnHeader",
+                "state":"completedSuccess","fileChanges":{"files":1,"additions":1,"deletions":1,
+                "state":"active"},"actions":{"canRewindFiles":true}}},
+            {"op":"state.updated","patch":{"config":{"followupMode":"guide"},
+                "inputRouting":{"mode":"guide"},"revision":27,
+                "queue":{"items":[{"sourceCommandId":"cmd_text",
+                    "delivery":{"requested":"guide","admitted":"guide"}}]}}}
+        ]}}
+    });
+    let effect = state.apply_frame(&delta);
+    assert_eq!(state.revision, Some(27));
+    assert_eq!(state.followup_mode.as_deref(), Some("guide"));
+    assert_eq!(state.delivery_for("cmd_text"), Some("guide"));
+    assert_eq!(effect.deliveries, vec![("cmd_text".into(), "guide".into())]);
+    let rows = state.rewind_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_id, 6);
+    assert_eq!(rows[0].entity_id, "msg_x");
+
+    let reverted = serde_json::json!({
+        "frame":{"payload":{"kind":"deltas","deltas":[
+            {"op":"row.upserted","row":{"rowId":6,"entityId":"msg_x","kind":"turnHeader",
+                "state":"completedSuccess","fileChanges":{"files":1,"additions":1,"deletions":1,
+                "state":"reverted"},"actions":{"canRewindFiles":true}}}
+        ]}}
+    });
+    state.apply_frame(&reverted);
+    assert!(state.rewind_rows().is_empty());
+}
+
+#[test]
+fn v4_command_ack_requires_semantic_status() {
+    use zcode_tui::parse_v4_command_ack;
+    let accepted = parse_v4_command_ack(&serde_json::json!({
+        "commandId":"cmd_1","status":"accepted","revisionAtDecision":3,
+        "result":{"type":"inputDisposition","delivery":"guide"}
+    }))
+    .unwrap();
+    assert!(accepted.accepted());
+    assert_eq!(accepted.input_delivery(), Some("guide"));
+
+    let stale = parse_v4_command_ack(&serde_json::json!({
+        "commandId":"cmd_2","status":"stale","reasonCode":"proto.staleRevision",
+        "revisionAtDecision":2
+    }))
+    .unwrap();
+    assert!(!stale.accepted());
+    assert_eq!(stale.reason_code.as_deref(), Some("proto.staleRevision"));
+}
+
+#[test]
+fn v4_frame_decodes_and_protocol_log_stays_structural() {
+    use zcode_tui::{
+        decode_app_message, log_line_inbound, log_line_outbound_request, AppServerMessage,
+    };
+    let raw = r#"{"method":"v4/conversation/frame","params":{"kind":"complete","frame":{"payload":{"kind":"snapshot","snapshot":{"revision":7}}}}}"#;
+    let message = decode_app_message(raw).expect("v4 frame decodes");
+    assert!(matches!(message, AppServerMessage::V4Frame(_)));
+    assert_eq!(
+        log_line_inbound(&message),
+        "<- v4/conversation/frame kind=snapshot rev=7"
+    );
+    let outbound = log_line_outbound_request(
+        "v4/command",
+        9,
+        &serde_json::json!({
+            "type":"sendText","baseRevision":7,
+            "payload":{"text":"TOP SECRET"}
+        }),
+    );
+    assert_eq!(outbound, "-> v4/command type=sendText rev=7 (id 9)");
+    assert!(!outbound.contains("TOP SECRET"));
 }
 
 #[test]

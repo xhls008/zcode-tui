@@ -84,7 +84,9 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   补齐上面 db 轮询对单轮无中间态的空缺。任一环节失败（起不动 /
   握手超时 / schema 不符 / 断连）→ 本进程永久无缝降级回 `--prompt` + 一条
   dim 提示，当前 prompt 用 `--prompt` 重试一次，用户永不卡死；需要经典
-  `--prompt` 路径时设 `ZCODE_TUI_APP_SERVER=0`。
+  `--prompt` 路径时设 `ZCODE_TUI_APP_SERVER=0`。ZCode 3.5.3 上会在 legacy
+  正文流之上协商 `v4/conversation/subscribe`，仅把新版控制能力接到 V4；
+  3.3.6 返回 Method not found 时继续使用既有 legacy 控制，不影响正文流。
 - **工具权限确认（app-server 路径）**：build 模式下有副作用的工具（写文件等）
   与 plan 模式的计划审批会弹**确认浮层**（↑↓ 选项 / Enter 应答 / Esc 拒绝），
   批准后工具同回合继续执行；plan 计划批准后自动切 build 并续跑。
@@ -98,12 +100,19 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 - **会话控制（app-server 路径）**：`/model` 浮层切换模型、`/think` 循环思考
   级别、`/compact` 原地压缩上下文保住会话、`/mode`/Shift+Tab 即刻切换活跃
   会话的权限模式；**流式回合进行中直接输入文本＝转向（steer）当前回合**，
-  不用取消重来。
+  不用取消重来。3.5.3 使用 V4 `setFollowupMode:guide` + `sendText`，并以随后
+  frame 中 queue item 的 `delivery.admitted == guide` 才判成功；旧内核继续
+  使用 `session/steer`。不再把本地“steering”提示误当成协议成功。
 - **检查点回滚（app-server 路径）**：内核每次放行的工具写盘都会产生检查点；
-  `/rewind` 浮层列出本会话检查点（含 latestCheckpoint），Enter 先预览将
-  还原/删除的文件，选 scope 后应用。文件回滚走 `applyFileRewind`——被会话外
-  修改过的文件**拒绝覆盖**（绝不强刷你的手工改动）；对话回滚以
-  `rewind.triggered` 事件判成败（内核对失败也返回成功信封，不上当）。
+  3.3.6 的 `/rewind` 浮层列出本会话检查点（含 latestCheckpoint），Enter
+  先预览将还原/删除的文件，选 scope 后应用；3.5.3 则从 V4 conversation
+  rows 选择稳定 `{rowId,entityId}`，调用 V4 preview 与
+  `v4/command applyFileRewind`。两条路径都尊重 unsafe file 拒绝，绝不强刷
+  会话外手工改动；3.5.3 尚未验证等价的对话 scope，因此只开放 workspace。
+- **Browser Use（ZCode 3.5.3）**：`--browser-use headless` 与可选
+  `--browser-executable <path>` 被显式解析。由于 strict app-server schema
+  不接受 `browserUse`，这类 turn 明确路由到官方 `zcode --prompt`，界面提示
+  该 turn 没有 token 流式/steer 控制；参数不会再在流式路径被静默忽略。
 - **上下文水位**：prompt 通道用 `--json` 总结对象作为权威结果（response 走
   markdown 渲染，解析失败自动降级纯文本），状态栏常驻 `ctx 9k/200k (4%)`
   用量显示，≥80% 提示 `/compact` 或 `/new`。
@@ -368,8 +377,9 @@ ZCODE_TUI_UPDATE_FEED        显式覆盖 latest-linux.yml URL（也可给目录
 ZCODE_TUI_APP_SERVER         默认启用真流式（走 zcode app-server，逐 token
                              流式；失败无缝降级回 --prompt）。工具权限确认
                              浮层、/model /think /compact、/mode 即刻切换与
-                             steer 中途转向都跑在这条路径上。设 0/off/false/no
-                             关闭；1/true/on 继续兼容旧 wrapper
+                             steer 中途转向都跑在这条路径上；3.5.3 控制面自动
+                             协商 V4。设 0/off/false/no 关闭；1/true/on 继续
+                             兼容旧 wrapper
 ZCODE_API_KEY 等             /auth 检测的 API key 环境变量链
 ZCODE_TUI_NO_MOUSE           置 1 关闭鼠标捕获
 ZCODE_TUI_SKYLINE            欢迎页 ZCODE logo 渲染：默认探测终端图形协议
@@ -380,7 +390,8 @@ ZCODE_TUI_SKYLINE            欢迎页 ZCODE logo 渲染：默认探测终端图
                              off 关闭天际线。若点阵显示成方块/发虚，设 wire
 ZCODE_TUI_CONFIG             配置文件路径（默认 ~/.config/zcode-tui/config）
 ZCODE_TUI_LOG                设为文件路径开启协议调试日志（追加式：入站
-                             摘要、出站只记方法名、握手/收尾/降级转换；
+                             摘要、出站只记方法名；V4 额外记录 command type、
+                             revision 与 steer delivery，握手/收尾/降级转换；
                              绝不记录请求 params——runtimeModel/apiKey
                              不落盘；未设时零开销）
 ZCODE_APP                    wrapper：指定 ZCode 桌面包目录（覆盖自动探测）

@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{self, Stdout, Write as _};
@@ -47,16 +47,18 @@ use zcode_tui::{
     parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
     parse_kernel_slash_commands, parse_prompt_summary, parse_resume_messages, parse_rewind_preview,
     parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
-    prompt_command_for, recent_input_history, relative_age, rewind_failure, run_command,
-    select_update_feed_url, shorten_home, skyline_braille, skyline_graphics_wanted, skyline_lines,
-    skyline_mode, slash_suggestions_merged, spawn_streaming_command, tool_input_summary,
-    usage_stats_params, user_mcp_config_path, with_mcp_servers, with_tool_policy, wrap_display,
-    zcode_app_version_from_path, AppConfig, AppServerConn, AppServerEvent, AppServerMessage,
-    AppServerTurn, AppServerUnavailable, AuthStatus, CheckpointEntry, DbBaseline, DebugLog,
-    DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction, LiveToolChip,
-    MdLineKind, RewindPreview, RewindTarget, SessionControls, SessionRow, SkylineMode, SpanRole,
-    SteerOutcome, StreamEvent, StreamingJob, TodoItem, ToolChipStatus, TurnDelta, UiConfig,
-    UpdateFeed, SKYLINE_LOGO_W,
+    parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age, rewind_failure,
+    run_command, select_update_feed_url, shorten_home, skyline_braille, skyline_graphics_wanted,
+    skyline_lines, skyline_mode, slash_suggestions_merged, spawn_streaming_command,
+    tool_input_summary, usage_stats_params, user_mcp_config_path, v4_command_params,
+    v4_conversation_subscribe_params, v4_file_rewind_preview_params, v4_rewind_target,
+    with_mcp_servers, with_tool_policy, wrap_display, zcode_app_version_from_path, AppConfig,
+    AppServerConn, AppServerEvent, AppServerMessage, AppServerTurn, AppServerUnavailable,
+    AuthStatus, CheckpointEntry, DbBaseline, DebugLog, DiffRole, InputAction, InteractionRequest,
+    JobEvent, KernelCommand, LeaderAction, LiveToolChip, MdLineKind, RewindPreview, RewindTarget,
+    SessionControls, SessionRow, SkylineMode, SpanRole, SteerOutcome, StreamEvent, StreamingJob,
+    TodoItem, ToolChipStatus, TurnDelta, UiConfig, UpdateFeed, V4CommandBase, V4ConversationState,
+    SKYLINE_LOGO_W,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -76,6 +78,13 @@ const NOTIFY_AFTER_SECS: f32 = 30.0;
 /// Resume history replay: how many messages, and the per-message char cap.
 const REPLAY_LIMIT: usize = 6;
 const REPLAY_CAP: usize = 400;
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// The ZCODE block wordmark. Rendered bright (`█` blocks) over a dim/shadow
 /// secondary layer; the responsive Beijing-skyline wireframe (`skyline_lines`)
@@ -565,6 +574,13 @@ enum AppMode {
     Downgraded,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum V4Mode {
+    Unknown,
+    Available,
+    Unavailable,
+}
+
 /// A single in-flight app-server turn. Answer text streams into an assistant
 /// transcript entry token by token; running tools show as live chips and drop
 /// into the transcript (foldable) as they finish, so text and tools interleave
@@ -606,6 +622,7 @@ enum ConnectPhase {
     /// to Create (fresh session) instead of downgrading.
     Resume(u64),
     Subscribe(u64),
+    V4Subscribe(u64),
 }
 
 /// Stage tag copied out of `ConnectPhase` so a poll loop can mutate `self`
@@ -615,6 +632,7 @@ enum ConnectStage {
     Create,
     Resume,
     Subscribe,
+    V4Subscribe,
 }
 
 /// Availability of the kernel's sqlite database for live progress.
@@ -670,6 +688,14 @@ struct UiState {
     app_conn: Option<AppServerConn>,
     /// Kernel session reused across prompts once created (session continuity).
     app_session: Option<String>,
+    /// Optional ZCode 3.5.3 V4 control plane layered over the legacy body
+    /// stream. Method-not-found marks old kernels unavailable without
+    /// downgrading their otherwise healthy app-server connection.
+    v4_mode: V4Mode,
+    v4_state: V4ConversationState,
+    v4_client_id: String,
+    v4_command_seq: u64,
+    pending_v4_steers: HashMap<String, String>,
     app_turn: Option<AppTurn>,
     /// Welcome-skyline renderer (braille / wireframe / off), resolved once.
     skyline_mode: SkylineMode,
@@ -722,6 +748,9 @@ struct UiState {
     debug_log: Option<DebugLog>,
     /// Turn-complete bell (>30s turns); `notify = off` in the config disables.
     notify_enabled: bool,
+    /// Browser Use is global CLI configuration; explain its classic routing
+    /// once per run instead of repeating the limitation before every turn.
+    browser_route_noted: bool,
 }
 
 /// The approval overlay's state: the parsed request, the freshest envelope id
@@ -738,6 +767,16 @@ struct PendingInteraction {
 enum ControlReq {
     Command(&'static str),
     Steer(String),
+    /// V4 steer is two commands: first switch followup mode, then send text.
+    V4SetGuide {
+        content: String,
+        command_id: String,
+    },
+    /// Accepted sendText still needs a semantic delivery frame (guide/queue).
+    V4SteerText {
+        content: String,
+        command_id: String,
+    },
     /// A /usage sub-request; the tag ("session" | "stats") picks the
     /// formatter when the result arrives.
     Usage(&'static str),
@@ -755,6 +794,8 @@ enum ControlReq {
     /// /rewind: conversation-scope session/rewind in flight; judged by the
     /// preceding rewind.triggered event, never the envelope.
     RewindConversation(RewindTarget),
+    /// ZCode 3.5.3 V4 applyFileRewind command.
+    V4RewindApply(RewindTarget),
 }
 
 /// The /rewind overlay. Stage 1 (`preview: None`): pick a target from the
@@ -826,6 +867,11 @@ impl UiState {
             app_mode,
             app_conn: None,
             app_session: None,
+            v4_mode: V4Mode::Unknown,
+            v4_state: V4ConversationState::default(),
+            v4_client_id: format!("zcode-tui-{}", process::id()),
+            v4_command_seq: 0,
+            pending_v4_steers: HashMap::new(),
             app_turn: None,
             skyline_mode: skyline_mode(|key| env::var(key).ok()),
             skyline_graphics: skyline_graphics_wanted(|key| env::var(key).ok()),
@@ -843,6 +889,7 @@ impl UiState {
             rewind_trigger: None,
             debug_log: DebugLog::from_env(),
             notify_enabled,
+            browser_route_noted: false,
         }
     }
 
@@ -852,6 +899,58 @@ impl UiState {
         if let Some(log) = &self.debug_log {
             log.line(text);
         }
+    }
+
+    fn next_v4_command_id(&mut self, kind: &str) -> String {
+        self.v4_command_seq = self.v4_command_seq.saturating_add(1);
+        format!("{}-{kind}-{}", self.v4_client_id, self.v4_command_seq)
+    }
+
+    fn v4_cas_base(&self) -> Option<(u64, String)> {
+        Some((self.v4_state.revision?, self.v4_state.log_epoch.clone()?))
+    }
+
+    /// Merge a V4 snapshot/delta and settle any sendText whose semantic
+    /// delivery has become visible. A command response alone is not enough:
+    /// live 3.5.3 reports guide/queue in the subsequent queue frame.
+    fn apply_v4_frame(&mut self, params: serde_json::Value) {
+        let previous_revision = self.v4_state.revision;
+        let effect = self.v4_state.apply_frame(&params);
+        if self.v4_state.revision != previous_revision {
+            let revision = self.v4_state.revision.unwrap_or(0);
+            self.log_debug(&format!("v4: frame revision={revision}"));
+        }
+        for (command_id, delivery) in effect.deliveries {
+            if let Some(content) = self.pending_v4_steers.remove(&command_id) {
+                self.settle_v4_steer(&command_id, &content, &delivery);
+            }
+        }
+    }
+
+    fn settle_v4_steer(&mut self, command_id: &str, content: &str, delivery: &str) {
+        self.push_user(content);
+        match delivery {
+            "guide" => {
+                self.push_system("↪ steered the running turn (V4 guide)");
+                self.status = "steered (V4 guide)".to_string();
+            }
+            "queue" => {
+                self.push_system("↪ follow-up admitted to the kernel queue (not steered)");
+                self.status = "queued by kernel (V4)".to_string();
+            }
+            "startNow" => {
+                self.push_system("↪ follow-up started as a new kernel turn");
+                self.status = "started by kernel (V4)".to_string();
+            }
+            other => {
+                self.push_system(&format!("↪ kernel accepted follow-up delivery={other}"));
+                self.status = format!("follow-up {other}");
+            }
+        }
+        self.log_debug(&format!(
+            "v4 steer command={command_id} delivery={delivery}"
+        ));
+        self.scroll = 0;
     }
 
     /// Probe the terminal for a graphics protocol and, if one is available,
@@ -1498,6 +1597,20 @@ impl UiState {
     }
 
     fn start_prompt_job(&mut self, prompt: &str) {
+        // ZCode 3.5.3 exposes Browser Use only on the official CLI surface;
+        // strict session/create+send reject a guessed browserUse field. Route
+        // these turns explicitly to --prompt so the flags are never ignored.
+        if self.config.browser_use.is_some() {
+            if !self.browser_route_noted {
+                self.push_system(
+                    "Browser Use is running through the classic ZCode CLI; token streaming, \
+                     in-turn steer, and app-server controls are unavailable for these turns",
+                );
+                self.browser_route_noted = true;
+            }
+            self.start_prompt_job_via_cli(prompt);
+            return;
+        }
         // Experimental streaming path: true token streaming through the
         // long-lived app-server. Any failure downgrades this process
         // permanently and falls through to the classic --prompt path so the
@@ -1735,6 +1848,10 @@ impl UiState {
             return;
         }
         while let Some(message) = self.app_conn.as_mut().and_then(AppServerConn::poll) {
+            if let AppServerMessage::V4Frame(params) = message {
+                self.apply_v4_frame(params);
+                continue;
+            }
             let AppServerMessage::Response { id, result, error } = message else {
                 // Stray events/state before the turn starts: nothing to render.
                 continue;
@@ -1745,6 +1862,7 @@ impl UiState {
                     ConnectPhase::Create(want) => (ConnectStage::Create, *want),
                     ConnectPhase::Resume(want) => (ConnectStage::Resume, *want),
                     ConnectPhase::Subscribe(want) => (ConnectStage::Subscribe, *want),
+                    ConnectPhase::V4Subscribe(want) => (ConnectStage::V4Subscribe, *want),
                 },
                 None => return,
             };
@@ -1753,6 +1871,22 @@ impl UiState {
                 continue; // stale/unmatched response id
             }
             if let Some(why) = error {
+                // V4 is an optional control-plane capability. Old kernels
+                // return Method not found; other V4 failures are reported but
+                // must not tear down the healthy legacy text stream.
+                if matches!(stage, ConnectStage::V4Subscribe) {
+                    self.v4_mode = V4Mode::Unavailable;
+                    if why.contains("Method not found") {
+                        self.log_debug("v4: unavailable (legacy kernel)");
+                    } else {
+                        self.push_system(&format!(
+                            "V4 session controls unavailable ({why}); using legacy controls"
+                        ));
+                        self.log_debug(&format!("v4: subscribe failed ({why})"));
+                    }
+                    self.finish_app_connect();
+                    return;
+                }
                 // A failed resume (session gone/foreign) is not fatal: note it
                 // and redo the handshake with a fresh session. Anything else
                 // downgrades as before.
@@ -1836,39 +1970,28 @@ impl UiState {
                     }
                 }
                 ConnectStage::Subscribe => {
-                    // Subscribed: send the queued prompt and open the turn.
-                    let connect = self.app_connect.take().expect("connect present");
+                    // Layer the optional V4 control subscription over the
+                    // working legacy body stream before the first prompt.
                     let session_id = self.app_session.clone().expect("set on create");
-                    // Apply a pre-selected permission mode (--mode, or /mode
-                    // before the first prompt) to the fresh session first —
-                    // requests are processed in order, so the prompt below
-                    // already runs under it. Fresh sessions default to build.
-                    if let Some(mode) = self.config.mode.clone() {
-                        self.send_control(
-                            "session/setMode",
-                            app_set_mode_params(&session_id, &mode),
-                            ControlReq::Command("/mode"),
-                        );
-                    }
-                    // First-prompt send carries @file attachments too (the
-                    // fast path does the same for later prompts).
-                    let attachments = self.app_attachments_for(&connect.prompt);
-                    self.log_debug("handshake: subscribed, sending first prompt");
                     let conn = self.app_conn.as_mut().expect("alive checked above");
                     match conn.send(
-                        "session/send",
-                        app_send_params_with_attachments(
-                            &session_id,
-                            &connect.prompt,
-                            &attachments,
-                        ),
+                        "v4/conversation/subscribe",
+                        v4_conversation_subscribe_params(&session_id, &self.v4_client_id),
                     ) {
-                        Ok(send_id) => self.begin_app_turn(send_id),
+                        Ok(v4_id) => {
+                            if let Some(connect) = &mut self.app_connect {
+                                connect.phase = ConnectPhase::V4Subscribe(v4_id);
+                            }
+                        }
                         Err(err) => {
-                            self.downgrade_app_server(err);
-                            self.start_prompt_job_via_cli(&connect.prompt);
+                            self.app_connect_failed(err);
                         }
                     }
+                }
+                ConnectStage::V4Subscribe => {
+                    self.v4_mode = V4Mode::Available;
+                    self.log_debug("v4: conversation controls available");
+                    self.finish_app_connect();
                     return;
                 }
             }
@@ -1885,6 +2008,51 @@ impl UiState {
         }
     }
 
+    /// Finish the hybrid handshake and send its queued first prompt. The V4
+    /// initial frame is emitted immediately after the subscribe response and
+    /// will be consumed by `pump_app_turn` on the next tick.
+    fn finish_app_connect(&mut self) {
+        let Some(connect) = self.app_connect.take() else {
+            return;
+        };
+        let Some(session_id) = self.app_session.clone() else {
+            self.downgrade_app_server(AppServerUnavailable::Protocol(
+                "session missing after subscribe".to_string(),
+            ));
+            self.start_prompt_job_via_cli(&connect.prompt);
+            return;
+        };
+        if let Some(mode) = self.config.mode.clone() {
+            self.send_control(
+                "session/setMode",
+                app_set_mode_params(&session_id, &mode),
+                ControlReq::Command("/mode"),
+            );
+        }
+        let attachments = self.app_attachments_for(&connect.prompt);
+        self.log_debug("handshake: legacy+v4 negotiation complete, sending first prompt");
+        let result =
+            self.app_conn
+                .as_mut()
+                .map_or(Err(AppServerUnavailable::Disconnected), |conn| {
+                    conn.send(
+                        "session/send",
+                        app_send_params_with_attachments(
+                            &session_id,
+                            &connect.prompt,
+                            &attachments,
+                        ),
+                    )
+                });
+        match result {
+            Ok(send_id) => self.begin_app_turn(send_id),
+            Err(err) => {
+                self.downgrade_app_server(err);
+                self.start_prompt_job_via_cli(&connect.prompt);
+            }
+        }
+    }
+
     /// Handshake failed before any turn started: downgrade and retry the
     /// prompt once via the classic --prompt path (nothing was shown yet).
     fn app_connect_failed(&mut self, reason: AppServerUnavailable) {
@@ -1898,8 +2066,10 @@ impl UiState {
     /// Discard whatever is currently buffered on the connection without
     /// applying it (used to clear a cancelled turn's tail before a new turn).
     fn drain_app_events(&mut self) {
-        if let Some(conn) = self.app_conn.as_mut() {
-            while conn.poll().is_some() {}
+        while let Some(message) = self.app_conn.as_mut().and_then(AppServerConn::poll) {
+            if let AppServerMessage::V4Frame(params) = message {
+                self.apply_v4_frame(params);
+            }
         }
     }
 
@@ -2209,6 +2379,7 @@ fi"#
                         return;
                     }
                 }
+                AppServerMessage::V4Frame(params) => self.apply_v4_frame(params),
                 // The kernel asking *us* something (permission approval).
                 AppServerMessage::ServerRequest { id, method, params } => {
                     self.on_server_request(id, &method, &params);
@@ -2370,14 +2541,18 @@ fi"#
             return;
         }
         while let Some(message) = self.app_conn.as_mut().and_then(AppServerConn::poll) {
-            if let AppServerMessage::StateUpdated(params) = message {
-                if let Some(watermark) = app_state_watermark(&params) {
-                    self.context_watermark = Some(watermark);
+            match message {
+                AppServerMessage::StateUpdated(params) => {
+                    if let Some(watermark) = app_state_watermark(&params) {
+                        self.context_watermark = Some(watermark);
+                    }
+                    if app_state_is_turn_end(&params) || app_state_turn_error(&params).is_some() {
+                        self.app_draining = None;
+                        return;
+                    }
                 }
-                if app_state_is_turn_end(&params) || app_state_turn_error(&params).is_some() {
-                    self.app_draining = None;
-                    return;
-                }
+                AppServerMessage::V4Frame(params) => self.apply_v4_frame(params),
+                _ => {}
             }
         }
         if self
@@ -2448,6 +2623,7 @@ fi"#
                         self.todos = todos;
                     }
                 }
+                AppServerMessage::V4Frame(params) => self.apply_v4_frame(params),
                 AppServerMessage::ServerRequest { id, method, params } => {
                     self.on_server_request(id, &method, &params);
                 }
@@ -2589,13 +2765,17 @@ fi"#
                 self.push_error(&format!("{method} failed: {reason}"));
                 match req {
                     ControlReq::Steer(content) => self.queued.push_back(content),
+                    ControlReq::V4SetGuide { content, .. }
+                    | ControlReq::V4SteerText { content, .. } => self.queued.push_back(content),
                     // A rewind leg that never left must not wedge the overlay.
                     ControlReq::RewindPreview(_) => {
                         if let Some(overlay) = &mut self.rewind {
                             overlay.busy = false;
                         }
                     }
-                    ControlReq::RewindApplyFiles { .. } | ControlReq::RewindConversation(_) => {
+                    ControlReq::RewindApplyFiles { .. }
+                    | ControlReq::RewindConversation(_)
+                    | ControlReq::V4RewindApply(_) => {
                         self.close_rewind_overlay();
                     }
                     _ => {}
@@ -2617,6 +2797,19 @@ fi"#
                 self.queued.push_back(content);
                 true
             }
+            Some(ControlReq::V4SetGuide {
+                content,
+                command_id,
+            })
+            | Some(ControlReq::V4SteerText {
+                content,
+                command_id,
+            }) => {
+                self.push_error(&format!("V4 steer failed: {message} (input queued)"));
+                self.log_debug(&format!("v4 steer command={command_id} transport-error"));
+                self.queued.push_back(content);
+                true
+            }
             Some(ControlReq::Usage(tag)) => {
                 self.push_error(&format!("usage {tag} failed: {message}"));
                 true
@@ -2635,7 +2828,8 @@ fi"#
                 true
             }
             Some(ControlReq::RewindApplyFiles { target, .. })
-            | Some(ControlReq::RewindConversation(target)) => {
+            | Some(ControlReq::RewindConversation(target))
+            | Some(ControlReq::V4RewindApply(target)) => {
                 self.push_error(&format!("rewind failed: {message}"));
                 self.log_debug(&format!(
                     "rewind: apply error for {} ({message})",
@@ -2663,6 +2857,14 @@ fi"#
                     self.queued.push_back(content);
                 }
             }
+            Some(ControlReq::V4SetGuide {
+                content,
+                command_id,
+            }) => self.on_v4_set_guide_ok(content, command_id, result),
+            Some(ControlReq::V4SteerText {
+                content,
+                command_id,
+            }) => self.on_v4_steer_text_ok(content, command_id, result),
             Some(ControlReq::Usage(tag)) => {
                 if let Some(result) = result {
                     let text = match tag {
@@ -2682,7 +2884,103 @@ fi"#
             Some(ControlReq::RewindConversation(target)) => {
                 self.on_conversation_rewind(target, result)
             }
+            Some(ControlReq::V4RewindApply(target)) => self.on_v4_rewind_apply(target, result),
             _ => {}
+        }
+    }
+
+    fn v4_ack_failure(ack: &zcode_tui::V4CommandAck) -> String {
+        ack.message
+            .clone()
+            .or_else(|| ack.reason_code.clone())
+            .unwrap_or_else(|| ack.status.clone())
+    }
+
+    fn on_v4_set_guide_ok(
+        &mut self,
+        content: String,
+        expected_command_id: String,
+        result: Option<&serde_json::Value>,
+    ) {
+        let Some(ack) = result.and_then(parse_v4_command_ack) else {
+            self.push_error(
+                "V4 steer: unrecognized setFollowupMode acknowledgement (input queued)",
+            );
+            self.queued.push_back(content);
+            return;
+        };
+        if !ack.accepted() {
+            let why = Self::v4_ack_failure(&ack);
+            self.push_error(&format!("V4 steer mode rejected: {why} (input queued)"));
+            self.log_debug(&format!(
+                "v4 steer command={expected_command_id} status={}",
+                ack.status
+            ));
+            self.queued.push_back(content);
+            return;
+        }
+        let Some(session_id) = self.app_session.clone() else {
+            self.queued.push_back(content);
+            return;
+        };
+        let command_id = self.next_v4_command_id("steer-text");
+        let params = v4_command_params(
+            &command_id,
+            &self.v4_client_id,
+            &session_id,
+            "sendText",
+            serde_json::json!({ "text": content }),
+            V4CommandBase::None,
+            unix_time_ms(),
+        );
+        self.log_debug(&format!(
+            "v4 steer guide accepted command={expected_command_id}; sending {command_id}"
+        ));
+        self.send_control(
+            "v4/command",
+            params,
+            ControlReq::V4SteerText {
+                content,
+                command_id,
+            },
+        );
+    }
+
+    fn on_v4_steer_text_ok(
+        &mut self,
+        content: String,
+        expected_command_id: String,
+        result: Option<&serde_json::Value>,
+    ) {
+        let Some(ack) = result.and_then(parse_v4_command_ack) else {
+            self.push_error("V4 steer: unrecognized sendText acknowledgement (input queued)");
+            self.queued.push_back(content);
+            return;
+        };
+        if !ack.accepted() {
+            let why = Self::v4_ack_failure(&ack);
+            self.push_error(&format!("V4 steer rejected: {why} (input queued)"));
+            self.log_debug(&format!(
+                "v4 steer command={expected_command_id} status={}",
+                ack.status
+            ));
+            self.queued.push_back(content);
+            return;
+        }
+        let delivery = ack.input_delivery().map(str::to_string).or_else(|| {
+            self.v4_state
+                .delivery_for(&expected_command_id)
+                .map(str::to_string)
+        });
+        if let Some(delivery) = delivery {
+            self.settle_v4_steer(&expected_command_id, &content, &delivery);
+        } else {
+            self.pending_v4_steers
+                .insert(expected_command_id.clone(), content);
+            self.status = "steer accepted; awaiting V4 delivery".to_string();
+            self.log_debug(&format!(
+                "v4 steer command={expected_command_id} accepted awaiting-delivery"
+            ));
         }
     }
 
@@ -3020,13 +3318,51 @@ fi"#
     }
 
     /// Steer the RUNNING app-server turn with fresh input (Codex-style: just
-    /// type while it streams). The input lands in the transcript marked as a
-    /// steer; a failure requeues it via the control-error path.
+    /// type while it streams). ZCode 3.5.3 uses V4 guide delivery; older
+    /// kernels retain session/steer. V4 UI is not optimistic: the user entry
+    /// lands only after a semantic guide/queue delivery frame.
     fn steer_turn(&mut self, content: &str) {
         let Some(session_id) = self.app_session.clone() else {
             self.queued.push_back(content.to_string());
             return;
         };
+        if self.v4_mode == V4Mode::Available {
+            let Some(revision) = self.v4_state.revision else {
+                self.push_error("V4 steer state is not ready yet (input queued)");
+                self.queued.push_back(content.to_string());
+                return;
+            };
+            if self.v4_state.set_followup_allowed == Some(false) {
+                self.push_error("V4 guide mode is unavailable right now (input queued)");
+                self.queued.push_back(content.to_string());
+                return;
+            }
+            let command_id = self.next_v4_command_id("guide");
+            let params = v4_command_params(
+                &command_id,
+                &self.v4_client_id,
+                &session_id,
+                "setFollowupMode",
+                serde_json::json!({ "mode": "guide" }),
+                V4CommandBase::Revision(revision),
+                unix_time_ms(),
+            );
+            self.status = "steering via V4 guide…".to_string();
+            self.send_control(
+                "v4/command",
+                params,
+                ControlReq::V4SetGuide {
+                    content: content.to_string(),
+                    command_id,
+                },
+            );
+            return;
+        }
+        if self.v4_mode == V4Mode::Unknown {
+            self.push_error("V4 capability negotiation is incomplete (input queued)");
+            self.queued.push_back(content.to_string());
+            return;
+        }
         self.push_user(content);
         self.push_system("↪ steering the running turn");
         self.scroll = 0;
@@ -3053,28 +3389,61 @@ fi"#
             self.push_system("/rewind: wait for the running turn to finish (Esc cancels it)");
             return;
         }
-        if self.checkpoints.is_empty() {
-            self.push_system(
-                "no checkpoints in this session yet \
-                 (approved tool writes create them; nothing to rewind to)",
-            );
-            return;
-        }
-        let mut targets: Vec<(String, RewindTarget)> = vec![(
-            "latest checkpoint (undo the most recent write)".to_string(),
-            RewindTarget::LatestCheckpoint,
-        )];
-        for (index, entry) in self.checkpoints.iter().enumerate().rev() {
-            targets.push((
-                format!(
-                    "checkpoint {} · #{} · {} file(s) · restores the state BEFORE this write",
-                    checkpoint_short_id(&entry.id),
-                    index + 1,
-                    entry.files,
-                ),
-                RewindTarget::Checkpoint(entry.id.clone()),
-            ));
-        }
+        let targets: Vec<(String, RewindTarget)> = match self.v4_mode {
+            V4Mode::Available => {
+                let rows = self.v4_state.rewind_rows();
+                if rows.is_empty() {
+                    self.push_system(
+                        "no V4 file-rewind targets in this session yet \
+                         (a completed tool-writing turn creates one)",
+                    );
+                    return;
+                }
+                rows.into_iter()
+                    .map(|row| {
+                        (
+                            format!(
+                                "turn row {} · {} file(s) · +{} -{} · restores BEFORE this turn",
+                                row.row_id, row.files, row.additions, row.deletions
+                            ),
+                            RewindTarget::V4Row {
+                                row_id: row.row_id,
+                                entity_id: row.entity_id.clone(),
+                            },
+                        )
+                    })
+                    .collect()
+            }
+            V4Mode::Unavailable => {
+                if self.checkpoints.is_empty() {
+                    self.push_system(
+                        "no checkpoints in this session yet \
+                         (approved tool writes create them; nothing to rewind to)",
+                    );
+                    return;
+                }
+                let mut targets: Vec<(String, RewindTarget)> = vec![(
+                    "latest checkpoint (undo the most recent write)".to_string(),
+                    RewindTarget::LatestCheckpoint,
+                )];
+                for (index, entry) in self.checkpoints.iter().enumerate().rev() {
+                    targets.push((
+                        format!(
+                            "checkpoint {} · #{} · {} file(s) · restores the state BEFORE this write",
+                            checkpoint_short_id(&entry.id),
+                            index + 1,
+                            entry.files,
+                        ),
+                        RewindTarget::Checkpoint(entry.id.clone()),
+                    ));
+                }
+                targets
+            }
+            V4Mode::Unknown => {
+                self.push_system("/rewind: V4 capability state is not ready yet");
+                return;
+            }
+        };
         self.log_debug(&format!(
             "rewind: picker opened ({} targets)",
             targets.len()
@@ -3094,6 +3463,11 @@ fi"#
             .rewind
             .as_ref()
             .is_some_and(|overlay| overlay.preview.is_some());
+        let v4_preview = self
+            .rewind
+            .as_ref()
+            .and_then(|overlay| overlay.preview.as_ref())
+            .is_some_and(|(target, _)| target.is_v4());
         match key.code {
             KeyCode::Esc if previewing => {
                 // Back to the target list.
@@ -3108,12 +3482,12 @@ fi"#
                 self.status = "rewind closed".to_string();
             }
             // Preview stage: ←/→ (and ↑/↓) cycle the scope.
-            KeyCode::Left | KeyCode::Up if previewing => {
+            KeyCode::Left | KeyCode::Up if previewing && !v4_preview => {
                 if let Some(overlay) = &mut self.rewind {
                     overlay.scope = (overlay.scope + REWIND_SCOPES.len() - 1) % REWIND_SCOPES.len();
                 }
             }
-            KeyCode::Right | KeyCode::Down if previewing => {
+            KeyCode::Right | KeyCode::Down if previewing && !v4_preview => {
                 if let Some(overlay) = &mut self.rewind {
                     overlay.scope = (overlay.scope + 1) % REWIND_SCOPES.len();
                 }
@@ -3154,11 +3528,33 @@ fi"#
         overlay.busy = true;
         self.log_debug(&format!("rewind: preview requested {}", target.label()));
         self.status = format!("rewind: previewing {}…", target.label());
-        self.send_control(
-            "session/previewFileRewind",
-            app_file_rewind_params(&session_id, &target),
-            ControlReq::RewindPreview(target),
-        );
+        match &target {
+            RewindTarget::V4Row { row_id, entity_id } => {
+                let Some((revision, epoch)) = self.v4_cas_base() else {
+                    if let Some(overlay) = &mut self.rewind {
+                        overlay.busy = false;
+                    }
+                    self.push_error("rewind preview: V4 revision state is unavailable");
+                    return;
+                };
+                self.send_control(
+                    "v4/conversation/fileRewindPreview",
+                    v4_file_rewind_preview_params(
+                        &session_id,
+                        *row_id,
+                        entity_id,
+                        revision,
+                        &epoch,
+                    ),
+                    ControlReq::RewindPreview(target),
+                );
+            }
+            _ => self.send_control(
+                "session/previewFileRewind",
+                app_file_rewind_params(&session_id, &target),
+                ControlReq::RewindPreview(target),
+            ),
+        }
     }
 
     /// Stage 2 Enter: apply with the chosen scope. File scopes go through
@@ -3199,6 +3595,36 @@ fi"#
                  resolve them or use the conversation scope"
             ));
             self.log_debug("rewind: apply blocked (canApply=false)");
+            return;
+        }
+        if let RewindTarget::V4Row { row_id, entity_id } = &target {
+            let Some((revision, epoch)) = self.v4_cas_base() else {
+                self.push_error("rewind apply: V4 revision state is unavailable");
+                return;
+            };
+            if let Some(overlay) = &mut self.rewind {
+                overlay.busy = true;
+                overlay.scope = 0;
+            }
+            let command_id = self.next_v4_command_id("rewind");
+            let params = v4_command_params(
+                &command_id,
+                &self.v4_client_id,
+                &session_id,
+                "applyFileRewind",
+                serde_json::json!({ "target": v4_rewind_target(*row_id, entity_id) }),
+                V4CommandBase::RevisionAndEpoch {
+                    revision,
+                    log_epoch: &epoch,
+                },
+                unix_time_ms(),
+            );
+            self.log_debug(&format!(
+                "rewind: V4 apply {} revision={revision}",
+                target.label()
+            ));
+            self.status = "rewinding files (V4)…".to_string();
+            self.send_control("v4/command", params, ControlReq::V4RewindApply(target));
             return;
         }
         // Conversation legs need the checkpoint's targetMessageId; without it
@@ -3271,7 +3697,13 @@ fi"#
             preview.unsafe_files.len()
         ));
         self.status = if preview.can_apply {
-            "rewind: Enter applies · ←/→ scope · Esc back".to_string()
+            if target.is_v4() {
+                "rewind: Enter applies workspace · Esc back".to_string()
+            } else {
+                "rewind: Enter applies · ←/→ scope · Esc back".to_string()
+            }
+        } else if target.is_v4() {
+            "rewind: unsafe files — V4 apply blocked".to_string()
         } else {
             "rewind: unsafe files — conversation scope only".to_string()
         };
@@ -3333,6 +3765,30 @@ fi"#
         self.close_rewind_overlay();
     }
 
+    fn on_v4_rewind_apply(&mut self, target: RewindTarget, result: Option<&serde_json::Value>) {
+        let Some(ack) = result.and_then(parse_v4_command_ack) else {
+            self.push_error("rewind: unrecognized V4 apply acknowledgement");
+            self.close_rewind_overlay();
+            return;
+        };
+        if !ack.accepted() {
+            let why = Self::v4_ack_failure(&ack);
+            self.push_error(&format!("rewind not applied: {why}"));
+            self.log_debug(&format!("rewind: V4 apply status={}", ack.status));
+            self.close_rewind_overlay();
+            return;
+        }
+        let nested = ack.result.as_ref().filter(|value| {
+            value.get("type").and_then(|field| field.as_str()) == Some("applyFileRewind")
+        });
+        if nested.is_none() {
+            self.push_error("rewind: V4 apply acknowledgement carried no result");
+            self.close_rewind_overlay();
+            return;
+        }
+        self.on_apply_file_rewind(target, None, nested);
+    }
+
     /// session/rewind (conversation scope) result: judged by the preceding
     /// rewind.triggered event — the envelope is a success even when the
     /// kernel did nothing ("Checkpoint … was not found.").
@@ -3382,6 +3838,7 @@ fi"#
                 self.checkpoints.pop();
             }
             RewindTarget::Message(_) | RewindTarget::Turn(_) => self.checkpoints.clear(),
+            RewindTarget::V4Row { .. } => {}
         }
     }
 
@@ -3395,6 +3852,9 @@ fi"#
         self.checkpoints.clear();
         self.rewind = None;
         self.rewind_trigger = None;
+        self.v4_mode = V4Mode::Unknown;
+        self.v4_state = V4ConversationState::default();
+        self.pending_v4_steers.clear();
     }
 
     fn handle_session_picker_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
@@ -5188,13 +5648,14 @@ fn render_rewind(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
         }
         // Stage 2: preview + scope.
         Some((target, preview)) => {
+            let v4 = target.is_v4();
             let mut lines: Vec<Line<'static>> = Vec::new();
             lines.push(Line::from(Span::styled(
                 format!("target: {}", target.label()),
                 t.text(),
             )));
             lines.push(Line::from(Span::styled(
-                "restores the workspace state captured BEFORE that write ran",
+                "restores the workspace state captured BEFORE that turn/write ran",
                 t.dim(),
             )));
             lines.push(Line::default());
@@ -5227,27 +5688,41 @@ fn render_rewind(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             lines.push(Line::default());
             if !preview.can_apply {
                 lines.push(Line::from(Span::styled(
-                    "files changed outside the session — file restore is blocked \
-                     (conversation scope still works)",
+                    if v4 {
+                        "files changed outside the session — V4 file restore is blocked"
+                    } else {
+                        "files changed outside the session — file restore is blocked \
+                         (conversation scope still works)"
+                    },
                     t.bad(),
                 )));
             }
             let mut scope_spans: Vec<Span<'static>> =
                 vec![Span::styled("scope: ".to_string(), t.text())];
-            for (index, scope) in REWIND_SCOPES.iter().enumerate() {
-                if index == overlay.scope {
-                    scope_spans.push(Span::styled(format!("‹{scope}› "), t.selection()));
-                } else {
-                    scope_spans.push(Span::styled(format!(" {scope}  "), t.dim()));
+            if v4 {
+                scope_spans.push(Span::styled("‹workspace›".to_string(), t.selection()));
+            } else {
+                for (index, scope) in REWIND_SCOPES.iter().enumerate() {
+                    if index == overlay.scope {
+                        scope_spans.push(Span::styled(format!("‹{scope}› "), t.selection()));
+                    } else {
+                        scope_spans.push(Span::styled(format!(" {scope}  "), t.dim()));
+                    }
                 }
             }
             lines.push(Line::from(scope_spans));
             lines.push(Line::from(Span::styled(
-                "workspace restores files · conversation rewinds the kernel chat · both does each",
+                if v4 {
+                    "ZCode 3.5.3 V4 currently exposes verified file rewind only"
+                } else {
+                    "workspace restores files · conversation rewinds the kernel chat · both does each"
+                },
                 t.dim(),
             )));
             let title = if overlay.busy {
                 " rewind preview · applying… ".to_string()
+            } else if v4 {
+                " rewind preview · Enter applies workspace · Esc back ".to_string()
             } else {
                 " rewind preview · Enter applies · ←/→ scope · Esc back ".to_string()
             };
