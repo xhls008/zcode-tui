@@ -6,6 +6,8 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-07-30
+
 ### 新增
 
 - **ZCode 3.5.3 混合 V4 控制面适配**:legacy

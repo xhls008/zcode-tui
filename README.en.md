@@ -4,6 +4,9 @@
 
 ![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
 
+> v0.5.4 captured from the real TUI on ZCode 3.5.3 / CLI kernel 0.15.2,
+> Linux x86_64.
+
 > **Unofficial notice**: `zcode-tui` is not an official ZCode / Zhipu project
 > and is not endorsed by ZCode or Zhipu. It is a community/personal Linux
 > terminal fallback for the TUI experience currently missing from the official
@@ -18,6 +21,21 @@ terminal shell around the official ZCode CLI path: normal prompts go
 through `zcode --prompt`, while slash commands, MCP config, shell escapes,
 session selection, streaming output, command palette, and editor workflows are
 handled locally.
+
+## Current compatibility baseline
+
+| Component | Current version / status |
+|---|---|
+| ZCode Linux x64 desktop | **3.5.3** (still latest in the official feed on 2026-07-30) |
+| Official CLI kernel | **0.15.2** (bundled with ZCode 3.5.3) |
+| zcode-tui | **0.5.4** |
+| Protocol compatibility | 3.5.3: legacy body stream + V4 steer/rewind; 3.3.6: legacy controls |
+| Release verification | 104/104 Rust tests; 83/83 real 3.5.3 PTY checks; Clippy and musl release build |
+
+When the official x64 feed changes, startup update detection and `/update`
+continue to use SHA-512 verification. Protocol compatibility is revalidated
+against the real app-server/V4 behavior instead of being inferred from the CLI
+version alone.
 
 ## Theme
 
@@ -53,6 +71,10 @@ for details.
 
 - Prompts run through the kernel's `zcode app-server` protocol and the answer
   streams into the transcript token by token — single-turn Q&A included.
+- On ZCode 3.5.3, the proven legacy create/resume/subscribe/send/event body
+  stream is retained while `v4/conversation/subscribe` provides the new
+  control plane. Older kernels that do not expose V4 keep their legacy
+  controls without losing streaming.
 - Any failure (spawn, handshake timeout, schema mismatch, disconnect)
   permanently and seamlessly downgrades the process to the classic
   `--prompt` path; set `ZCODE_TUI_APP_SERVER=0` to force the classic path.
@@ -63,8 +85,17 @@ for details.
 - Session controls on the live session: `/model` picker, `/think` thought
   level, `/compact` in-place context compaction; `/mode` and Shift+Tab apply
   immediately via `session/setMode`.
-- Steering: plain text typed while a turn is streaming is injected into that
-  turn (`session/steer`) instead of being queued.
+- Steering: on ZCode 3.5.3, plain text typed during a turn uses V4
+  `setFollowupMode:guide` followed by `sendText`; success is shown only after
+  the subsequent frame admits `delivery=guide`. Older kernels retain
+  `session/steer`.
+- `/rewind`: ZCode 3.5.3 lists V4 turn rows, previews a stable
+  `{rowId,entityId}` target, and applies safe workspace file rewind through
+  `v4/command applyFileRewind`. Older kernels retain the checkpoint-based
+  legacy path; neither path overwrites externally modified unsafe files.
+- Browser Use: `--browser-use headless` and optional `--browser-executable`
+  are parsed explicitly and routed to the official classic `zcode --prompt`
+  path, because the strict app-server schema does not accept these fields.
 - `/usage [7d|30d]` shows session and period token usage; `/update`
   self-updates the kernel from the official feed (sha512-verified).
 - ZCode 3.3.6 tool-policy flags (`--allowed-tools`, `--disallowed-tools`, and

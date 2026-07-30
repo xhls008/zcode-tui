@@ -1,6 +1,6 @@
 [package]
 name = "zcode-tui"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 license = "MIT"
 description = "A Rust fallback terminal UI for ZCode Linux builds without @zcode/tui."

@@ -4,6 +4,8 @@
 
 ![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
 
+> v0.5.4 实机截图：ZCode 3.5.3 / CLI kernel 0.15.2，Linux x86_64。
+
 > **非官方声明**：`zcode-tui` 不是 ZCode / 智谱官方项目，也未获得官方背书。
 > 它是社区/个人维护的 Linux 终端 fallback，用来补齐官方包当前缺失的 TUI 体验。
 
@@ -13,6 +15,19 @@
 shell escape、命令面板、会话选择、流式输出和编辑器工作流在本地补齐。
 
 它不伪装成官方实现，只是一个实用的终端壳。
+
+## 当前验证基线
+
+| 组件 | 当前版本 / 状态 |
+|---|---|
+| ZCode Linux x64 桌面包 | **3.5.3**（2026-07-30 检查官方 feed，仍为最新） |
+| 官方 CLI kernel | **0.15.2**（随 ZCode 3.5.3） |
+| zcode-tui | **0.5.4** |
+| 协议兼容 | 3.5.3：legacy 正文流 + V4 steer/rewind；3.3.6：legacy 控制路径 |
+| 发布验证 | Rust 单测 104/104；真实 3.5.3 PTY 83/83；Clippy / musl release 构建 |
+
+官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
+协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
 
 ## 项目主题
 
