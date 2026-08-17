@@ -2410,6 +2410,25 @@ pub fn parse_update_feed(yaml: &str) -> Option<UpdateFeed> {
     })
 }
 
+/// Turn a feed's deb entry into the URL curl should fetch. Current official
+/// feeds use an absolute URL; older/test feeds use a bare filename. Keep an
+/// absolute HTTP(S) URL intact, while relative entries are basenamed before
+/// joining so they cannot escape the feed directory.
+pub fn resolve_update_download_url(feed_base: &str, deb_entry: &str) -> Option<String> {
+    let entry = deb_entry.trim();
+    if entry.starts_with("https://") || entry.starts_with("http://") {
+        return Some(entry.to_string());
+    }
+    if entry.contains("://") {
+        return None;
+    }
+    let filename = entry.rsplit('/').next()?;
+    if filename.is_empty() || filename == "." || filename == ".." {
+        return None;
+    }
+    Some(format!("{}/{}", feed_base.trim_end_matches('/'), filename))
+}
+
 /// Numeric segment-wise version comparison: `3.2.5` > `3.2.3`, `3.10` > `3.9`.
 pub fn is_newer_version(latest: &str, installed: &str) -> bool {
     compare_versions(latest, installed) == std::cmp::Ordering::Greater

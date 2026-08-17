@@ -761,7 +761,10 @@ fn markdown_diff_fences_become_diff_blocks() {
 #[test]
 fn update_feed_parsing_and_version_compare() {
     use std::cmp::Ordering;
-    use zcode_tui::{compare_versions, is_newer_version, parse_update_feed, parse_update_feed_url};
+    use zcode_tui::{
+        compare_versions, is_newer_version, parse_update_feed, parse_update_feed_url,
+        resolve_update_download_url,
+    };
 
     let feed_url = parse_update_feed_url(
         "provider: generic\nurl: https://cdn.example.com/update/linux/x64/\n",
@@ -778,6 +781,18 @@ fn update_feed_parsing_and_version_compare() {
     assert_eq!(feed.version, "3.2.5");
     assert_eq!(feed.deb_file.as_deref(), Some("ZCode-3.2.5-linux-x64.deb"));
     assert_eq!(feed.release_name.as_deref(), Some("Release v3.2.5"));
+
+    let base = "https://cdn.example.com/update/linux/x64/";
+    let official = "https://cdn.example.com/releases/3.7.7/linux-x64/ZCode-3.7.7-linux-x64.deb";
+    assert_eq!(
+        resolve_update_download_url(base, official).as_deref(),
+        Some(official)
+    );
+    assert_eq!(
+        resolve_update_download_url(base, "nested/ZCode-3.2.5-linux-x64.deb").as_deref(),
+        Some("https://cdn.example.com/update/linux/x64/ZCode-3.2.5-linux-x64.deb")
+    );
+    assert!(resolve_update_download_url(base, "ftp://example.com/ZCode.deb").is_none());
 
     assert!(is_newer_version("3.2.5", "3.2.3"));
     assert!(is_newer_version("3.10.0", "3.9.9"));

@@ -28,3 +28,5 @@
 - [x] 3.2 Run real 3.7.6/3.7.7 TUI PTY prompts and require app-server streaming rather
   than the downgrade notice.
 - [x] 3.3 Update compatibility baseline and changelog with measured results.
+- [x] 3.4 Accept the absolute deb URL used by the current official feed while
+  preserving basename confinement for relative entries and local output.

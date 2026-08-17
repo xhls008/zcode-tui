@@ -47,18 +47,18 @@ use zcode_tui::{
     parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
     parse_kernel_slash_commands, parse_prompt_summary, parse_resume_messages, parse_rewind_preview,
     parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
-    parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age, rewind_failure,
-    run_command, select_update_feed_url, shorten_home, skyline_braille, skyline_graphics_wanted,
-    skyline_lines, skyline_mode, slash_suggestions_merged, spawn_streaming_command,
-    tool_input_summary, usage_stats_params, user_mcp_config_path, v4_command_params,
-    v4_conversation_subscribe_params, v4_file_rewind_preview_params, v4_rewind_target,
-    with_mcp_servers, with_tool_policy, wrap_display, zcode_app_version_from_path, AppConfig,
-    AppServerConn, AppServerEvent, AppServerMessage, AppServerTurn, AppServerUnavailable,
-    AuthStatus, CheckpointEntry, DbBaseline, DebugLog, DiffRole, InputAction, InteractionRequest,
-    JobEvent, KernelCommand, LeaderAction, LiveToolChip, MdLineKind, RewindPreview, RewindTarget,
-    SessionControls, SessionRow, SkylineMode, SpanRole, SteerOutcome, StreamEvent, StreamingJob,
-    TodoItem, ToolChipStatus, TurnDelta, UiConfig, UpdateFeed, V4CommandBase, V4ConversationState,
-    SKYLINE_LOGO_W,
+    parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age,
+    resolve_update_download_url, rewind_failure, run_command, select_update_feed_url, shorten_home,
+    skyline_braille, skyline_graphics_wanted, skyline_lines, skyline_mode,
+    slash_suggestions_merged, spawn_streaming_command, tool_input_summary, usage_stats_params,
+    user_mcp_config_path, v4_command_params, v4_conversation_subscribe_params,
+    v4_file_rewind_preview_params, v4_rewind_target, with_mcp_servers, with_tool_policy,
+    wrap_display, zcode_app_version_from_path, AppConfig, AppServerConn, AppServerEvent,
+    AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, CheckpointEntry, DbBaseline,
+    DebugLog, DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction,
+    LiveToolChip, MdLineKind, RewindPreview, RewindTarget, SessionControls, SessionRow,
+    SkylineMode, SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem, ToolChipStatus,
+    TurnDelta, UiConfig, UpdateFeed, V4CommandBase, V4ConversationState, SKYLINE_LOGO_W,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -356,9 +356,10 @@ fn build_update_tip(installed: &str, feed: &UpdateFeed, feed_base: Option<&str>)
     )];
     lines.push("更新说明: https://zcode.z.ai/en/changelog".to_string());
     match (feed_base, &feed.deb_file) {
-        (Some(base), Some(file)) => {
-            lines.push(format!("手动下载: {base}{file}"));
-        }
+        (Some(base), Some(file)) => match resolve_update_download_url(base, file) {
+            Some(url) => lines.push(format!("手动下载: {url}")),
+            None => lines.push("手动下载: https://zcode.z.ai".to_string()),
+        },
         _ => lines.push("手动下载: https://zcode.z.ai".to_string()),
     }
     lines.join("\n")
@@ -2198,8 +2199,8 @@ FEED={feed_arg}
 echo "feed: $FEED"
 YML=$(curl -fsSL --max-time 15 "$FEED")
 VER=$(printf '%s' "$YML" | sed -n 's/^version:[[:space:]]*//p' | head -1)
-DEB=$(printf '%s' "$YML" | sed -n 's/^[[:space:]]*-*[[:space:]]*url:[[:space:]]*//p' | grep '\.deb$' | head -1)
-DEB=$(basename "$DEB")
+DEB_ENTRY=$(printf '%s' "$YML" | sed -n 's/^[[:space:]]*-*[[:space:]]*url:[[:space:]]*//p' | grep '\.deb$' | head -1)
+DEB=$(basename "$DEB_ENTRY")
 SHA=$(printf '%s' "$YML" | awk '/url:.*\.deb$/{{f=1;next}} f&&/sha512:/{{sub(/^[[:space:]]*sha512:[[:space:]]*/,"");print;exit}}')
 INSTALLED={installed_arg}
 echo "installed: $INSTALLED   latest: $VER"
@@ -2209,9 +2210,14 @@ if ! dpkg --compare-versions "$VER" gt "$INSTALLED"; then
 fi
 [ -n "$DEB" ] && [ -n "$SHA" ] || {{ echo "feed carries no deb entry/sha512 - aborting"; exit 1; }}
 BASE=${{FEED%latest-linux.yml}}
+case "$DEB_ENTRY" in
+  http://*|https://*) DOWNLOAD=$DEB_ENTRY ;;
+  *://*) echo "unsupported deb URL scheme - aborting"; exit 1 ;;
+  *) DOWNLOAD=$BASE$DEB ;;
+esac
 TMP=$(mktemp -d /tmp/zcode-update.XXXXXX)
-echo "downloading $BASE$DEB"
-curl -fSL --retry 3 --retry-delay 2 -o "$TMP/$DEB" "$BASE$DEB"
+echo "downloading $DOWNLOAD"
+curl -fSL --retry 3 --retry-delay 2 -o "$TMP/$DEB" "$DOWNLOAD"
 echo "verifying sha512"
 ACTUAL=$(openssl dgst -sha512 -binary "$TMP/$DEB" | base64 -w0)
 if [ "$ACTUAL" != "$SHA" ]; then

@@ -15,6 +15,9 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
   回传内核兼容默认（memory off、native search enhancements on、自动问答处理
   on、context budget `preflight-v1`），且 create/turn/idle 三阶段复用同一
   server-request 通道。0.15.x 不发送该方法，既有行为不变。
+- **官方 deb 绝对 URL**:当前 `latest-linux.yml` 的 deb 条目为完整 URL；
+  `/update` 现保留该下载地址、仅对本地文件名取 `basename`，旧版相对条目仍
+  安全拼到 feed 目录。启动更新提示也不再把 feed 基址重复拼到绝对 URL 前。
 
 ### 验证
 
@@ -22,7 +25,8 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
   一致；CLI kernel 都为 `0.16.3`，Linux 包仍缺 `@zcode/tui`。真实 3.7.6
   与 3.7.7 临时工作区 PTY 中运行偏好请求均成功应答，legacy 正文流、V4
   subscribe、`text_delta` 与 `prompt_completed` 全部通过且无 downgrade。
-  Rust 105/105、Clippy 零告警、release 构建与 shell syntax check 通过。
+  Rust 105/105、PTY 83/83、Clippy 零告警、原生/musl release 构建与 shell
+  syntax check 通过。
 
 ## [0.5.4] - 2026-07-30
 

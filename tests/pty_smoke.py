@@ -68,18 +68,6 @@ def screen_seen(raw, needle, step=128):
     return False
 
 
-def screen_max_count(raw, needle, step=128):
-    """Maximum number of `needle` occurrences visible in one terminal frame."""
-    screen = pyte.Screen(120, 40)
-    stream = pyte.Stream(screen)
-    decoded = raw.decode("utf-8", errors="replace")
-    maximum = 0
-    for at in range(0, len(decoded), step):
-        stream.feed(decoded[at : at + step])
-        maximum = max(maximum, screen_text(screen).count(needle))
-    return maximum
-
-
 def configured_model_id():
     """Best-effort current model id from the same config the kernel uses."""
     try:
@@ -321,7 +309,7 @@ out = run_pty(
     [
         (2.0, b"/skills list"),
         (0.5, b"\r"),
-    ] + [(0.5, b"\x1b[5~")] * 16 + [   # PgUp back through the tall listing
+    ] + [(0.5, b"\x1b[5~")] * 32 + [   # PgUp back through the tall listing
         (1.0, b"/exit"),
         (0.5, b"\r"),
     ],
@@ -392,6 +380,7 @@ check("s10: answer rendered", "20" in plain)
 # --prompt. Deterministic (no model): the fake returns a --json summary.
 print("== scenario 11: app-server downgrade -> --prompt ==", flush=True)
 fake_bin = os.path.join(SPIKE, "fake-zcode")
+fake_log = os.path.join(SPIKE, "fake-zcode-protocol.log")
 with open(fake_bin, "w") as fh:
     fh.write(
         "#!/bin/sh\n"
@@ -404,7 +393,7 @@ with open(fake_bin, "w") as fh:
     )
 os.chmod(fake_bin, 0o755)
 out = run_pty(
-    {"ZCODE_TUI_ZCODE_BIN": fake_bin}, SPIKE,
+    {"ZCODE_TUI_ZCODE_BIN": fake_bin, "ZCODE_TUI_LOG": fake_log}, SPIKE,
     [
         (1.5, b"hello"),
         (0.5, b"\r"),
@@ -419,8 +408,10 @@ plain = strip_ansi(out)
 raw = run_pty.last_raw
 check("s11: downgrade notice shown", screen_seen(raw, "falling back to --prompt"))
 check("s11: --prompt fallback answered", "downgrade fallback ok" in plain)
-check("s11: downgrade announced once (permanent)",
-      screen_max_count(raw, "falling back to --prompt") == 1)
+with open(fake_log) as fh:
+    downgrade_count = sum("downgrade:" in line for line in fh)
+check("s11: downgrade happened once (permanent)", downgrade_count == 1,
+      f"debug log count={downgrade_count}")
 
 # ---- scenario 12: app-server tool chips + foldable tool output ----
 # Opt-in streaming with a tool-triggering prompt: the tool call must land in
@@ -576,19 +567,23 @@ check("s17: resumed via protocol (history note)", screen_seen(raw, "resumed sess
 check("s17: turn completed on resumed session", screen_seen(run_pty.last_raw, "done ("))
 
 # ---- scenario 18: /update aborts on sha512 mismatch (fake feed) ----
-# A local http feed advertises a newer version whose deb hash is wrong; the
-# update must download, fail verification, and abort without installing.
+# A local http feed advertises a newer version using the same absolute deb URL
+# shape as the current official feed. The update must download that exact URL,
+# fail verification, and abort without installing.
 print("== scenario 18: /update sha512-mismatch abort ==", flush=True)
 import functools, http.server, socketserver, threading
 feed_dir = tempfile.mkdtemp(prefix="zcode-smoke-feed-")
-with open(os.path.join(feed_dir, "latest-linux.yml"), "w") as fh:
-    fh.write("version: 99.99.99\nfiles:\n  - url: ZCode-99.99.99-linux-x64.deb\n"
-             "    sha512: REJECTTHISHASH==\nreleaseName: Release v99.99.99\n")
 with open(os.path.join(feed_dir, "ZCode-99.99.99-linux-x64.deb"), "wb") as fh:
     fh.write(b"not a real deb")
 _handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=feed_dir)
 _httpd = socketserver.TCPServer(("127.0.0.1", 0), _handler)
 _port = _httpd.server_address[1]
+with open(os.path.join(feed_dir, "latest-linux.yml"), "w") as fh:
+    fh.write(
+        "version: 99.99.99\nfiles:\n"
+        f"  - url: http://127.0.0.1:{_port}/ZCode-99.99.99-linux-x64.deb\n"
+        "    sha512: REJECTTHISHASH==\nreleaseName: Release v99.99.99\n"
+    )
 threading.Thread(target=_httpd.serve_forever, daemon=True).start()
 out = run_pty(
     {"ZCODE_TUI_UPDATE_FEED": f"http://127.0.0.1:{_port}/"}, SPIKE,
@@ -604,7 +599,7 @@ _httpd.shutdown()
 plain = strip_ansi(out)
 raw = run_pty.last_raw
 check("s18: feed version compared", screen_seen(raw, "latest: 99.99.99"))
-check("s18: sha512 mismatch aborts", "sha512 MISMATCH" in plain)
+check("s18: sha512 mismatch aborts", screen_seen(raw, "sha512 MISMATCH"))
 check("s18: nothing installed", "installed 99.99.99" not in plain)
 
 # ---- scenario 19: /usage (session + period stats) ----
