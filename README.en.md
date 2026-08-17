@@ -6,6 +6,7 @@
 
 > v0.5.4 captured from the real TUI on ZCode 3.5.3 / CLI kernel 0.15.2,
 > Linux x86_64.
+> The current source is also verified against ZCode 3.7.7 / CLI kernel 0.16.3.
 
 > **Unofficial notice**: `zcode-tui` is not an official ZCode / Zhipu project
 > and is not endorsed by ZCode or Zhipu. It is a community/personal Linux
@@ -26,11 +27,11 @@ handled locally.
 
 | Component | Current version / status |
 |---|---|
-| ZCode Linux x64 desktop | **3.5.3** (still latest in the official feed on 2026-07-30) |
-| Official CLI kernel | **0.15.2** (bundled with ZCode 3.5.3) |
-| zcode-tui | **0.5.4** |
-| Protocol compatibility | 3.5.3: legacy body stream + V4 steer/rewind; 3.3.6: legacy controls |
-| Release verification | 104/104 Rust tests; 83/83 real 3.5.3 PTY checks; Clippy and musl release build |
+| ZCode Linux x64 desktop | **3.7.7** (official feed, released 2026-08-14) |
+| Official CLI kernel | **0.16.3** (bundled with ZCode 3.7.7) |
+| zcode-tui | **0.5.5** (unreleased) |
+| Protocol compatibility | 3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
+| Current source verification | 105/105 Rust tests; targeted real 3.7.6/3.7.7 PTY checks; Clippy and release build |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -75,6 +76,10 @@ for details.
   stream is retained while `v4/conversation/subscribe` provides the new
   control plane. Older kernels that do not expose V4 keep their legacy
   controls without losing streaming.
+- ZCode 3.7.6+ / CLI 0.16.3 adds a server-to-client
+  `session/requestRuntimePreferences` request during session startup. The TUI
+  answers it automatically instead of timing out after 15 seconds and falling
+  back to the classic path.
 - Any failure (spawn, handshake timeout, schema mismatch, disconnect)
   permanently and seamlessly downgrades the process to the classic
   `--prompt` path; set `ZCODE_TUI_APP_SERVER=0` to force the classic path.

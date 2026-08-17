@@ -2,4 +2,6 @@
 /.mcp.json
 *.log
 *.tmp
+ZCode-*.deb
+ZCode-*.deb.part
 .DS_Store

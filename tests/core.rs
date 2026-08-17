@@ -1516,6 +1516,45 @@ fn interaction_reply_echoes_envelope_id_verbatim() {
 }
 
 #[test]
+fn runtime_preferences_reply_matches_kernel_0163_schema() {
+    use zcode_tui::{encode_runtime_preferences_reply, RUNTIME_PREFERENCES_METHOD};
+
+    let line = encode_runtime_preferences_reply(
+        &serde_json::json!("server-1"),
+        RUNTIME_PREFERENCES_METHOD,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(value["id"], "server-1");
+    assert_eq!(value["result"].as_object().unwrap().len(), 4);
+    assert_eq!(value["result"]["nativeSearchEnhancementsEnabled"], true);
+    assert_eq!(value["result"]["memoryEnabled"], false);
+    assert_eq!(
+        value["result"]["askUserQuestionAutoResolutionEnabled"],
+        true
+    );
+    assert_eq!(
+        value["result"]["modelContextBudgetStrategy"],
+        "preflight-v1"
+    );
+    assert!(value["result"].get("integratedTerminalShell").is_none());
+    assert!(!line.contains('\n'));
+
+    let numeric =
+        encode_runtime_preferences_reply(&serde_json::json!(7), RUNTIME_PREFERENCES_METHOD)
+            .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&numeric).unwrap()["id"],
+        7
+    );
+    assert!(encode_runtime_preferences_reply(
+        &serde_json::json!("server-2"),
+        "interaction/requestUserInput"
+    )
+    .is_none());
+}
+
+#[test]
 fn permission_request_parses_options_and_replies_response_verbatim() {
     use zcode_tui::{encode_interaction_reply, parse_interaction_request, PERMISSION_METHOD};
     // Shape captured live 2026-07-07: a build-mode Write triggers

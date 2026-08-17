@@ -6,6 +6,24 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ## [Unreleased]
 
+### 修复
+
+- **ZCode 3.7.6+ / CLI 0.16.3 app-server 握手**:新内核在
+  `session/create|resume` 期间新增服务器反向请求
+  `session/requestRuntimePreferences`；旧 TUI 不应答会在 15 秒后收到
+  `Client request timed out` 并永久降级到经典 `--prompt`。现以原信封 id
+  回传内核兼容默认（memory off、native search enhancements on、自动问答处理
+  on、context budget `preflight-v1`），且 create/turn/idle 三阶段复用同一
+  server-request 通道。0.15.x 不发送该方法，既有行为不变。
+
+### 验证
+
+- 官方 3.7.6 与 3.7.7 deb（后者包版本 `3.7.7-4926`）SHA-512 均与 feed
+  一致；CLI kernel 都为 `0.16.3`，Linux 包仍缺 `@zcode/tui`。真实 3.7.6
+  与 3.7.7 临时工作区 PTY 中运行偏好请求均成功应答，legacy 正文流、V4
+  subscribe、`text_delta` 与 `prompt_completed` 全部通过且无 downgrade。
+  Rust 105/105、Clippy 零告警、release 构建与 shell syntax check 通过。
+
 ## [0.5.4] - 2026-07-30
 
 ### 新增

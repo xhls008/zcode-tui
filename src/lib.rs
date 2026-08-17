@@ -4666,6 +4666,35 @@ pub const INTERACTION_METHOD: &str = "interaction/requestUserInput";
 /// answered by echoing the chosen option's `response` VERBATIM (the kernel's
 /// result schema is strict — adding any key, even requestId, is rejected).
 pub const PERMISSION_METHOD: &str = "interaction/requestPermission";
+/// ZCode 0.16.3 asks the client for runtime preferences while materializing a
+/// create/resume session. Leaving this unanswered makes session/create time
+/// out after 15 seconds and disables app-server streaming.
+pub const RUNTIME_PREFERENCES_METHOD: &str = "session/requestRuntimePreferences";
+
+/// Exact 0.16.3 runtime-preferences reply. These are the same compatibility
+/// defaults the kernel uses when an older client returns Method not found.
+/// The optional integratedTerminalShell is deliberately absent so the kernel
+/// selects the host shell normally.
+pub fn encode_runtime_preferences_reply(
+    envelope_id: &serde_json::Value,
+    method: &str,
+) -> Option<String> {
+    if method != RUNTIME_PREFERENCES_METHOD {
+        return None;
+    }
+    Some(
+        serde_json::json!({
+            "id": envelope_id,
+            "result": {
+                "nativeSearchEnhancementsEnabled": true,
+                "memoryEnabled": false,
+                "askUserQuestionAutoResolutionEnabled": true,
+                "modelContextBudgetStrategy": "preflight-v1",
+            }
+        })
+        .to_string(),
+    )
+}
 
 /// How the reply's `result` must be built — the two interaction methods use
 /// incompatible result schemas (both pinned live 2026-07-07).
@@ -5433,7 +5462,7 @@ impl AppServerConn {
     pub fn reply(&mut self, line: &str) -> std::result::Result<(), AppServerUnavailable> {
         // Marker only — the reply body echoes kernel-provided payloads.
         if let Some(log) = &self.log {
-            log.line("-> interaction reply");
+            log.line("-> server-request reply");
         }
         self.stdin
             .write_all(format!("{line}\n").as_bytes())

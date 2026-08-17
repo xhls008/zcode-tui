@@ -5,6 +5,7 @@
 ![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
 
 > v0.5.4 实机截图：ZCode 3.5.3 / CLI kernel 0.15.2，Linux x86_64。
+> 当前源码另已实测适配 ZCode 3.7.7 / CLI kernel 0.16.3。
 
 > **非官方声明**：`zcode-tui` 不是 ZCode / 智谱官方项目，也未获得官方背书。
 > 它是社区/个人维护的 Linux 终端 fallback，用来补齐官方包当前缺失的 TUI 体验。
@@ -20,11 +21,11 @@ shell escape、命令面板、会话选择、流式输出和编辑器工作流�
 
 | 组件 | 当前版本 / 状态 |
 |---|---|
-| ZCode Linux x64 桌面包 | **3.5.3**（2026-07-30 检查官方 feed，仍为最新） |
-| 官方 CLI kernel | **0.15.2**（随 ZCode 3.5.3） |
-| zcode-tui | **0.5.4** |
-| 协议兼容 | 3.5.3：legacy 正文流 + V4 steer/rewind；3.3.6：legacy 控制路径 |
-| 发布验证 | Rust 单测 104/104；真实 3.5.3 PTY 83/83；Clippy / musl release 构建 |
+| ZCode Linux x64 桌面包 | **3.7.7**（官方 feed，2026-08-14 发布） |
+| 官方 CLI kernel | **0.16.3**（随 ZCode 3.7.7） |
+| zcode-tui | **0.5.5**（待发布） |
+| 协议兼容 | 3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
+| 当前源码验证 | Rust 单测 105/105；真实 3.7.6/3.7.7 定向 PTY；Clippy / release 构建 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -102,6 +103,9 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   `--prompt` 路径时设 `ZCODE_TUI_APP_SERVER=0`。ZCode 3.5.3 上会在 legacy
   正文流之上协商 `v4/conversation/subscribe`，仅把新版控制能力接到 V4；
   3.3.6 返回 Method not found 时继续使用既有 legacy 控制，不影响正文流。
+  ZCode 3.7.6+ / CLI 0.16.3 建会话时新增的
+  `session/requestRuntimePreferences` 反向请求会自动应答；不再等待 15 秒后
+  错误降级到经典路径。
 - **工具权限确认（app-server 路径）**：build 模式下有副作用的工具（写文件等）
   与 plan 模式的计划审批会弹**确认浮层**（↑↓ 选项 / Enter 应答 / Esc 拒绝），
   批准后工具同回合继续执行；plan 计划批准后自动切 build 并续跑。

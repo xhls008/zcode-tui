@@ -38,12 +38,12 @@ use zcode_tui::{
     build_send_attachments, checkpoint_short_id, classify_input, command_palette_rows,
     context_watermark_warn, conversation_target, db_baseline, db_schema_supported,
     detect_auth_status, diff_line_role, discover_zcode_app_dir, encode_interaction_reply,
-    env_is_headless, extract_file_mentions, file_suggestions, fold_preview,
-    format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
-    is_newer_version, kernel_config_path_from, kernel_db_path_from, latest_assistant_text,
-    latest_reasoning, latest_session_for_dir, leader_action_for_key, list_recent_sessions,
-    live_tool_chips, load_mcp_config, load_ui_config, login_command, markdown_lines,
-    mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence,
+    encode_runtime_preferences_reply, env_is_headless, extract_file_mentions, file_suggestions,
+    fold_preview, format_context_watermark, git_diff_command, handle_local_command, help_text,
+    history_search, is_newer_version, kernel_config_path_from, kernel_db_path_from,
+    latest_assistant_text, latest_reasoning, latest_session_for_dir, leader_action_for_key,
+    list_recent_sessions, live_tool_chips, load_mcp_config, load_ui_config, login_command,
+    markdown_lines, mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence,
     parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
     parse_kernel_slash_commands, parse_prompt_summary, parse_resume_messages, parse_rewind_preview,
     parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
@@ -1852,6 +1852,10 @@ impl UiState {
                 self.apply_v4_frame(params);
                 continue;
             }
+            if let AppServerMessage::ServerRequest { id, method, params } = message {
+                self.on_server_request(id, &method, &params);
+                continue;
+            }
             let AppServerMessage::Response { id, result, error } = message else {
                 // Stray events/state before the turn starts: nothing to render.
                 continue;
@@ -2724,6 +2728,18 @@ fi"#
         method: &str,
         params: &serde_json::Value,
     ) {
+        if let Some(line) = encode_runtime_preferences_reply(&id, method) {
+            match self.app_conn.as_mut().map(|conn| conn.reply(&line)) {
+                Some(Ok(())) => self.log_debug("runtime preferences replied"),
+                Some(Err(reason)) => {
+                    self.push_error(&format!("runtime preferences reply failed: {reason}"))
+                }
+                None => {
+                    self.push_error("runtime preferences reply failed: app-server disconnected")
+                }
+            }
+            return;
+        }
         let Some(request) = parse_interaction_request(method, params) else {
             return;
         };
