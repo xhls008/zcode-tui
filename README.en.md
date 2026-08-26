@@ -198,6 +198,16 @@ curl -fLO https://github.com/xhls008/zcode-tui/releases/latest/download/install.
 bash install.sh --no-build
 ```
 
+> **macOS auth and model configuration:** with ZCode 3.8.1 / CLI 0.16.3,
+> upstream `zcode login` OAuth may still fail with
+> `OAuth response is not valid JSON`; see the
+> [upstream issue](https://github.com/zai-org/feedback/issues/51). Prefer
+> `zcode login zai-coding-plan-api-key <key>` (global) or
+> `zcode login bigmodel-coding-plan-api-key <key>` (China). Desktop sign-in is
+> stored under `~/.zcode/v2/`, while the CLI still requires
+> `~/.zcode/cli/config.json` with an explicit `provider/model`; desktop sign-in
+> alone does not create that CLI model configuration.
+
 ### Option 2: Build from source
 
 ```bash
@@ -373,6 +383,11 @@ cargo fmt
 cargo test
 cargo clippy --all-targets --all-features
 ```
+
+Thanks to [@tastypear](https://github.com/tastypear) for the resumed-session
+model-config compatibility fix
+([PR #1](https://github.com/xhls008/zcode-tui/pull/1)) and slash-command Enter
+completion behavior ([PR #2](https://github.com/xhls008/zcode-tui/pull/2)).
 
 ## License
 

@@ -8,6 +8,13 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
 
 ### 修复
 
+- **恢复会话模型配置兼容**：兼容 `model.main` 对象字段和根级 `model` 字符串
+  两种配置形状，避免恢复会话后首条消息触发
+  `ZCODE_RUNTIME_MODEL_UNAVAILABLE`。感谢
+  [@tastypear](https://github.com/tastypear) 提交 [PR #1](https://github.com/xhls008/zcode-tui/pull/1)。
+- **斜杠命令 Enter 行为**：输入未完整的 `/命令` 时，Enter 直接接受并执行当前
+  建议，不再把不完整命令作为普通 prompt 发送。感谢
+  [@tastypear](https://github.com/tastypear) 提交 [PR #2](https://github.com/xhls008/zcode-tui/pull/2)。
 - **ZCode 3.7.6+ / CLI 0.16.3 app-server 握手**:新内核在
   `session/create|resume` 期间新增服务器反向请求
   `session/requestRuntimePreferences`；旧 TUI 不应答会在 15 秒后收到

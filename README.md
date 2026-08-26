@@ -216,6 +216,14 @@ curl -fLO https://github.com/xhls008/zcode-tui/releases/latest/download/install.
 bash install.sh --no-build
 ```
 
+> **macOS 授权与模型配置**：ZCode 3.8.1 / CLI 0.16.3 的官方
+> `zcode login` OAuth 路径仍可能返回 `OAuth response is not valid JSON`；这是
+> [上游问题](https://github.com/zai-org/feedback/issues/51)，不是本 TUI 能修复的
+> 登录服务。建议使用 `zcode login zai-coding-plan-api-key <key>`（国际）或
+> `zcode login bigmodel-coding-plan-api-key <key>`（国内）。桌面端登录信息位于
+> `~/.zcode/v2/`，但 CLI 仍需要含明确 `provider/model` 的
+> `~/.zcode/cli/config.json`；仅登录桌面端不会自动生成该 CLI 模型配置。
+
 **方式二：从源码构建**
 
 一条命令完成构建和安装（更新同样跑它）：
@@ -454,6 +462,10 @@ cargo fmt
 cargo test
 cargo clippy --all-targets --all-features
 ```
+
+感谢 [@tastypear](https://github.com/tastypear) 贡献恢复会话模型配置兼容
+([PR #1](https://github.com/xhls008/zcode-tui/pull/1)) 和斜杠命令 Enter 补全行为
+([PR #2](https://github.com/xhls008/zcode-tui/pull/2))。
 
 ## 背景与吐槽
 
