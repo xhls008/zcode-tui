@@ -4,8 +4,8 @@
 
 ![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
 
-> v0.5.4 实机截图：ZCode 3.5.3 / CLI kernel 0.15.2，Linux x86_64。
-> 当前源码另已实测适配 ZCode 3.8.1 / CLI kernel 0.16.3。
+> v0.5.6 实机截图：ZCode 3.8.1 / CLI kernel 0.16.3，Linux x86_64；展示
+> 首轮前 `/model` 选择与 Markdown 输出。
 
 > **非官方声明**：`zcode-tui` 不是 ZCode / 智谱官方项目，也未获得官方背书。
 > 它是社区/个人维护的 Linux 终端 fallback，用来补齐官方包当前缺失的 TUI 体验。

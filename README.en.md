@@ -4,9 +4,8 @@
 
 ![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
 
-> v0.5.4 captured from the real TUI on ZCode 3.5.3 / CLI kernel 0.15.2,
-> Linux x86_64.
-> The current source is also verified against ZCode 3.8.1 / CLI kernel 0.16.3.
+> v0.5.6 captured from the real TUI on ZCode 3.8.1 / CLI kernel 0.16.3,
+> Linux x86_64, showing pre-session `/model` selection and Markdown output.
 
 > **Unofficial notice**: `zcode-tui` is not an official ZCode / Zhipu project
 > and is not endorsed by ZCode or Zhipu. It is a community/personal Linux
