@@ -122,6 +122,11 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   不用取消重来。3.5.3 使用 V4 `setFollowupMode:guide` + `sendText`，并以随后
   frame 中 queue item 的 `delivery.admitted == guide` 才判成功；旧内核继续
   使用 `session/steer`。不再把本地“steering”提示误当成协议成功。
+- **动态模型目录**：启动时通过 ZCode app-server 的 `workspace/readState` 获取
+  内核已经解析好的模型目录；该流程不读取 API Key、不直连供应商接口，也不
+  改写 `~/.zcode/cli/config.json`。公开模型元数据缓存到
+  `~/.cache/zcode-tui/models.json`，app-server 暂时不可用时用于回退。`/model`
+  在首次对话前可用，并只展示当前 provider（例如国内 BigModel）的模型。
 - **检查点回滚（app-server 路径）**：内核每次放行的工具写盘都会产生检查点；
   3.3.6 的 `/rewind` 浮层列出本会话检查点（含 latestCheckpoint），Enter
   先预览将还原/删除的文件，选 scope 后应用；3.5.3 则从 V4 conversation

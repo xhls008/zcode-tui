@@ -1855,6 +1855,97 @@ fn state_controls_extracted_from_mode_changed_patch() {
 }
 
 #[test]
+fn session_controls_prefer_complete_result_settings() {
+    use zcode_tui::app_session_controls;
+    let model = |id: &str| {
+        serde_json::json!({
+            "label": id,
+            "providerLabel": "BigModel",
+            "ref": {"modelId": id, "providerId": "bigmodel"}
+        })
+    };
+    let result = serde_json::json!({
+        "settings": {
+            "model": {
+                "available": [model("glm-5.1"), model("glm-5.3")],
+                "current": {"modelId": "glm-5.1", "providerId": "bigmodel"}
+            }
+        },
+        "snapshot": {
+            "settings": {
+                "model": {
+                    "available": [model("glm-5.1")],
+                    "current": {"modelId": "glm-5.1", "providerId": "bigmodel"}
+                }
+            }
+        }
+    });
+    let controls = app_session_controls(&result).unwrap();
+    assert_eq!(controls.models.len(), 2);
+    assert_eq!(controls.models[1].reference["modelId"], "glm-5.3");
+
+    let fallback = serde_json::json!({"snapshot": result["snapshot"].clone()});
+    assert_eq!(app_session_controls(&fallback).unwrap().models.len(), 1);
+}
+
+#[test]
+fn runtime_model_controls_seed_pre_session_picker() {
+    use zcode_tui::{app_runtime_model_controls, build_runtime_model};
+    let config = r#"{
+        "provider": {"bigmodel": {"kind": "anthropic", "name": "BigModel Coding Plan",
+            "options": {"baseURL": "https://open.bigmodel.cn/api/anthropic", "apiKey": "test-key"},
+            "models": {"glm-5.1": {"name": "GLM-5.1"}, "glm-5.3": {"name": "GLM-5.3"}}}},
+        "model": {"main": "bigmodel/glm-5.1", "lite": "bigmodel/glm-5.1"}
+    }"#;
+    let runtime = build_runtime_model(config, 1234).unwrap();
+    let controls = app_runtime_model_controls(&runtime).unwrap();
+    assert_eq!(controls.models.len(), 2);
+    assert_eq!(controls.models[0].label, "GLM-5.1");
+    assert_eq!(controls.models[0].provider, "BigModel Coding Plan");
+    assert_eq!(controls.models[1].reference["modelId"], "glm-5.3");
+    assert_eq!(controls.model_current.as_deref(), Some("glm-5.1"));
+}
+
+#[test]
+fn workspace_model_catalog_uses_only_the_active_provider() {
+    use zcode_tui::{app_workspace_model_controls, app_workspace_read_params};
+    let params = app_workspace_read_params("/tmp/project");
+    assert_eq!(params["workspace"]["workspaceKey"], "/tmp/project");
+    assert_eq!(params["workspace"]["workspacePath"], "/tmp/project");
+
+    let model = |provider_id: &str, provider_label: &str, model_id: &str| {
+        serde_json::json!({
+            "label": model_id,
+            "providerLabel": provider_label,
+            "ref": {"modelId": model_id, "providerId": provider_id}
+        })
+    };
+    let result = serde_json::json!({
+        "settings": {
+            "model": {
+                "available": [
+                    model("zai", "Z.AI Coding Plan", "glm-5.1"),
+                    model("bigmodel", "BigModel Coding Plan", "glm-5.3"),
+                    model("bigmodel", "BigModel Coding Plan", "glm-4.7")
+                ],
+                "current": {"modelId": "glm-5.3", "providerId": "bigmodel"}
+            }
+        },
+        "modelCatalog": {
+            "providers": []
+        }
+    });
+    let (provider_id, controls) = app_workspace_model_controls(&result).unwrap();
+    assert_eq!(provider_id, "bigmodel");
+    assert_eq!(controls.model_current.as_deref(), Some("glm-5.3"));
+    assert_eq!(controls.models.len(), 2);
+    assert!(controls
+        .models
+        .iter()
+        .all(|model| { model.reference["providerId"] == "bigmodel" }));
+}
+
+#[test]
 fn turn_accumulates_text_deltas_and_ignores_unknown() {
     use zcode_tui::{AppServerEvent, AppServerTurn, TurnDelta};
     let mut turn = AppServerTurn::default();

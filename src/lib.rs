@@ -3781,11 +3781,7 @@ pub fn mcp_servers_param(project: &McpConfig, user: &McpConfig) -> Option<serde_
 /// caller resumes without it and relies on the create-fallback path.
 pub fn build_runtime_model(config_json: &str, generated_at: u64) -> Option<serde_json::Value> {
     let config: serde_json::Value = serde_json::from_str(config_json).ok()?;
-    // Selected model is either `model.main` or a root `model` string.
-    let main = config
-        .pointer("/model/main")
-        .and_then(|v| v.as_str())
-        .or_else(|| config.get("model").and_then(|v| v.as_str()))?;
+    let main = configured_main_model(&config)?;
     let (provider_id, model_id) = main.split_once('/')?;
     let provider = config.pointer(&format!("/provider/{provider_id}"))?;
     let kind = provider.get("kind")?.as_str()?;
@@ -3827,6 +3823,13 @@ pub fn build_runtime_model(config_json: &str, generated_at: u64) -> Option<serde
         "model": { "providerId": provider_id, "modelId": model_id },
         "provider": provider_obj,
     }))
+}
+
+fn configured_main_model(config: &serde_json::Value) -> Option<&str> {
+    config
+        .pointer("/model/main")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| config.get("model").and_then(serde_json::Value::as_str))
 }
 
 /// `session/usage` — per-session token breakdown.
@@ -4440,17 +4443,13 @@ pub struct SessionControls {
     pub thought_current: Option<String>,
 }
 
-/// Extract whatever control-surface state a `state.updated` push carries
-/// (`reason:"mode_changed"` carries the full set; others may carry parts).
-/// None when the patch has none of the control keys.
-pub fn app_state_controls(params: &serde_json::Value) -> Option<SessionControls> {
-    let patch = params.get("patch")?;
+fn controls_from_settings(settings: &serde_json::Value) -> Option<SessionControls> {
     let controls = SessionControls {
-        mode: patch
+        mode: settings
             .pointer("/mode/current")
             .and_then(|v| v.as_str())
             .map(str::to_string),
-        models: patch
+        models: settings
             .pointer("/model/available")
             .and_then(|v| v.as_array())
             .map(|list| {
@@ -4469,11 +4468,11 @@ pub fn app_state_controls(params: &serde_json::Value) -> Option<SessionControls>
                     .collect()
             })
             .unwrap_or_default(),
-        model_current: patch
+        model_current: settings
             .pointer("/model/current/modelId")
             .and_then(|v| v.as_str())
             .map(str::to_string),
-        thought_levels: patch
+        thought_levels: settings
             .pointer("/thoughtLevel/available")
             .and_then(|v| v.as_array())
             .map(|list| {
@@ -4482,7 +4481,7 @@ pub fn app_state_controls(params: &serde_json::Value) -> Option<SessionControls>
                     .collect()
             })
             .unwrap_or_default(),
-        thought_current: patch
+        thought_current: settings
             .pointer("/thoughtLevel/current")
             .and_then(|v| v.as_str())
             .map(str::to_string),
@@ -4497,6 +4496,108 @@ pub fn app_state_controls(params: &serde_json::Value) -> Option<SessionControls>
     } else {
         Some(controls)
     }
+}
+
+/// `workspace/readState` params for the ZCode app-server.
+pub fn app_workspace_read_params(workspace_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "workspace": {
+            "workspaceKey": workspace_path,
+            "workspacePath": workspace_path,
+        }
+    })
+}
+
+/// Extract the active provider and its models from `workspace/readState`.
+///
+/// ZCode owns provider authentication and catalog discovery. The response
+/// contains model metadata only, so callers never need provider credentials.
+pub fn app_workspace_model_controls(
+    result: &serde_json::Value,
+) -> Option<(String, SessionControls)> {
+    let settings = result.get("settings")?;
+    let provider_id = settings
+        .pointer("/model/current/providerId")?
+        .as_str()?
+        .to_string();
+    let mut controls = controls_from_settings(settings)?;
+    controls.models.retain(|model| {
+        model
+            .reference
+            .get("providerId")
+            .and_then(serde_json::Value::as_str)
+            == Some(provider_id.as_str())
+    });
+    if controls.models.is_empty() {
+        return None;
+    }
+    Some((provider_id, controls))
+}
+
+/// Extract control state from a `session/create` or `session/resume` result.
+///
+/// The top-level `settings` contains the complete model catalog. The nested
+/// snapshot can contain only the current model, so it is fallback-only.
+pub fn app_session_controls(result: &serde_json::Value) -> Option<SessionControls> {
+    result
+        .get("settings")
+        .and_then(controls_from_settings)
+        .or_else(|| {
+            result
+                .pointer("/snapshot/settings")
+                .and_then(controls_from_settings)
+        })
+}
+
+/// Build pre-session model choices from a runtime model configuration.
+///
+/// This lets `/model` select the model for the first session before the
+/// app-server has produced an authoritative `settings` result.
+pub fn app_runtime_model_controls(runtime: &serde_json::Value) -> Option<SessionControls> {
+    let provider = runtime.get("provider")?;
+    let provider_id = provider.get("providerId")?.as_str()?;
+    let provider_label = provider
+        .get("label")
+        .and_then(|value| value.as_str())
+        .unwrap_or(provider_id);
+    let models = provider
+        .get("models")?
+        .as_array()?
+        .iter()
+        .filter_map(|model| {
+            let model_id = model.get("modelId")?.as_str()?;
+            Some(ModelChoice {
+                label: model
+                    .get("label")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(model_id)
+                    .to_string(),
+                provider: provider_label.to_string(),
+                reference: serde_json::json!({
+                    "modelId": model_id,
+                    "providerId": provider_id,
+                }),
+            })
+        })
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return None;
+    }
+    Some(SessionControls {
+        models,
+        model_current: runtime
+            .pointer("/model/modelId")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        ..SessionControls::default()
+    })
+}
+
+/// Extract whatever control-surface state a `state.updated` push carries
+/// (`reason:"mode_changed"` carries the full set; others may carry parts).
+/// None when the patch has none of the control keys.
+pub fn app_state_controls(params: &serde_json::Value) -> Option<SessionControls> {
+    params.get("patch").and_then(controls_from_settings)
 }
 
 /// A decoded inbound line: a response to one of our requests, a session

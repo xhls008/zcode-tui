@@ -12,6 +12,14 @@
   Release 三阶段；新增 Windows x86_64、macOS Intel 与 macOS Apple Silicon
   二进制，保留 Linux x86_64-musl 静态版本，并为所有产物统一生成 SHA256SUMS。
 
+### 新增
+
+- **动态模型目录与首轮模型选择**：启动时通过 ZCode app-server 的
+  `workspace/readState` 读取内核模型目录，仅缓存公开模型元数据并只展示当前
+  provider；该流程不读取 API Key、不直连供应商接口，也不改写 ZCode 配置。
+  `/model` 在首次 prompt 前即可选择，建会话后先应用选择再发送消息；完整
+  `session/create|resume` 设置也会被吸收，不再只保留当前模型。
+
 ### 修复
 
 - **恢复会话模型配置兼容**：兼容 `model.main` 对象字段和根级 `model` 字符串
