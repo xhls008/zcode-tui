@@ -5,12 +5,12 @@ use zcode_tui::{
     build_prompt_command, build_prompt_command_with_attachments, classify_input,
     command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
     detect_auth_status_with, env_is_headless, extract_file_mentions, file_suggestions,
-    fold_preview, format_context_watermark, handle_local_command, history_search,
-    latest_assistant_text, latest_reasoning, latest_session_for_dir, leader_action_for_key,
-    list_recent_sessions, live_tool_chips, load_mcp_config, login_command, logout_command,
-    mask_secret, open_kernel_db_ro, parse_cli_args, parse_hex_color, parse_part_data,
-    parse_prompt_summary, parse_ui_config, recent_input_history, relative_age, save_mcp_config,
-    slash_suggestions, strip_ansi, user_mcp_config_path_from, AppConfig, AuthStatus, InputAction,
+    format_context_watermark, handle_local_command, history_search, latest_assistant_text,
+    latest_reasoning, latest_session_for_dir, leader_action_for_key, list_recent_sessions,
+    live_tool_chips, load_mcp_config, login_command, logout_command, mask_secret,
+    open_kernel_db_ro, parse_cli_args, parse_hex_color, parse_part_data, parse_prompt_summary,
+    parse_ui_config, recent_input_history, relative_age, save_mcp_config, slash_suggestions,
+    strip_ansi, tool_result_summary, user_mcp_config_path_from, AppConfig, AuthStatus, InputAction,
     LeaderAction, McpServer, PartEvent, ToolChipStatus, KNOWN_DB_MIGRATIONS,
 };
 
@@ -1242,7 +1242,7 @@ fn context_watermark_formats_and_warns() {
     assert!(!context_watermark_warn(1, 0));
 }
 
-// ---- session picker / history / folding / ui config -----------------------
+// ---- session picker / history / tool presentation / ui config -------------
 
 #[test]
 fn recent_sessions_current_dir_first_with_title_fallback() {
@@ -1330,12 +1330,44 @@ fn history_search_is_substring_newest_first() {
 }
 
 #[test]
-fn fold_preview_thresholds() {
-    let long = ["line"; 120].join("\n");
-    assert_eq!(fold_preview(&long, 24, 8), Some((8, 112)));
-    let short = ["line"; 10].join("\n");
-    assert_eq!(fold_preview(&short, 24, 8), None);
-    assert_eq!(fold_preview(&long, 24, 200), None);
+fn successful_internal_tools_use_structured_summaries() {
+    assert_eq!(
+        tool_result_summary(
+            "Read",
+            r#"{"file_path":"/tmp/notes.txt"}"#,
+            "one\ntwo\nthree\n",
+            true,
+            Some(8),
+        ),
+        "Read  notes.txt  · 3 lines  · 8ms  · passed"
+    );
+    let bash = tool_result_summary(
+        "Bash",
+        "cargo test",
+        "very long successful output",
+        true,
+        None,
+    );
+    assert_eq!(bash, "Bash  cargo test  · passed");
+    assert!(!bash.contains("very long"));
+}
+
+#[test]
+fn failed_internal_tools_keep_a_bounded_diagnostic_tail() {
+    let output = (1..=7)
+        .map(|line| format!("diagnostic {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let summary = tool_result_summary("Bash", "cargo test", &output, false, Some(4200));
+    assert!(summary.starts_with("Bash  cargo test  · 4.2s  · failed"));
+    assert!(!summary.contains("diagnostic 3"));
+    assert!(summary.contains("diagnostic 4"));
+    assert!(summary.contains("… 3 more diagnostic lines"));
+}
+
+#[test]
+fn help_no_longer_advertises_output_folding() {
+    assert!(!zcode_tui::help_text().contains("Ctrl+O"));
 }
 
 #[test]

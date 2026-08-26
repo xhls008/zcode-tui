@@ -281,28 +281,25 @@ check(
     "from history" in plain and "Read notes.txt" in plain,
 )
 
-# ---- scenario 7: folding long output (user story: 长输出不刷屏) ----
-print("== scenario 7: fold + Ctrl+O ==", flush=True)
+# ---- scenario 7: explicit shell output remains complete ----
+print("== scenario 7: explicit shell output remains complete ==", flush=True)
 out = run_pty(
     {}, SPIKE,
     [
         (2.0, b"! seq 1 120"),
         (0.5, b"\r"),
-        (3.0, b"\x0f"),     # Ctrl+O expand
         (1.0, b"/exit"),
         (0.5, b"\r"),
     ],
     timeout=30,
 )
 plain = strip_ansi(out)
-raw = run_pty.last_raw
-check("s7: long output folded with hidden count", screen_seen(raw, "+112 lines"))
-check("s7: Ctrl+O opens read-only expansion", screen_seen(raw, "expanded output"))
+check("s7: explicit shell output includes its first line", "1" in plain)
+check("s7: explicit shell output includes its last line", "120" in plain)
+check("s7: no folding marker", "+112 lines" not in plain)
 
-# ---- scenario 7b: user-requested listings never fold ----
-# /skills list is a direct answer the user asked to read; unlike shell/tool
-# output it must render whole (no "+N lines" fold marker for it).
-print("== scenario 7b: /skills list renders unfolded ==", flush=True)
+# ---- scenario 7b: user-requested listings remain complete ----
+print("== scenario 7b: /skills list remains complete ==", flush=True)
 out = run_pty(
     {"ZCODE_TUI_APP_SERVER": "0"}, SPIKE,
     [
@@ -319,7 +316,6 @@ plain = strip_ansi(out)
 check("s7b: last listed skill visible without expanding",
       "zcode-configuration-guide" in plain)
 check("s7b: first listed skill emitted", "diagnosing-commands" in plain)
-check("s7b: listing not folded", "lines · Ctrl+O)" not in plain)
 
 # ---- scenario 8: ui config color override (user story: 换掉强调色) ----
 print("== scenario 8: config accent override ==", flush=True)
@@ -411,11 +407,10 @@ with open(fake_log) as fh:
 check("s11: downgrade happened once (permanent)", downgrade_count == 1,
       f"debug log count={downgrade_count}")
 
-# ---- scenario 12: app-server tool chips + foldable tool output ----
-# Opt-in streaming with a tool-triggering prompt: the tool call must land in
-# the transcript as a foldable entry (name · duration + output), the long
-# output must fold with Ctrl+O, and the turn must finalize (done). Real kernel.
-print("== scenario 12: app-server tool chip + output folding ==", flush=True)
+# ---- scenario 12: app-server structured tool summary ----
+# A successful internal tool call lands as a compact structured summary, while
+# the turn still finalizes normally. Real kernel.
+print("== scenario 12: app-server structured tool summary ==", flush=True)
 tool_dir = tempfile.mkdtemp(prefix="zcode-smoke-tool-")
 with open(os.path.join(tool_dir, "rows.txt"), "w") as fh:
     fh.write("".join(f"row {i}: value {i * 7}\n" for i in range(1, 31)))
@@ -433,7 +428,7 @@ plain = strip_ansi(out)
 raw = run_pty.last_raw
 check("s12: tool call persisted to transcript",
       screen_seen(raw, "• Read") or screen_seen(raw, "• Bash"))
-check("s12: long tool output folded", "lines" in plain)
+check("s12: tool summary has completion state", "passed" in plain)
 # Status-bar text: pyte screen check (diff rendering; see screen_seen).
 check("s12: turn finalized (no hang)", screen_seen(raw, "done ("))
 
