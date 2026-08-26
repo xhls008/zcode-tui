@@ -6,6 +6,22 @@ pub(crate) enum AgentWorkKind {
     Background,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum InspectorTab {
+    #[default]
+    Agents,
+    Background,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum InspectorView {
+    #[default]
+    List,
+    Detail,
+}
+
+const PARENT_KEY: &str = "parent";
+
 /// One child-agent or background-shell record. Protocol identifiers are kept
 /// distinct even though the UI also exposes a compact preferred `id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +38,7 @@ pub(crate) struct BackgroundTask {
     pub(crate) status: String,
     pub(crate) pid: Option<u64>,
     pub(crate) command: Option<String>,
+    pub(crate) output_tail: Option<String>,
     pub(crate) cancellable: bool,
     pub(crate) revision: Option<u64>,
 }
@@ -51,6 +68,7 @@ impl BackgroundTask {
             status: snapshot.status.unwrap_or_else(|| "unknown".to_string()),
             pid: snapshot.pid,
             command: snapshot.command,
+            output_tail: snapshot.output_tail,
             cancellable: snapshot.cancellable.unwrap_or(false),
             revision: snapshot.revision,
         })
@@ -76,6 +94,7 @@ impl BackgroundTask {
         merge_option(&mut self.title, incoming.title);
         merge_option(&mut self.summary, incoming.summary);
         merge_option(&mut self.command, incoming.command);
+        merge_option(&mut self.output_tail, incoming.output_tail);
         if incoming.pid.is_some() {
             self.pid = incoming.pid;
         }
@@ -114,6 +133,14 @@ impl BackgroundTask {
         }
         .cloned()
         .unwrap_or_else(|| self.id.clone());
+    }
+
+    fn inspector_key(&self) -> String {
+        let prefix = match self.kind {
+            AgentWorkKind::Subagent => "agent",
+            AgentWorkKind::Background => "background",
+        };
+        format!("{prefix}:{}", self.id)
     }
 }
 
@@ -159,7 +186,11 @@ fn terminal_status(status: &str) -> bool {
 #[derive(Debug, Default)]
 pub(crate) struct AgentInspectorState {
     tasks: Vec<BackgroundTask>,
-    selected: Option<usize>,
+    open: bool,
+    tab: InspectorTab,
+    view: InspectorView,
+    selected_key: Option<String>,
+    detail_scroll: u16,
 }
 
 impl AgentInspectorState {
@@ -168,51 +199,154 @@ impl AgentInspectorState {
     }
 
     pub(crate) fn selected(&self) -> Option<usize> {
-        self.selected
+        if !self.open {
+            return None;
+        }
+        let selected = self.selected_key.as_deref()?;
+        self.visible_keys().iter().position(|key| key == selected)
     }
 
     pub(crate) fn is_open(&self) -> bool {
-        self.selected.is_some()
+        self.open
     }
 
     pub(crate) fn open(&mut self) -> bool {
-        if self.tasks.is_empty() {
-            return false;
-        }
-        self.selected = Some(0);
+        self.open = true;
+        self.tab = InspectorTab::Agents;
+        self.view = InspectorView::List;
+        self.selected_key = Some(PARENT_KEY.to_string());
+        self.detail_scroll = 0;
         true
     }
 
     pub(crate) fn close(&mut self) {
-        self.selected = None;
+        self.open = false;
+        self.selected_key = None;
+        self.detail_scroll = 0;
     }
 
     pub(crate) fn reset(&mut self) {
         self.tasks.clear();
-        self.selected = None;
+        self.close();
+    }
+
+    pub(crate) fn tab(&self) -> InspectorTab {
+        self.tab
+    }
+
+    pub(crate) fn view(&self) -> InspectorView {
+        self.view
+    }
+
+    pub(crate) fn detail_scroll(&self) -> u16 {
+        self.detail_scroll
+    }
+
+    pub(crate) fn selected_is_parent(&self) -> bool {
+        self.tab == InspectorTab::Agents && self.selected_key.as_deref() == Some(PARENT_KEY)
+    }
+
+    pub(crate) fn selected_task(&self) -> Option<&BackgroundTask> {
+        let key = self.selected_key.as_deref()?;
+        self.tasks.iter().find(|task| task.inspector_key() == key)
+    }
+
+    pub(crate) fn visible_tasks(&self) -> Vec<&BackgroundTask> {
+        let kind = match self.tab {
+            InspectorTab::Agents => AgentWorkKind::Subagent,
+            InspectorTab::Background => AgentWorkKind::Background,
+        };
+        self.tasks.iter().filter(|task| task.kind == kind).collect()
+    }
+
+    pub(crate) fn linked_background<'a>(
+        &'a self,
+        agent: &'a BackgroundTask,
+    ) -> Vec<&'a BackgroundTask> {
+        let Some(agent_id) = agent.agent_id.as_ref() else {
+            return Vec::new();
+        };
+        self.tasks
+            .iter()
+            .filter(|task| {
+                task.kind == AgentWorkKind::Background && task.agent_id.as_ref() == Some(agent_id)
+            })
+            .collect()
+    }
+
+    fn visible_keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        if self.tab == InspectorTab::Agents {
+            keys.push(PARENT_KEY.to_string());
+        }
+        keys.extend(
+            self.visible_tasks()
+                .into_iter()
+                .map(BackgroundTask::inspector_key),
+        );
+        keys
+    }
+
+    pub(crate) fn toggle_tab(&mut self) {
+        self.tab = match self.tab {
+            InspectorTab::Agents => InspectorTab::Background,
+            InspectorTab::Background => InspectorTab::Agents,
+        };
+        self.view = InspectorView::List;
+        self.detail_scroll = 0;
+        self.selected_key = self.visible_keys().into_iter().next();
+    }
+
+    pub(crate) fn open_detail(&mut self) {
+        if self.selected_key.is_some() {
+            self.view = InspectorView::Detail;
+            self.detail_scroll = 0;
+        }
+    }
+
+    pub(crate) fn back_to_list(&mut self) -> bool {
+        if self.view == InspectorView::Detail {
+            self.view = InspectorView::List;
+            self.detail_scroll = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn scroll_detail(&mut self, delta: i16) {
+        self.detail_scroll = if delta < 0 {
+            self.detail_scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.detail_scroll.saturating_add(delta as u16)
+        };
     }
 
     pub(crate) fn select_previous(&mut self) {
-        if let Some(index) = &mut self.selected {
-            *index = index.saturating_sub(1);
+        let keys = self.visible_keys();
+        if let Some(index) = self.selected() {
+            self.selected_key = keys.get(index.saturating_sub(1)).cloned();
         }
     }
 
     pub(crate) fn select_next(&mut self) {
-        if let Some(index) = &mut self.selected {
-            *index = (*index + 1).min(self.tasks.len().saturating_sub(1));
+        let keys = self.visible_keys();
+        if let Some(index) = self.selected() {
+            self.selected_key = keys
+                .get((index + 1).min(keys.len().saturating_sub(1)))
+                .cloned();
         }
     }
 
     pub(crate) fn select_first(&mut self) {
-        if self.selected.is_some() {
-            self.selected = Some(0);
+        if self.open {
+            self.selected_key = self.visible_keys().into_iter().next();
         }
     }
 
     pub(crate) fn select_last(&mut self) {
-        if self.selected.is_some() {
-            self.selected = Some(self.tasks.len().saturating_sub(1));
+        if self.open {
+            self.selected_key = self.visible_keys().into_iter().last();
         }
     }
 
@@ -230,12 +364,16 @@ impl AgentInspectorState {
             .iter_mut()
             .find(|existing| existing.shares_identity(&incoming))
         {
+            let old_key = existing.inspector_key();
             existing.merge(incoming);
+            if self.selected_key.as_deref() == Some(old_key.as_str()) {
+                self.selected_key = Some(existing.inspector_key());
+            }
         } else {
             self.tasks.insert(0, incoming);
         }
-        if let Some(index) = &mut self.selected {
-            *index = (*index).min(self.tasks.len().saturating_sub(1));
+        if self.open && self.selected().is_none() {
+            self.selected_key = self.visible_keys().into_iter().next();
         }
     }
 
@@ -265,6 +403,7 @@ impl AgentInspectorState {
                     .unwrap_or_else(|| fallback_status.to_string()),
             ),
             command: event.command.clone(),
+            output_tail: event.output.clone(),
             pid: event.pid,
             cancellable: event.cancellable,
             revision: event.revision,
@@ -322,16 +461,47 @@ mod tests {
     #[test]
     fn selection_stays_inside_the_task_list() {
         let mut state = AgentInspectorState::default();
-        assert!(!state.open());
+        assert!(state.open());
+        assert!(state.selected_is_parent());
+        state.toggle_tab();
+        assert_eq!(state.tab(), InspectorTab::Background);
+        assert_eq!(state.selected(), None);
         state.ingest(&AppServerEvent {
             kind: "background_task_started".to_string(),
             task_id: Some("bg-1".to_string()),
             ..Default::default()
         });
-        assert!(state.open());
+        assert_eq!(state.selected(), Some(0));
         state.select_next();
         assert_eq!(state.selected(), Some(0));
         state.close();
         assert!(!state.is_open());
+    }
+
+    #[test]
+    fn live_insert_preserves_selected_record_and_detail_scroll() {
+        let mut state = AgentInspectorState::default();
+        state.merge_snapshots(vec![AgentSnapshot {
+            kind: "subagent".to_string(),
+            child_session_id: Some("child-1".to_string()),
+            status: Some("running".to_string()),
+            ..Default::default()
+        }]);
+        state.open();
+        state.select_next();
+        state.open_detail();
+        state.scroll_detail(7);
+        state.merge_snapshots(vec![AgentSnapshot {
+            kind: "subagent".to_string(),
+            child_session_id: Some("child-2".to_string()),
+            status: Some("running".to_string()),
+            ..Default::default()
+        }]);
+        assert_eq!(
+            state.selected_task().map(|task| task.id.as_str()),
+            Some("child-1")
+        );
+        assert_eq!(state.view(), InspectorView::Detail);
+        assert_eq!(state.detail_scroll(), 7);
     }
 }
