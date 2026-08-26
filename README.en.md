@@ -154,9 +154,14 @@ for details.
   path traversal and symlink escapes.
 - Persistent prompt history from the ZCode kernel database, plus Ctrl+R reverse
   search.
-- `/agents` shows a read-only list of `background_task_*` lifecycle events
-  observed in the current session: status, tool, task ID, PID, and command.
-  The UI does not invent task logs or controls that the kernel does not expose.
+- `/agents` is a read-only Agent Inspector backed by official
+  `session/subagents`, V4 state, and lifecycle events. It separates the parent,
+  Subagents, and Background work; supports tabs, details, refresh, and stable
+  selection; and always labels the composer target as the parent. Press `x`
+  only on Background records that the kernel marks `cancellable=true` and gives
+  a real `taskId`. Inactive child transcripts on ZCode 0.16.3 require a stateful
+  resume, so the TUI deliberately shows official summaries/output tails only,
+  never auto-resumes a child, and never falls back to SQLite.
 - The TUI uses a normal-screen Ratatui inline viewport. Completed phases append
   to terminal scrollback in chronological order; only unfinished thinking
   state and the composer remain in the viewport. Mouse capture is
@@ -320,7 +325,8 @@ text                         send through app-server (fallback: --prompt)
 /auth                        show local auth status
 /status                      show session, auth, and MCP overview
 /sessions                    open recent session picker
-/agents                      show observed background tasks (read-only)
+/agents                      inspect parent, Subagents, and Background work
+                             (read-only; Tab/Enter/r; x cancels eligible work)
 /mcp list                    list project and user MCP servers
 /mcp add <name> <cmd> [args] add stdio MCP server
 /mcp add --transport http|sse <name> <url>

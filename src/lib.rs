@@ -729,7 +729,7 @@ pub fn command_catalog() -> &'static [CommandSpec] {
         },
         CommandSpec {
             command: "/agents",
-            summary: "show background tasks observed in this session",
+            summary: "inspect parent, Subagents, and cancellable background work",
             route: "local",
         },
         CommandSpec {
@@ -1599,7 +1599,9 @@ launch options:
                                clipboard (OSC52; tmux needs set-clipboard on)
   /resume [sess_id]            resume latest (bare) or a specific session
   /sessions                    pick a recent session from a list
-  /agents                      show observed background tasks (read-only)
+  /agents                      inspect parent/Subagents/Background (read-only;
+                               Tab switches, Enter details, r refreshes,
+                               x cancels eligible official taskIds)
   /new                         start a fresh session; context resets
   /editor                      edit current prompt in $VISUAL or $EDITOR
   /clear                       clear this screen
