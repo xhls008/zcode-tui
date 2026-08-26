@@ -90,11 +90,11 @@ for details.
 - Session controls on the live session: `/model` picker, `/think` thought
   level, `/compact` in-place context compaction; `/mode` and Shift+Tab apply
   immediately via `session/setMode`.
-- Dynamic model catalog: at startup, the TUI queries the active `model.main`
-  provider's authenticated `/models` endpoint, caches the response without
-  the API key, and refreshes only that provider's model registry. Network
-  failures fall back to the cache and then local config. `/model` works before
-  the first prompt and excludes models from inactive configured providers.
+- Dynamic model catalog: at startup, the TUI reads ZCode's resolved catalog
+  through the app-server `workspace/readState` method. This catalog path never
+  reads the API key, contacts the provider directly, or rewrites ZCode's config.
+  Public model metadata is cached for app-server outages. `/model` works before
+  the first prompt and excludes models from inactive providers.
 - Steering: on ZCode 3.5.3, plain text typed during a turn uses V4
   `setFollowupMode:guide` followed by `sendText`; success is shown only after
   the subsequent frame admits `delivery=guide`. Older kernels retain

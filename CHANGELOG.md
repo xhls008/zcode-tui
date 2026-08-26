@@ -14,9 +14,9 @@
 
 ### 新增
 
-- **动态模型目录与首轮模型选择**：启动时按 `model.main` 所属 provider
-  鉴权请求 `/models`，无密钥缓存远端目录并只刷新该 provider 的模型注册；
-  网络失败依次回退缓存与本地配置，其他已配置 provider 不再混入选择器。
+- **动态模型目录与首轮模型选择**：启动时通过 ZCode app-server 的
+  `workspace/readState` 读取内核模型目录，仅缓存公开模型元数据并只展示当前
+  provider；该流程不读取 API Key、不直连供应商接口，也不改写 ZCode 配置。
   `/model` 在首次 prompt 前即可选择，建会话后先应用选择再发送消息；完整
   `session/create|resume` 设置也会被吸收，不再只保留当前模型。
 

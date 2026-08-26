@@ -1907,75 +1907,42 @@ fn runtime_model_controls_seed_pre_session_picker() {
 }
 
 #[test]
-fn model_discovery_uses_only_the_active_provider() {
-    use zcode_tui::model_discovery_request;
-    let config = r#"{
-        "provider": {
-            "zai": {"kind": "anthropic", "name": "Z.AI", "options": {
-                "baseURL": "https://api.z.ai/api/anthropic", "apiKey": "zai-key"},
-                "models": {"glm-5": {"name": "GLM-5"}}},
-            "bigmodel": {"kind": "anthropic", "name": "BigModel Coding Plan", "options": {
-                "baseURL": "https://open.bigmodel.cn/api/anthropic", "apiKey": "cn-key"},
-                "models": {"glm-5.3": {"name": "GLM-5.3"}}}
-        },
-        "model": {"main": "bigmodel/glm-5.3", "lite": "bigmodel/glm-4.7"}
-    }"#;
-    let request = model_discovery_request(config).unwrap();
-    assert_eq!(request.provider_id, "bigmodel");
-    assert_eq!(request.provider_label, "BigModel Coding Plan");
-    assert_eq!(
-        request.endpoint,
-        "https://open.bigmodel.cn/api/anthropic/v1/models"
-    );
-    assert_eq!(request.api_key, "cn-key");
+fn workspace_model_catalog_uses_only_the_active_provider() {
+    use zcode_tui::{app_workspace_model_controls, app_workspace_read_params};
+    let params = app_workspace_read_params("/tmp/project");
+    assert_eq!(params["workspace"]["workspaceKey"], "/tmp/project");
+    assert_eq!(params["workspace"]["workspacePath"], "/tmp/project");
 
-    let root_model = config.replace(
-        r#""model": {"main": "bigmodel/glm-5.3", "lite": "bigmodel/glm-4.7"}"#,
-        r#""model": "bigmodel/glm-5.3""#,
-    );
-    assert_eq!(
-        model_discovery_request(&root_model).unwrap().provider_id,
-        "bigmodel"
-    );
-}
-
-#[test]
-fn remote_catalog_replaces_only_active_provider_models() {
-    use zcode_tui::{parse_model_catalog, replace_provider_models};
-    let config = r#"{
-        "provider": {
-            "zai": {"kind": "anthropic", "options": {"apiKey": "keep-zai"},
-                "models": {"glm-zai": {"name": "Z.AI model"}}},
-            "bigmodel": {"kind": "anthropic", "options": {"apiKey": "keep-cn"},
-                "models": {"old": {"name": "Old"}}}
+    let model = |provider_id: &str, provider_label: &str, model_id: &str| {
+        serde_json::json!({
+            "label": model_id,
+            "providerLabel": provider_label,
+            "ref": {"modelId": model_id, "providerId": provider_id}
+        })
+    };
+    let result = serde_json::json!({
+        "settings": {
+            "model": {
+                "available": [
+                    model("zai", "Z.AI Coding Plan", "glm-5.1"),
+                    model("bigmodel", "BigModel Coding Plan", "glm-5.3"),
+                    model("bigmodel", "BigModel Coding Plan", "glm-4.7")
+                ],
+                "current": {"modelId": "glm-5.3", "providerId": "bigmodel"}
+            }
         },
-        "model": {"main": "bigmodel/glm-5.3", "lite": "bigmodel/glm-4.7"}
-    }"#;
-    let response = r#"{"data":[{"id":"glm-5.3"},{"id":"glm-4.7","name":"GLM-4.7"}]}"#;
-    let models = parse_model_catalog(response, "bigmodel", "BigModel").unwrap();
-    assert_eq!(models.len(), 2);
-    assert_eq!(models[0].reference["modelId"], "glm-4.7");
-    let updated = replace_provider_models(config, "bigmodel", &models).unwrap();
-    let updated: serde_json::Value = serde_json::from_str(&updated).unwrap();
-    assert_eq!(
-        updated["provider"]["bigmodel"]["options"]["apiKey"],
-        "keep-cn"
-    );
-    assert_eq!(
-        updated["provider"]["bigmodel"]["models"]
-            .as_object()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(updated["provider"]["zai"]["options"]["apiKey"], "keep-zai");
-    assert_eq!(
-        updated["provider"]["zai"]["models"]
-            .as_object()
-            .unwrap()
-            .len(),
-        1
-    );
+        "modelCatalog": {
+            "providers": []
+        }
+    });
+    let (provider_id, controls) = app_workspace_model_controls(&result).unwrap();
+    assert_eq!(provider_id, "bigmodel");
+    assert_eq!(controls.model_current.as_deref(), Some("glm-5.3"));
+    assert_eq!(controls.models.len(), 2);
+    assert!(controls
+        .models
+        .iter()
+        .all(|model| { model.reference["providerId"] == "bigmodel" }));
 }
 
 #[test]

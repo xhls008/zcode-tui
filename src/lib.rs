@@ -4443,115 +4443,6 @@ pub struct SessionControls {
     pub thought_current: Option<String>,
 }
 
-/// Authenticated model-discovery request derived from the active provider in
-/// the kernel config. The API key must never be persisted in the model cache.
-pub struct ModelDiscoveryRequest {
-    pub provider_id: String,
-    pub provider_label: String,
-    pub endpoint: String,
-    pub api_key: String,
-}
-
-/// Resolve the active provider's authenticated `/models` endpoint.
-pub fn model_discovery_request(config_json: &str) -> Option<ModelDiscoveryRequest> {
-    let config: serde_json::Value = serde_json::from_str(config_json).ok()?;
-    let main = configured_main_model(&config)?;
-    let (provider_id, _) = main.split_once('/')?;
-    let provider = config.pointer(&format!("/provider/{provider_id}"))?;
-    let kind = provider.get("kind")?.as_str()?;
-    let base_url = provider
-        .pointer("/options/baseURL")?
-        .as_str()?
-        .trim_end_matches('/');
-    let api_key = provider.pointer("/options/apiKey")?.as_str()?;
-    if base_url.is_empty() || api_key.is_empty() || api_key.contains(['\r', '\n']) {
-        return None;
-    }
-    Some(ModelDiscoveryRequest {
-        provider_id: provider_id.to_string(),
-        provider_label: provider
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(provider_id)
-            .to_string(),
-        endpoint: if kind == "anthropic" && !base_url.ends_with("/v1") {
-            format!("{base_url}/v1/models")
-        } else {
-            format!("{base_url}/models")
-        },
-        api_key: api_key.to_string(),
-    })
-}
-
-/// Parse an OpenAI- or Anthropic-compatible model catalog into picker rows.
-pub fn parse_model_catalog(
-    body: &str,
-    provider_id: &str,
-    provider_label: &str,
-) -> Option<Vec<ModelChoice>> {
-    let response: serde_json::Value = serde_json::from_str(body).ok()?;
-    let mut models = response
-        .get("data")?
-        .as_array()?
-        .iter()
-        .filter_map(|model| {
-            let model_id = model.get("id").or_else(|| model.get("modelId"))?.as_str()?;
-            Some(ModelChoice {
-                label: model
-                    .get("name")
-                    .or_else(|| model.get("display_name"))
-                    .or_else(|| model.get("label"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(model_id)
-                    .to_string(),
-                provider: provider_label.to_string(),
-                reference: serde_json::json!({
-                    "modelId": model_id,
-                    "providerId": provider_id,
-                }),
-            })
-        })
-        .collect::<Vec<_>>();
-    models.sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
-    models.dedup_by(|left, right| left.reference == right.reference);
-    (!models.is_empty()).then_some(models)
-}
-
-/// Replace only one provider's model registry while preserving credentials,
-/// other providers, and the selected main/lite models.
-pub fn replace_provider_models(
-    config_json: &str,
-    provider_id: &str,
-    models: &[ModelChoice],
-) -> Option<String> {
-    let mut config: serde_json::Value = serde_json::from_str(config_json).ok()?;
-    let main_provider = configured_main_model(&config)?.split_once('/')?.0;
-    if main_provider != provider_id {
-        return None;
-    }
-    let registry = config
-        .pointer_mut(&format!("/provider/{provider_id}/models"))?
-        .as_object_mut()?;
-    registry.clear();
-    for model in models {
-        let model_id = model.reference.get("modelId")?.as_str()?;
-        let model_provider = model.reference.get("providerId")?.as_str()?;
-        if model_provider != provider_id {
-            continue;
-        }
-        registry.insert(
-            model_id.to_string(),
-            serde_json::json!({ "name": model.label }),
-        );
-    }
-    if registry.is_empty() {
-        return None;
-    }
-    serde_json::to_string_pretty(&config)
-        .ok()
-        .map(|text| format!("{text}\n"))
-}
-
 fn controls_from_settings(settings: &serde_json::Value) -> Option<SessionControls> {
     let controls = SessionControls {
         mode: settings
@@ -4605,6 +4496,42 @@ fn controls_from_settings(settings: &serde_json::Value) -> Option<SessionControl
     } else {
         Some(controls)
     }
+}
+
+/// `workspace/readState` params for the ZCode app-server.
+pub fn app_workspace_read_params(workspace_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "workspace": {
+            "workspaceKey": workspace_path,
+            "workspacePath": workspace_path,
+        }
+    })
+}
+
+/// Extract the active provider and its models from `workspace/readState`.
+///
+/// ZCode owns provider authentication and catalog discovery. The response
+/// contains model metadata only, so callers never need provider credentials.
+pub fn app_workspace_model_controls(
+    result: &serde_json::Value,
+) -> Option<(String, SessionControls)> {
+    let settings = result.get("settings")?;
+    let provider_id = settings
+        .pointer("/model/current/providerId")?
+        .as_str()?
+        .to_string();
+    let mut controls = controls_from_settings(settings)?;
+    controls.models.retain(|model| {
+        model
+            .reference
+            .get("providerId")
+            .and_then(serde_json::Value::as_str)
+            == Some(provider_id.as_str())
+    });
+    if controls.models.is_empty() {
+        return None;
+    }
+    Some((provider_id, controls))
 }
 
 /// Extract control state from a `session/create` or `session/resume` result.

@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Stdout, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, ExitStatus, Stdio};
+use std::process::{self, Command, ExitStatus};
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
@@ -31,11 +31,11 @@ use ratatui_image::StatefulImage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zcode_tui::{
     app_close_params, app_compact_params, app_create_params, app_file_rewind_params,
-    app_resume_params, app_rewind_params, app_runtime_model_controls,
-    app_send_params_with_attachments, app_server_enabled, app_session_controls,
-    app_session_id_from_result, app_set_mode_params, app_set_model_params, app_set_thought_params,
-    app_state_controls, app_state_is_turn_end, app_state_turn_error, app_state_watermark,
-    app_steer_params, app_stop_params, app_subscribe_params, app_usage_params, build_runtime_model,
+    app_resume_params, app_rewind_params, app_send_params_with_attachments, app_server_enabled,
+    app_session_controls, app_session_id_from_result, app_set_mode_params, app_set_model_params,
+    app_set_thought_params, app_state_controls, app_state_is_turn_end, app_state_turn_error,
+    app_state_watermark, app_steer_params, app_stop_params, app_subscribe_params, app_usage_params,
+    app_workspace_model_controls, app_workspace_read_params, build_runtime_model,
     build_send_attachments, checkpoint_short_id, classify_input, command_palette_rows,
     context_watermark_warn, conversation_target, db_baseline, db_schema_supported,
     detect_auth_status, diff_line_role, discover_zcode_app_dir, encode_interaction_reply,
@@ -44,23 +44,23 @@ use zcode_tui::{
     history_search, is_newer_version, kernel_config_path_from, kernel_db_path_from,
     latest_assistant_text, latest_reasoning, latest_session_for_dir, leader_action_for_key,
     list_recent_sessions, live_tool_chips, load_mcp_config, load_ui_config, login_command,
-    markdown_lines, mcp_config_path, mcp_servers_param, model_discovery_request, open_kernel_db_ro,
-    osc52_copy_sequence, parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
-    parse_kernel_slash_commands, parse_model_catalog, parse_prompt_summary, parse_resume_messages,
-    parse_rewind_preview, parse_session_list, parse_steer_result, parse_stream_event, parse_todos,
-    parse_update_feed, parse_v4_command_ack, prompt_command_for, recent_input_history,
-    relative_age, replace_provider_models, resolve_update_download_url, rewind_failure,
-    run_command, select_update_feed_url, shorten_home, skyline_braille, skyline_graphics_wanted,
-    skyline_lines, skyline_mode, slash_suggestions_merged, spawn_streaming_command,
-    tool_input_summary, usage_stats_params, user_mcp_config_path, v4_command_params,
-    v4_conversation_subscribe_params, v4_file_rewind_preview_params, v4_rewind_target,
-    with_mcp_servers, with_tool_policy, wrap_display, zcode_app_version_from_path, AppConfig,
-    AppServerConn, AppServerEvent, AppServerMessage, AppServerTurn, AppServerUnavailable,
-    AuthStatus, CheckpointEntry, DbBaseline, DebugLog, DiffRole, InputAction, InteractionRequest,
-    JobEvent, KernelCommand, LeaderAction, LiveToolChip, MdLineKind, ModelChoice,
-    ModelDiscoveryRequest, RewindPreview, RewindTarget, SessionControls, SessionRow, SkylineMode,
-    SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem, ToolChipStatus, TurnDelta,
-    UiConfig, UpdateFeed, V4CommandBase, V4ConversationState, SKYLINE_LOGO_W,
+    markdown_lines, mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence,
+    parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
+    parse_kernel_slash_commands, parse_prompt_summary, parse_resume_messages, parse_rewind_preview,
+    parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
+    parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age,
+    resolve_update_download_url, rewind_failure, run_command, select_update_feed_url, shorten_home,
+    skyline_braille, skyline_graphics_wanted, skyline_lines, skyline_mode,
+    slash_suggestions_merged, spawn_streaming_command, tool_input_summary, usage_stats_params,
+    user_mcp_config_path, v4_command_params, v4_conversation_subscribe_params,
+    v4_file_rewind_preview_params, v4_rewind_target, with_mcp_servers, with_tool_policy,
+    wrap_display, zcode_app_version_from_path, AppConfig, AppServerConn, AppServerEvent,
+    AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, CheckpointEntry, DbBaseline,
+    DebugLog, DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction,
+    LiveToolChip, MdLineKind, ModelChoice, RewindPreview, RewindTarget, SessionControls,
+    SessionRow, SkylineMode, SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem,
+    ToolChipStatus, TurnDelta, UiConfig, UpdateFeed, V4CommandBase, V4ConversationState,
+    SKYLINE_LOGO_W,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -133,7 +133,7 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
     // before the event loop reads stdin (ratatui-image queries via stdio).
     state.init_graphics_logo();
     state.push_startup_frame();
-    let probe = spawn_startup_probe(zcode_bin.to_string());
+    let probe = spawn_startup_probe(zcode_bin.to_string(), state.app_workspace());
 
     for prompt in state.config.initial_prompts.clone() {
         state.queued.push_back(prompt);
@@ -320,40 +320,47 @@ fn model_cache_path() -> Option<PathBuf> {
         .map(|home| home.join(".cache").join("zcode-tui").join("models.json"))
 }
 
-fn fetch_model_catalog(request: &ModelDiscoveryRequest) -> Option<(String, Vec<ModelChoice>)> {
-    let mut child = Command::new("curl")
-        .args(["-fsSL", "--max-time", "5", "--header", "@-"])
-        .arg(&request.endpoint)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdin = child.stdin.take()?;
-    writeln!(stdin, "Authorization: Bearer {}", request.api_key).ok()?;
-    drop(stdin);
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let body = String::from_utf8(output.stdout).ok()?;
-    let models = parse_model_catalog(&body, &request.provider_id, &request.provider_label)?;
-    Some((body, models))
-}
-
-fn cached_model_catalog(request: &ModelDiscoveryRequest) -> Option<Vec<ModelChoice>> {
+fn cached_model_catalog() -> Option<ModelCatalogReport> {
     let cache: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(model_cache_path()?).ok()?).ok()?;
-    if cache.get("providerId")?.as_str()? != request.provider_id
-        || cache.get("endpoint")?.as_str()? != request.endpoint
-    {
+    if cache.get("version")?.as_u64()? != 1 {
         return None;
     }
-    parse_model_catalog(
-        &cache.get("response")?.to_string(),
-        &request.provider_id,
-        &request.provider_label,
-    )
+    let provider_id = cache.get("providerId")?.as_str()?.to_string();
+    let models = cache
+        .get("models")?
+        .as_array()?
+        .iter()
+        .filter_map(|model| {
+            let reference = model.get("reference")?.clone();
+            if reference.get("providerId")?.as_str()? != provider_id {
+                return None;
+            }
+            Some(ModelChoice {
+                label: model.get("label")?.as_str()?.to_string(),
+                provider: model
+                    .get("provider")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                reference,
+            })
+        })
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return None;
+    }
+    Some(ModelCatalogReport {
+        provider_id,
+        controls: SessionControls {
+            models,
+            model_current: cache
+                .get("modelCurrent")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            ..SessionControls::default()
+        },
+    })
 }
 
 fn write_atomic(path: &Path, content: &str) -> Result<()> {
@@ -370,13 +377,25 @@ fn write_atomic(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-fn cache_model_catalog(request: &ModelDiscoveryRequest, body: &str) -> Result<()> {
-    let response: serde_json::Value = serde_json::from_str(body)?;
+fn cache_model_catalog(report: &ModelCatalogReport) -> Result<()> {
+    let models = report
+        .controls
+        .models
+        .iter()
+        .map(|model| {
+            serde_json::json!({
+                "label": model.label,
+                "provider": model.provider,
+                "reference": model.reference,
+            })
+        })
+        .collect::<Vec<_>>();
     let cache = serde_json::json!({
-        "providerId": request.provider_id,
-        "endpoint": request.endpoint,
+        "version": 1,
+        "providerId": report.provider_id,
         "fetchedAt": unix_time_ms(),
-        "response": response,
+        "modelCurrent": report.controls.model_current,
+        "models": models,
     });
     write_atomic(
         &model_cache_path().ok_or_else(|| anyhow::anyhow!("cache directory unavailable"))?,
@@ -384,65 +403,40 @@ fn cache_model_catalog(request: &ModelDiscoveryRequest, body: &str) -> Result<()
     )
 }
 
-fn sync_kernel_model_registry(
-    config_path: &Path,
-    request: &ModelDiscoveryRequest,
-    models: &[ModelChoice],
-) -> Result<()> {
-    let latest = fs::read_to_string(config_path)?;
-    let Some(latest_request) = model_discovery_request(&latest) else {
-        return Ok(());
-    };
-    if latest_request.provider_id != request.provider_id
-        || latest_request.endpoint != request.endpoint
-        || latest_request.api_key != request.api_key
-    {
-        return Ok(());
+fn refresh_model_catalog(zcode_bin: &str, workspace: &str) -> Option<ModelCatalogReport> {
+    let live = AppServerConn::spawn(zcode_bin).ok().and_then(|mut conn| {
+        let result = conn
+            .request_blocking(
+                "workspace/readState",
+                app_workspace_read_params(workspace),
+                Duration::from_secs(5),
+            )
+            .ok()?;
+        let (provider_id, controls) = app_workspace_model_controls(&result)?;
+        Some(ModelCatalogReport {
+            provider_id,
+            controls,
+        })
+    });
+    if let Some(report) = live {
+        let _ = cache_model_catalog(&report);
+        Some(report)
+    } else {
+        cached_model_catalog()
     }
-    let updated = replace_provider_models(&latest, &request.provider_id, models)
-        .ok_or_else(|| anyhow::anyhow!("cannot update active provider models"))?;
-    if updated == latest {
-        return Ok(());
-    }
-    write_atomic(config_path, &updated)
-}
-
-fn refresh_model_catalog() -> Option<ModelCatalogReport> {
-    let home = env::var_os("HOME").map(PathBuf::from)?;
-    let config_path = kernel_config_path_from(&home);
-    let config = fs::read_to_string(&config_path).ok()?;
-    let request = model_discovery_request(&config)?;
-    let local_controls = build_runtime_model(&config, unix_time_ms())
-        .as_ref()
-        .and_then(app_runtime_model_controls)?;
-    let current = local_controls.model_current;
-    let local_models = local_controls.models;
-    let (models, remote_body) = match fetch_model_catalog(&request) {
-        Some((body, models)) => (models, Some(body)),
-        None => (cached_model_catalog(&request).unwrap_or(local_models), None),
-    };
-    if let Some(body) = remote_body {
-        let _ = cache_model_catalog(&request, &body);
-    }
-    let _ = sync_kernel_model_registry(&config_path, &request, &models);
-    Some(ModelCatalogReport {
-        provider_id: request.provider_id,
-        controls: SessionControls {
-            models,
-            model_current: current,
-            ..SessionControls::default()
-        },
-    })
 }
 
 /// Probe, off the UI thread: the CLI kernel version, the installed desktop
 /// package version, and the official electron-updater feed (the same
 /// latest-linux.yml the ZCode desktop app polls, so the notice matches the
 /// official release channel). ZCODE_TUI_NO_UPDATE_CHECK=1 skips the network.
-fn spawn_startup_probe(zcode_bin: String) -> std::sync::mpsc::Receiver<StartupReport> {
+fn spawn_startup_probe(
+    zcode_bin: String,
+    workspace: String,
+) -> std::sync::mpsc::Receiver<StartupReport> {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let model_catalog = refresh_model_catalog();
+        let model_catalog = refresh_model_catalog(&zcode_bin, &workspace);
         let kernel = run_command(&[zcode_bin, "version".to_string()])
             .ok()
             .and_then(|output| {
@@ -973,12 +967,6 @@ impl UiState {
         } else {
             AppMode::Off
         };
-        let model_provider = load_runtime_model().and_then(|runtime| {
-            runtime
-                .pointer("/model/providerId")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        });
         Self {
             config,
             zcode_bin,
@@ -1009,7 +997,7 @@ impl UiState {
             session_picker: None,
             model_picker: None,
             pending_model: None,
-            model_provider,
+            model_provider: None,
             history_query: None,
             unfolded: HashSet::new(),
             mouse_enabled,
@@ -3431,19 +3419,10 @@ fi"#
         None
     }
 
-    /// /model — list kernel-reported models, or seed the first-session picker
-    /// from the same runtime model configuration the kernel will consume.
+    /// /model — list models reported by the ZCode app-server.
     fn open_model_picker(&mut self) {
-        if self.controls.models.is_empty() && self.app_session.is_none() {
-            if let Some(controls) = load_runtime_model()
-                .as_ref()
-                .and_then(app_runtime_model_controls)
-            {
-                self.merge_controls(controls);
-            }
-        }
         if self.controls.models.is_empty() {
-            self.push_system("no models found in the ZCode configuration");
+            self.push_system("model catalog is not available from the ZCode app-server yet");
             return;
         }
         let current =
