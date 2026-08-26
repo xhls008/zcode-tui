@@ -1300,7 +1300,13 @@ impl UiState {
             }
             KeyCode::BackTab => self.cycle_mode(),
             KeyCode::Enter => {
-                if !self.suggestions.is_empty() && self.suggestion_nav {
+                if !self.suggestions.is_empty() && self.input.starts_with('/') {                                                                                                                                                                                                                                                        
+                    self.accept_suggestion();
+                    let input = self.input.trim().to_string();
+                    if let Some(effect) = self.handle_submit(&input) {
+                        return Some(effect);
+                    }
+                } else if !self.suggestions.is_empty() && self.suggestion_nav {
                     self.accept_suggestion();
                 } else {
                     let input = self.input.trim().to_string();
