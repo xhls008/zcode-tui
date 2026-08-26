@@ -4,6 +4,14 @@
 构建 Linux x86_64-musl、Windows x86_64、macOS Intel/Apple Silicon 二进制，
 连同 SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版本段。
 
+## [Unreleased]
+
+### 优化
+
+- **对话阅读与复制**：对话区和输入框之间增加留白，思考及回复标识与正文之间
+  增加间距；鼠标捕获改为默认关闭，可直接拖选复制任意对话内容，并保留
+  `PageUp/PageDown` 键盘回看。需要滚轮回看时可显式配置 `mouse = on`。
+
 ## [0.5.6] - 2026-08-26
 
 ### 新增

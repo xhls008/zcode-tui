@@ -149,8 +149,9 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 - readline 式光标编辑：Left/Right、Home/End、`Ctrl+A/E`、`Ctrl+W`、Delete。
 - **持久输入历史**：启动时读入内核 `input_history`（内核记录每条 --prompt），
   Up/Down 跨进程可用；`Ctrl+R` 反向搜索（子串过滤、新→旧、Enter 取回）。
-- **鼠标滚轮**回看 transcript（±3 行/格）；`ZCODE_TUI_NO_MOUSE=1` 或配置
-  `mouse = off` 关闭捕获；按住 Shift 可用终端原生文本选择。
+- 默认不捕获鼠标，可直接拖选用户消息、思考过程与助手回复并使用终端复制；
+  `PageUp/PageDown` 回看 transcript。需要鼠标滚轮回看时可配置 `mouse = on`，
+  此时按住 Shift 仍可使用终端原生选择；`ZCODE_TUI_NO_MOUSE=1` 强制关闭捕获。
 - **长输出折叠**：工具/系统/diff/错误单元超过 24 行默认折叠为头 8 行 +
   `… (+N lines · Ctrl+O)`，`Ctrl+O` 展开/收起；助手回复永不折叠。
 - **OSC52 复制**：`Ctrl+X` 后 `y` 或 `/copy` 把最后一条助手回复写进系统
@@ -456,8 +457,8 @@ ZCODE_FORCE_SYSTEM_NODE      wrapper：置 1 强制用系统 Node 运行内核
 # 这里就把颜色控制权留给终端用户。
 # 可配置 token：accent accent_dim text dim good bad frame code_bg band_bg brand brand_dim
 accent = #6088ff
-# 关闭鼠标捕获
-mouse = off
+# 可选：捕获鼠标以启用滚轮回看；默认 off，方便直接拖选复制
+mouse = on
 # 关闭 >30s 回合完成铃（默认开启）
 notify = off
 ```

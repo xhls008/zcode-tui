@@ -148,7 +148,9 @@ for details.
   path traversal and symlink escapes.
 - Persistent prompt history from the ZCode kernel database, plus Ctrl+R reverse
   search.
-- Mouse wheel scrollback, optional with `ZCODE_TUI_NO_MOUSE=1`.
+- Mouse capture is off by default for native drag selection and copying;
+  PageUp/PageDown scroll the transcript. Set `mouse = on` for wheel scrolling
+  (hold Shift to select), or force capture off with `ZCODE_TUI_NO_MOUSE=1`.
 - Long output folding via Ctrl+O.
 - Bracketed paste support.
 - Ctrl+P command palette, Ctrl+X leader shortcuts, Ctrl+G external editor.
@@ -342,8 +344,9 @@ Line format:
 # Tokens: accent accent_dim text dim good bad frame code_bg band_bg brand brand_dim
 accent = #6088ff
 
-# Disable mouse capture.
-mouse = off
+# Optional: capture the mouse for wheel scrolling. Off by default so text can
+# be selected and copied directly.
+mouse = on
 
 # Disable the >30s turn-complete terminal bell.
 notify = off

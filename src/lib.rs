@@ -1609,8 +1609,10 @@ keys:
   Ctrl+J                       insert newline
   Ctrl+R                       reverse-search input history
   Ctrl+O                       expand / fold the last long output
-  Mouse wheel                  scroll the transcript (hold Shift to select
-                               text; ZCODE_TUI_NO_MOUSE=1 disables capture)
+  PageUp / PageDown            scroll the transcript
+  Mouse drag                   terminal-native text selection (default)
+  Mouse wheel                  scroll when config sets mouse = on; hold Shift
+                               to select (ZCODE_TUI_NO_MOUSE=1 overrides it)
   Esc                          close popups / cancel running job
 "#
 }

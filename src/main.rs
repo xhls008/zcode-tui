@@ -954,7 +954,7 @@ impl UiState {
         let plain = config.no_color || env::var_os("NO_COLOR").is_some();
         let ui_config = load_ui_config();
         let mouse_enabled =
-            env::var_os("ZCODE_TUI_NO_MOUSE").is_none() && ui_config.mouse != Some(false);
+            mouse_capture_enabled(&ui_config, env::var_os("ZCODE_TUI_NO_MOUSE").is_some());
         let notify_enabled = ui_config.notify != Some(false);
         let app_mode = if app_server_enabled(|key| env::var(key).ok()) {
             AppMode::Ready
@@ -4585,6 +4585,11 @@ fi"#
     }
 }
 
+/// Mouse capture is opt-in so terminal-native drag selection works by default.
+fn mouse_capture_enabled(config: &UiConfig, disabled_by_env: bool) -> bool {
+    !disabled_by_env && config.mouse == Some(true)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogKind {
     Banner,
@@ -4752,6 +4757,7 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
         .constraints([
             Constraint::Min(6),
             Constraint::Length(live_lines.len() as u16),
+            Constraint::Length(1),
             Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
@@ -4761,11 +4767,11 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     if !live_lines.is_empty() {
         frame.render_widget(Paragraph::new(live_lines), vertical[1]);
     }
-    render_composer(frame, vertical[2], state);
-    render_footer(frame, vertical[3], state);
+    render_composer(frame, vertical[3], state);
+    render_footer(frame, vertical[4], state);
 
     if !state.suggestions.is_empty() {
-        render_suggestions(frame, vertical[2], state);
+        render_suggestions(frame, vertical[3], state);
     }
     if state.show_help {
         render_help_modal(frame, centered_rect(74, 70, root), &state.theme);
@@ -4869,9 +4875,13 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
                 .rev()
                 .take(LIVE_TEXT_TAIL)
                 .collect();
-            for line in tail.into_iter().rev() {
+            for (index, line) in tail.into_iter().rev().enumerate() {
                 let clipped: String = line.chars().take(120).collect();
-                lines.push(Line::from(Span::styled(format!(" {clipped}"), t.dim())));
+                let prefix = if index == 0 { " ·  " } else { "    " };
+                lines.push(Line::from(Span::styled(
+                    format!("{prefix}{clipped}"),
+                    t.dim(),
+                )));
             }
         }
         return lines;
@@ -4916,7 +4926,10 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
         lines.push(Line::from(spans));
     }
     if let Some(reasoning) = &live.reasoning {
-        lines.push(Line::from(Span::styled(format!(" {reasoning}"), t.dim())));
+        lines.push(Line::from(Span::styled(
+            format!(" ·  {reasoning}"),
+            t.dim(),
+        )));
     }
     // The answer forming, tail-first so the newest content stays in view.
     if let Some(text) = &live.text {
@@ -4926,9 +4939,13 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
             .rev()
             .take(LIVE_TEXT_TAIL)
             .collect();
-        for line in tail.into_iter().rev() {
+        for (index, line) in tail.into_iter().rev().enumerate() {
             let clipped: String = line.chars().take(120).collect();
-            lines.push(Line::from(Span::styled(format!(" {clipped}"), t.text())));
+            let prefix = if index == 0 { " •  " } else { "    " };
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{clipped}"),
+                t.text(),
+            )));
         }
     }
     lines
@@ -5220,18 +5237,18 @@ fn log_to_items(
             items.push(ListItem::new(Line::default()).style(theme.band()));
         }
         LogKind::Assistant => {
-            let content_width = width.saturating_sub(2).max(10);
+            let content_width = width.saturating_sub(3).max(10);
             for (index, styled) in markdown_lines(&entry.text, content_width)
                 .into_iter()
                 .enumerate()
             {
                 let mut spans = Vec::new();
                 if index == 0 {
-                    spans.push(Span::styled("• ".to_string(), theme.dim()));
+                    spans.push(Span::styled("•  ".to_string(), theme.dim()));
                 } else if styled.kind == MdLineKind::Quote {
-                    spans.push(Span::styled("> ".to_string(), theme.good()));
+                    spans.push(Span::styled(">  ".to_string(), theme.good()));
                 } else {
-                    spans.push(Span::raw("  ".to_string()));
+                    spans.push(Span::raw("   ".to_string()));
                 }
                 if styled.kind == MdLineKind::DiffBlock {
                     // Colored ```diff fences, like /diff output.
@@ -5312,11 +5329,11 @@ fn log_to_items(
         }
         LogKind::Tool | LogKind::System | LogKind::Error => {
             let (marker, style) = match entry.kind {
-                LogKind::Tool => ("• ", theme.accent_dim()),
-                LogKind::Error => ("✗ ", theme.bad()),
-                _ => ("• ", theme.dim()),
+                LogKind::Tool => ("•  ", theme.accent_dim()),
+                LogKind::Error => ("✗  ", theme.bad()),
+                _ => ("•  ", theme.dim()),
             };
-            let content_width = width.saturating_sub(2).max(10);
+            let content_width = width.saturating_sub(3).max(10);
             for (index, piece) in wrap_display(&entry.text, content_width)
                 .into_iter()
                 .enumerate()
@@ -5324,7 +5341,7 @@ fn log_to_items(
                 let prefix = if index == 0 {
                     Span::styled(marker.to_string(), style)
                 } else {
-                    Span::raw("  ".to_string())
+                    Span::raw("   ".to_string())
                 };
                 items.push(ListItem::new(Line::from(vec![
                     prefix,
@@ -6082,6 +6099,24 @@ fn display_cwd(config: &AppConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_capture_is_opt_in_and_env_can_disable_it() {
+        assert!(!mouse_capture_enabled(&UiConfig::default(), false));
+        assert!(!mouse_capture_enabled(
+            &UiConfig {
+                mouse: Some(false),
+                ..UiConfig::default()
+            },
+            false,
+        ));
+        let enabled = UiConfig {
+            mouse: Some(true),
+            ..UiConfig::default()
+        };
+        assert!(mouse_capture_enabled(&enabled, false));
+        assert!(!mouse_capture_enabled(&enabled, true));
+    }
 
     #[test]
     fn enter_accepts_and_runs_partial_slash_command() {
