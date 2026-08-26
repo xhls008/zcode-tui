@@ -2907,3 +2907,66 @@ fn decodes_background_task_event() {
         other => panic!("expected Event, got {other:?}"),
     }
 }
+
+#[test]
+fn subagents_snapshot_keeps_protocol_identifiers_and_work_kinds_separate() {
+    let rows = zcode_tui::parse_subagents_result(&serde_json::json!({
+        "session": {
+            "subagents": [{
+                "taskId": "task-agent", "childSessionId": "child-7",
+                "agentId": "agent-7", "toolCallId": "tool-7",
+                "title": "researcher", "status": "running", "revision": 9
+            }],
+            "backgroundWorks": [{
+                "taskId": "task-bash", "toolCallId": "tool-bash",
+                "command": "cargo test", "status": "completed"
+            }]
+        }
+    }));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].kind, "subagent");
+    assert_eq!(rows[0].task_id.as_deref(), Some("task-agent"));
+    assert_eq!(rows[0].child_session_id.as_deref(), Some("child-7"));
+    assert_eq!(rows[0].agent_id.as_deref(), Some("agent-7"));
+    assert_eq!(rows[0].tool_call_id.as_deref(), Some("tool-7"));
+    assert_eq!(rows[1].kind, "background");
+    assert_eq!(rows[1].command.as_deref(), Some("cargo test"));
+}
+
+#[test]
+fn v4_snapshot_and_subagent_lifecycle_event_are_decoded() {
+    let rows = zcode_tui::parse_v4_agent_snapshots(&serde_json::json!({
+        "frame": {"payload": {
+            "kind": "snapshot",
+            "snapshot": {
+                "subagents": [{"childSessionId": "child-v4", "state": "running"}],
+                "backgroundWorks": [{"taskId": "bg-v4", "canCancel": true}]
+            }
+        }}
+    }));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].child_session_id.as_deref(), Some("child-v4"));
+    assert_eq!(rows[1].cancellable, Some(true));
+
+    let line = serde_json::json!({
+        "method": "session/event",
+        "params": {
+            "type": "subagent_spawned",
+            "payload": {
+                "childSessionId": "child-event", "agentId": "agent-event",
+                "taskId": "task-event", "toolCallId": "tool-event",
+                "summary": "inspect architecture", "revision": 12
+            }
+        }
+    })
+    .to_string();
+    let Some(zcode_tui::AppServerMessage::Event(event)) = zcode_tui::decode_app_message(&line)
+    else {
+        panic!("expected decoded subagent lifecycle event");
+    };
+    assert_eq!(event.kind, "subagent_spawned");
+    assert_eq!(event.child_session_id.as_deref(), Some("child-event"));
+    assert_eq!(event.agent_id.as_deref(), Some("agent-event"));
+    assert_eq!(event.summary.as_deref(), Some("inspect architecture"));
+    assert_eq!(event.revision, Some(12));
+}
