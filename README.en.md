@@ -29,9 +29,9 @@ handled locally.
 |---|---|
 | ZCode Linux x64 desktop | **3.8.1** (official feed) |
 | Official CLI kernel | **0.16.3** (bundled with ZCode 3.8.1) |
-| zcode-tui | **0.5.5** |
+| zcode-tui | **0.5.6** |
 | Protocol compatibility | 3.8.1/3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 106/106 Rust tests; targeted real 3.7.6/3.7.7 PTY checks; Clippy and release build |
+| Current source verification | 108/108 Rust tests; zero-warning Clippy; native release build; verified 3.8.1 app-server handshake and TUI lifecycle |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -409,7 +409,10 @@ cargo clippy --all-targets --all-features
 Thanks to [@tastypear](https://github.com/tastypear) for the resumed-session
 model-config compatibility fix
 ([PR #1](https://github.com/xhls008/zcode-tui/pull/1)) and slash-command Enter
-completion behavior ([PR #2](https://github.com/xhls008/zcode-tui/pull/2)).
+completion behavior ([PR #2](https://github.com/xhls008/zcode-tui/pull/2)); and
+to [@auenger](https://github.com/auenger) for dynamic model discovery and
+pre-session model selection
+([PR #3](https://github.com/xhls008/zcode-tui/pull/3)).
 
 ## License
 

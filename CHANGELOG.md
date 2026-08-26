@@ -4,13 +4,7 @@
 构建 Linux x86_64-musl、Windows x86_64、macOS Intel/Apple Silicon 二进制，
 连同 SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版本段。
 
-## [0.5.5] - 2026-08-26
-
-### 新增
-
-- **Windows 与 macOS Release**:tag 发布改为质量门禁、四目标原生构建、统一
-  Release 三阶段；新增 Windows x86_64、macOS Intel 与 macOS Apple Silicon
-  二进制，保留 Linux x86_64-musl 静态版本，并为所有产物统一生成 SHA256SUMS。
+## [0.5.6] - 2026-08-26
 
 ### 新增
 
@@ -18,7 +12,30 @@
   `workspace/readState` 读取内核模型目录，仅缓存公开模型元数据并只展示当前
   provider；该流程不读取 API Key、不直连供应商接口，也不改写 ZCode 配置。
   `/model` 在首次 prompt 前即可选择，建会话后先应用选择再发送消息；完整
-  `session/create|resume` 设置也会被吸收，不再只保留当前模型。
+  `session/create|resume` 设置也会被吸收，不再只保留当前模型。感谢
+  [@auenger](https://github.com/auenger) 提交
+  [PR #3](https://github.com/xhls008/zcode-tui/pull/3)。
+
+### 修复
+
+- **授权切换后的模型刷新**：`/login` 成功后立即重新读取模型目录；session
+  设置中的 provider 变化会清除旧目录，`/logout` 也不再保留已授权模型选择。
+- **Windows 模型缓存更新**：避免依赖 Windows 无法覆盖既有目标文件的
+  `rename` 行为，重复刷新 `models.json` 不再静默失败。
+
+### 验证
+
+- Rust 测试 108/108、Clippy 零告警、格式检查、原生 release 构建及
+  `install.sh` shell 语法检查全部通过；GitHub Actions 继续执行 Linux musl、
+  Windows x86_64、macOS Intel 与 Apple Silicon 四目标发布构建。
+
+## [0.5.5] - 2026-08-26
+
+### 新增
+
+- **Windows 与 macOS Release**:tag 发布改为质量门禁、四目标原生构建、统一
+  Release 三阶段；新增 Windows x86_64、macOS Intel 与 macOS Apple Silicon
+  二进制，保留 Linux x86_64-musl 静态版本，并为所有产物统一生成 SHA256SUMS。
 
 ### 修复
 

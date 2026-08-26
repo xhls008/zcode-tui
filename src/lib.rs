@@ -3781,7 +3781,10 @@ pub fn mcp_servers_param(project: &McpConfig, user: &McpConfig) -> Option<serde_
 /// caller resumes without it and relies on the create-fallback path.
 pub fn build_runtime_model(config_json: &str, generated_at: u64) -> Option<serde_json::Value> {
     let config: serde_json::Value = serde_json::from_str(config_json).ok()?;
-    let main = configured_main_model(&config)?;
+    let main = config
+        .pointer("/model/main")
+        .and_then(|v| v.as_str())
+        .or_else(|| config.get("model").and_then(|v| v.as_str()))?;
     let (provider_id, model_id) = main.split_once('/')?;
     let provider = config.pointer(&format!("/provider/{provider_id}"))?;
     let kind = provider.get("kind")?.as_str()?;
@@ -3823,13 +3826,6 @@ pub fn build_runtime_model(config_json: &str, generated_at: u64) -> Option<serde
         "model": { "providerId": provider_id, "modelId": model_id },
         "provider": provider_obj,
     }))
-}
-
-fn configured_main_model(config: &serde_json::Value) -> Option<&str> {
-    config
-        .pointer("/model/main")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| config.get("model").and_then(serde_json::Value::as_str))
 }
 
 /// `session/usage` — per-session token breakdown.
@@ -4437,6 +4433,8 @@ pub struct ModelChoice {
 pub struct SessionControls {
     pub mode: Option<String>,
     pub models: Vec<ModelChoice>,
+    /// Current model's `providerId`.
+    pub model_provider: Option<String>,
     /// Current model's `modelId`.
     pub model_current: Option<String>,
     pub thought_levels: Vec<String>,
@@ -4468,6 +4466,10 @@ fn controls_from_settings(settings: &serde_json::Value) -> Option<SessionControl
                     .collect()
             })
             .unwrap_or_default(),
+        model_provider: settings
+            .pointer("/model/current/providerId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         model_current: settings
             .pointer("/model/current/modelId")
             .and_then(|v| v.as_str())
@@ -4488,6 +4490,7 @@ fn controls_from_settings(settings: &serde_json::Value) -> Option<SessionControl
     };
     let empty = controls.mode.is_none()
         && controls.models.is_empty()
+        && controls.model_provider.is_none()
         && controls.model_current.is_none()
         && controls.thought_levels.is_empty()
         && controls.thought_current.is_none();
@@ -4547,50 +4550,6 @@ pub fn app_session_controls(result: &serde_json::Value) -> Option<SessionControl
                 .pointer("/snapshot/settings")
                 .and_then(controls_from_settings)
         })
-}
-
-/// Build pre-session model choices from a runtime model configuration.
-///
-/// This lets `/model` select the model for the first session before the
-/// app-server has produced an authoritative `settings` result.
-pub fn app_runtime_model_controls(runtime: &serde_json::Value) -> Option<SessionControls> {
-    let provider = runtime.get("provider")?;
-    let provider_id = provider.get("providerId")?.as_str()?;
-    let provider_label = provider
-        .get("label")
-        .and_then(|value| value.as_str())
-        .unwrap_or(provider_id);
-    let models = provider
-        .get("models")?
-        .as_array()?
-        .iter()
-        .filter_map(|model| {
-            let model_id = model.get("modelId")?.as_str()?;
-            Some(ModelChoice {
-                label: model
-                    .get("label")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or(model_id)
-                    .to_string(),
-                provider: provider_label.to_string(),
-                reference: serde_json::json!({
-                    "modelId": model_id,
-                    "providerId": provider_id,
-                }),
-            })
-        })
-        .collect::<Vec<_>>();
-    if models.is_empty() {
-        return None;
-    }
-    Some(SessionControls {
-        models,
-        model_current: runtime
-            .pointer("/model/modelId")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        ..SessionControls::default()
-    })
 }
 
 /// Extract whatever control-surface state a `state.updated` push carries

@@ -23,9 +23,9 @@ shell escape、命令面板、会话选择、流式输出和编辑器工作流�
 |---|---|
 | ZCode Linux x64 桌面包 | **3.8.1**（官方 feed） |
 | 官方 CLI kernel | **0.16.3**（随 ZCode 3.8.1，版本未变） |
-| zcode-tui | **0.5.5** |
+| zcode-tui | **0.5.6** |
 | 协议兼容 | 3.8.1/3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | 3.8.1 app-server 握手和 TUI 启停正常；Rust 单测 106/106；真实 3.7.6/3.7.7 定向 PTY；Clippy / release 构建 |
+| 当前源码验证 | Rust 测试 108/108；Clippy 零告警；原生 release 构建通过；3.8.1 app-server 握手和 TUI 启停正常 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -485,7 +485,9 @@ cargo clippy --all-targets --all-features
 
 感谢 [@tastypear](https://github.com/tastypear) 贡献恢复会话模型配置兼容
 ([PR #1](https://github.com/xhls008/zcode-tui/pull/1)) 和斜杠命令 Enter 补全行为
-([PR #2](https://github.com/xhls008/zcode-tui/pull/2))。
+([PR #2](https://github.com/xhls008/zcode-tui/pull/2))；感谢
+[@auenger](https://github.com/auenger) 贡献动态模型目录与首轮模型切换
+([PR #3](https://github.com/xhls008/zcode-tui/pull/3))。
 
 ## 背景与吐槽
 

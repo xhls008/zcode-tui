@@ -217,12 +217,16 @@ fn run_login_effect(terminal: &mut TerminalGuard, state: &mut UiState) {
     };
     state.push_system(&format!("interactive login: {}", command.join(" ")));
     let result = terminal.suspend(|| run_interactive_command(&command));
+    let succeeded = result.as_ref().is_ok_and(|status| status.success());
     match result {
         Ok(status) if status.success() => state.push_system("login command finished"),
         Ok(status) => state.push_error(&format!("login command exited with {status}")),
         Err(error) => state.push_error(&format!("{error:#}")),
     }
     state.refresh_auth();
+    if succeeded {
+        state.reload_model_catalog();
+    }
     state.status = format!("auth: {}", state.auth_label);
 }
 
@@ -351,9 +355,10 @@ fn cached_model_catalog() -> Option<ModelCatalogReport> {
         return None;
     }
     Some(ModelCatalogReport {
-        provider_id,
+        provider_id: provider_id.clone(),
         controls: SessionControls {
             models,
+            model_provider: Some(provider_id),
             model_current: cache
                 .get("modelCurrent")
                 .and_then(serde_json::Value::as_str)
@@ -361,20 +366,6 @@ fn cached_model_catalog() -> Option<ModelCatalogReport> {
             ..SessionControls::default()
         },
     })
-}
-
-fn write_atomic(path: &Path, content: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent)?;
-    let temporary = path.with_extension(format!("tmp.{}", process::id()));
-    fs::write(&temporary, content)?;
-    if let Ok(metadata) = fs::metadata(path) {
-        fs::set_permissions(&temporary, metadata.permissions())?;
-    }
-    fs::rename(&temporary, path)?;
-    Ok(())
 }
 
 fn cache_model_catalog(report: &ModelCatalogReport) -> Result<()> {
@@ -397,10 +388,13 @@ fn cache_model_catalog(report: &ModelCatalogReport) -> Result<()> {
         "modelCurrent": report.controls.model_current,
         "models": models,
     });
-    write_atomic(
-        &model_cache_path().ok_or_else(|| anyhow::anyhow!("cache directory unavailable"))?,
-        &format!("{}\n", serde_json::to_string_pretty(&cache)?),
-    )
+    let path = model_cache_path().ok_or_else(|| anyhow::anyhow!("cache directory unavailable"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)?;
+    fs::write(path, format!("{}\n", serde_json::to_string_pretty(&cache)?))?;
+    Ok(())
 }
 
 fn refresh_model_catalog(zcode_bin: &str, workspace: &str) -> Option<ModelCatalogReport> {
@@ -1711,6 +1705,10 @@ impl UiState {
         }
         if command.first().map(String::as_str) == Some("logout") {
             self.refresh_auth();
+            self.model_provider = None;
+            self.controls.models.clear();
+            self.controls.model_current = None;
+            self.pending_model = None;
         }
         None
     }
@@ -2851,6 +2849,12 @@ fi"#
                 self.refresh_banner();
             }
             self.controls.mode = Some(mode);
+        }
+        if let Some(provider) = update.model_provider {
+            if self.model_provider.as_deref() != Some(provider.as_str()) {
+                self.controls.models.clear();
+            }
+            self.model_provider = Some(provider);
         }
         let model_provider = self.model_provider.clone();
         for model in update.models.into_iter().filter(|model| {
@@ -4467,9 +4471,7 @@ fi"#
     fn apply_startup_report(&mut self, report: StartupReport) {
         self.kernel_version = report.kernel;
         if let Some(catalog) = report.model_catalog {
-            self.model_provider = Some(catalog.provider_id);
-            self.controls.models.clear();
-            self.merge_controls(catalog.controls);
+            self.apply_model_catalog(catalog);
         }
         self.db_state = match report.db {
             DbProbe::Supported(path) => {
@@ -4555,6 +4557,18 @@ fi"#
         }
         self.status = format!("update available: ZCode {}", feed.version);
         self.scroll = 0;
+    }
+
+    fn apply_model_catalog(&mut self, catalog: ModelCatalogReport) {
+        self.model_provider = Some(catalog.provider_id);
+        self.controls.models.clear();
+        self.merge_controls(catalog.controls);
+    }
+
+    fn reload_model_catalog(&mut self) {
+        if let Some(catalog) = refresh_model_catalog(&self.zcode_bin, &self.app_workspace()) {
+            self.apply_model_catalog(catalog);
+        }
     }
 
     fn push_user(&mut self, text: &str) {
