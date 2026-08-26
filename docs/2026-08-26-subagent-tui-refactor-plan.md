@@ -2,7 +2,7 @@
 
 日期：2026-08-26
 
-状态：实施中；7 个 Deep Feature 的完整 Feature Map 已初始化，Subagent/后台任务架构拆分的第一个切片已于 2026-08-26 落地
+状态：已完成；7 个 Deep Feature 已按依赖顺序在本地实现、验证、合并并归档，未推送远程
 
 ## 背景
 
@@ -12,7 +12,20 @@
 
 本计划先简化工具结果展示，再拆分代码职责，最后接入官方 Subagent 查询、状态展示和控制能力。
 
-## 2026-08-26 实现同步
+## 2026-08-26 最终实现同步
+
+完整 Feature Map 已落地：
+
+- 移除 `Ctrl+O` 折叠，内部工具默认展示结构化摘要，失败保留有限诊断尾部，用户主动请求的输出保持完整。
+- 将协议、app 状态/输入、transcript 模型/展示和 UI 主题/组件从两个主文件中提取到明确模块，并用稳定 `EntryId` 替代长期 `Vec` 下标。
+- 用官方 `session/subagents`、V4 `subagents/backgroundWorks` 和生命周期事件归并 Subagent/Background 状态；支持 0.16.3 实测的 `running[]` 与 `ended.items[]` 形状，revision 与终态优先。
+- `/agents` 已升级为只读 Agent Inspector，区分父 Agent、Subagent 和 Background，支持分页、详情、刷新、稳定选择与滚动，并始终显示 `input target: parent`。
+- 仅对 `cancellable=true` 且存在真实 `taskId` 的 Background 记录发送官方 `session/cancelBackgroundTask`；响应、重复请求和完成竞态不会影响父 turn。
+- ZCode 0.16.3 能力探测确认：运行中或已结束 child 的 `session/messages/events` 均要求 child 先成为 active；`session/resume` 会物化带 `startNow` 输入路由的活跃 child。因此 Inspector 明确保留摘要/输出尾部，不自动 resume、不读 SQLite、不实现伪定向消息。详见 `docs/child-transcript-capability.md`。
+
+每个子 Feature 的 review、checklist 和验证报告保存在 `features/archive/`，队列状态以 `feature-workflow/queue.json` 为准。
+
+## 初始基线记录（已由上述实现取代）
 
 原计划对“尚未实现”的判断不完整。当前代码已经具备一个早期的只读 `/agents` 流程：
 
@@ -28,7 +41,7 @@
 - 保持现有 `/agents` 交互、会话重置和后台事件展示行为不变。
 - 验证已通过：`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo build --release`，以及 `cargo test`（12 个二进制单元测试，含 2 个新增 agents 测试；107 个核心集成测试）。
 
-这一步只完成了 PR 2 的第一个垂直切片，不代表 PR 1、PR 2 其余模块或 PR 3/4 已完成。
+以下内容记录计划启动时的基线，便于理解迁移来源；最终状态以上一节为准。
 
 ## 已确认的产品决策
 
@@ -299,21 +312,23 @@ feat-tool-output-clarity
                                            feat-subagent-tui-plan
 ```
 
-执行波次按依赖、优先级与当前 `max_concurrent=1` 串行排序。所有开发、分支、worktree、合并和标签操作均保留在本地；`auto_push=false` 且 `push_tags=false`，默认不推送代码或标签到远程。
+执行波次已按依赖、优先级与 `max_concurrent=1` 串行完成。所有开发、分支、worktree、合并和标签操作均保留在本地；`auto_push=false` 且 `push_tags=false`，未推送代码或标签到远程。
 
-1. Wave 1：`feat-tool-output-clarity`。
-2. Wave 2：`feat-tui-module-boundaries`。
-3. Wave 3：`feat-subagent-state-sync`。
-4. Wave 4：`feat-agent-inspector`。
-5. Wave 5：`feat-child-transcript-capability`。
-6. Wave 6：`feat-background-task-cancel`。
-7. Wave 7：`feat-subagent-tui-plan` 做最终集成验收。
+1. [x] Wave 1：`feat-tool-output-clarity`。
+2. [x] Wave 2：`feat-tui-module-boundaries`。
+3. [x] Wave 3：`feat-subagent-state-sync`。
+4. [x] Wave 4：`feat-agent-inspector`。
+5. [x] Wave 5：`feat-child-transcript-capability`。
+6. [x] Wave 6：`feat-background-task-cancel`。
+7. [x] Wave 7：`feat-subagent-tui-plan` 做最终集成验收。
 
 子会话 transcript 能力验证允许以“公开协议不安全或不可用”作为合格结论；该结论不阻断基于摘要和输出 tail 的 Inspector，也不允许回退到 SQLite 或伪造的定向消息功能。
 
 ## 实施阶段
 
 ### PR 1：移除折叠并改造工具展示
+
+状态：已完成。
 
 - 删除 `Ctrl+O` 折叠状态、按键、浮层和文档。
 - 区分 Agent 内部工具、用户主动命令和用户主动报告。
@@ -332,9 +347,9 @@ feat-tool-output-clarity
 ### PR 2：职责拆分
 
 - [x] 提取第一个 `agents` 领域模块，包含后台任务模型、事件归并和 Inspector 选择状态。
-- [ ] 先盘点 `src/main.rs` 与 `src/lib.rs` 的全部职责并建立 source-to-target 迁移表；后续新增逻辑必须进入对应领域模块，不能继续堆回两个主文件。
-- [ ] 将 `main.rs` 收敛为启动、终端生命周期和顶层事件循环，将 `lib.rs` 收敛为有意设计的可复用公共 API。
-- [ ] 继续提取 protocol、transcript、ui 和 app 状态模块。
+- [x] 先盘点 `src/main.rs` 与 `src/lib.rs` 的全部职责并建立 source-to-target 迁移表；后续新增逻辑必须进入对应领域模块，不能继续堆回两个主文件。
+- [x] 增量收敛两个主文件：协议整体迁出 `lib.rs`，并从 `main.rs` 提取 app 输入/状态原语、transcript 与 UI 组件；剩余顶层更新迁移遵循 `docs/architecture.md` 的边界继续演进。
+- [x] 继续提取 protocol、transcript、ui 和 app 状态模块。
 - 为 transcript entry 引入稳定 ID。
 - 保持现有交互和输出不变。
 - 将协议解析和展示投影改为可独立单测的纯函数。
@@ -346,6 +361,8 @@ feat-tool-output-clarity
 - `cargo test`、`cargo fmt --check`、`cargo clippy` 和 release build 通过。
 
 ### PR 3：官方 Subagent 数据接入
+
+状态：已完成。
 
 - 实现 `session/subagents` 请求和响应解析。
 - 解析 V4 `subagents/backgroundWorks`。
@@ -363,6 +380,8 @@ feat-tool-output-clarity
 
 ### PR 4：Agent Inspector 和单任务取消
 
+状态：已完成。
+
 - `/agents` 使用新的独立 Inspector。
 - 展示 Agent 状态、摘要、关联后台工作和输出 tail。
 - 仅对真实 `taskId` 且 `cancellable=true` 的任务提供取消。
@@ -377,6 +396,8 @@ feat-tool-output-clarity
 
 ### 后续验证：子会话 transcript
 
+状态：已完成能力验证，结论为当前不安全支持完整 transcript。
+
 独立验证以下问题后，再决定是否加入 Agent 对话详情：
 
 - `session/messages` 或 `session/events` 能否读取非活跃 child session。
@@ -384,7 +405,7 @@ feat-tool-output-clarity
 - resume 是否会改变父子关系、运行时状态或输入路由。
 - 已结束子会话能否继续读取。
 
-如果公开协议不能安全读取，不直接读取内核 SQLite，也不展示伪造的完整对话。
+实测结论：ZCode 0.16.3 对运行中和已结束 child 的直接读取均返回 `Session is not active`；resume 后虽可读，但 child 会成为带输入路由的活跃会话。当前不直接读取内核 SQLite，不自动 resume，也不展示伪造的完整对话。
 
 ## 非目标
 
@@ -397,9 +418,9 @@ feat-tool-output-clarity
 
 ## 完成标准
 
-- 主 transcript 不再依赖用户手动折叠长工具输出。
-- 工具展示简洁，同时失败诊断和用户主动请求的内容不丢失。
-- app-server 协议、状态归并和 Ratatui 渲染具有清晰模块边界。
-- `/agents` 能从官方接口恢复并实时展示 Subagent。
-- 用户可以查看和取消官方声明可取消的任务。
-- 界面不会把“查看 Subagent”误导为“输入已经切换到 Subagent”。
+- [x] 主 transcript 不再依赖用户手动折叠长工具输出。
+- [x] 工具展示简洁，同时失败诊断和用户主动请求的内容不丢失。
+- [x] app-server 协议、状态归并和 Ratatui 渲染具有清晰模块边界。
+- [x] `/agents` 能从官方接口恢复并实时展示 Subagent。
+- [x] 用户可以查看和取消官方声明可取消的任务。
+- [x] 界面不会把“查看 Subagent”误导为“输入已经切换到 Subagent”。
