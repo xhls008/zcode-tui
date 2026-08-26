@@ -56,6 +56,12 @@ impl UsageSnapshot {
         self.context_window = Some(window);
     }
 
+    pub(crate) fn update_context_window(&mut self, window: u64) {
+        if window > 0 {
+            self.context_window = Some(window);
+        }
+    }
+
     pub(crate) fn update_session_usage(&mut self, result: &serde_json::Value) {
         fn number(result: &serde_json::Value, key: &str) -> Option<u64> {
             result.get(key).and_then(serde_json::Value::as_u64)

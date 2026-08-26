@@ -27,20 +27,20 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zcode_tui::{
     app_close_params, app_compact_params, app_create_params, app_file_rewind_params,
     app_resume_params, app_rewind_params, app_send_params_with_attachments, app_server_enabled,
-    app_session_controls, app_session_id_from_result, app_set_mode_params, app_set_model_params,
-    app_set_thought_params, app_state_controls, app_state_is_turn_end, app_state_turn_error,
-    app_state_watermark, app_steer_params, app_stop_params, app_subscribe_params, app_usage_params,
-    app_workspace_model_controls, app_workspace_read_params, build_runtime_model,
-    build_send_attachments, checkpoint_short_id, classify_input, command_palette_rows,
-    context_watermark_warn, conversation_target, db_baseline, db_schema_supported,
-    detect_auth_status, diff_line_role, discover_zcode_app_dir, encode_interaction_reply,
-    encode_runtime_preferences_reply, env_is_headless, extract_file_mentions, file_suggestions,
-    format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
-    is_newer_version, kernel_config_path_from, kernel_db_path_from, latest_assistant_text,
-    latest_reasoning, latest_session_for_dir, leader_action_for_key, list_recent_sessions,
-    live_tool_chips, load_mcp_config, load_ui_config, login_command, markdown_lines,
-    mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence,
-    parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
+    app_session_controls, app_session_id_from_result, app_session_read_params, app_set_mode_params,
+    app_set_model_params, app_set_thought_params, app_state_controls, app_state_is_turn_end,
+    app_state_turn_error, app_state_watermark, app_steer_params, app_stop_params,
+    app_subscribe_params, app_usage_params, app_workspace_model_controls,
+    app_workspace_read_params, build_runtime_model, build_send_attachments, checkpoint_short_id,
+    classify_input, command_palette_rows, context_watermark_warn, conversation_target, db_baseline,
+    db_schema_supported, detect_auth_status, diff_line_role, discover_zcode_app_dir,
+    encode_interaction_reply, encode_runtime_preferences_reply, env_is_headless,
+    extract_file_mentions, file_suggestions, format_context_watermark, git_diff_command,
+    handle_local_command, help_text, history_search, is_newer_version, kernel_config_path_from,
+    kernel_db_path_from, latest_assistant_text, latest_reasoning, latest_session_for_dir,
+    leader_action_for_key, list_recent_sessions, live_tool_chips, load_mcp_config, load_ui_config,
+    login_command, markdown_lines, mcp_config_path, mcp_servers_param, open_kernel_db_ro,
+    osc52_copy_sequence, parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
     parse_kernel_slash_commands, parse_prompt_summary, parse_resume_messages, parse_rewind_preview,
     parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
     parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age,
@@ -341,6 +341,9 @@ fn cached_model_catalog() -> Option<ModelCatalogReport> {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
+                context_window: model
+                    .get("contextWindow")
+                    .and_then(serde_json::Value::as_u64),
                 reference,
             })
         })
@@ -371,6 +374,7 @@ fn cache_model_catalog(report: &ModelCatalogReport) -> Result<()> {
             serde_json::json!({
                 "label": model.label,
                 "provider": model.provider,
+                "contextWindow": model.context_window,
                 "reference": model.reference,
             })
         })
@@ -732,6 +736,8 @@ enum ControlReq {
     /// A /usage sub-request; the tag ("session" | "stats") picks the
     /// formatter when the result arrives.
     Usage(&'static str),
+    /// Silent `session/read` snapshot used to refresh parent context.
+    ContextSnapshot,
     /// /rewind: previewFileRewind in flight; the result feeds the preview
     /// stage of the overlay (dropped if the overlay was closed meanwhile).
     RewindPreview(RewindTarget),
@@ -1876,6 +1882,7 @@ impl UiState {
                         ));
                         return;
                     };
+                    self.reset_rewind_state();
                     // The result also carries the kernel's command list and
                     // TODO state (same shape for create and resume).
                     self.absorb_session_result(&result);
@@ -1910,7 +1917,6 @@ impl UiState {
                     match conn.send("session/subscribe", app_subscribe_params(&session_id)) {
                         Ok(sub_id) => {
                             self.app_session = Some(session_id);
-                            self.reset_rewind_state();
                             self.refresh_subagents();
                             if let Some(connect) = &mut self.app_connect {
                                 connect.phase = ConnectPhase::Subscribe(sub_id);
@@ -1923,6 +1929,9 @@ impl UiState {
                     }
                 }
                 ConnectStage::Subscribe => {
+                    if let Some(watermark) = result.as_ref().and_then(app_state_watermark) {
+                        self.usage.update_context(watermark.0, watermark.1);
+                    }
                     // Layer the optional V4 control subscription over the
                     // working legacy body stream before the first prompt.
                     let session_id = self.app_session.clone().expect("set on create");
@@ -2690,6 +2699,23 @@ fi"#
             }
             self.controls.model_current = Some(current);
         }
+        if let Some(window) = self
+            .controls
+            .model_current
+            .as_deref()
+            .and_then(|current| {
+                self.controls.models.iter().find(|model| {
+                    model
+                        .reference
+                        .get("modelId")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(current)
+                })
+            })
+            .and_then(|model| model.context_window)
+        {
+            self.usage.update_context_window(window);
+        }
         if !update.thought_levels.is_empty() {
             self.controls.thought_levels = update.thought_levels;
         }
@@ -2818,6 +2844,10 @@ fi"#
                 self.log_debug(&format!("usage snapshot refresh failed: {message}"));
                 true
             }
+            Some(ControlReq::ContextSnapshot) => {
+                self.log_debug(&format!("context snapshot refresh failed: {message}"));
+                true
+            }
             Some(ControlReq::Usage(tag)) => {
                 self.push_error(&format!("usage {tag} failed: {message}"));
                 true
@@ -2882,6 +2912,11 @@ fi"#
                 if let Some(SteerOutcome::Rejected(reason)) = result.map(parse_steer_result) {
                     self.push_error(&format!("steer rejected: {reason} (input queued)"));
                     self.queued.push_back(content);
+                }
+            }
+            Some(ControlReq::ContextSnapshot) => {
+                if let Some(watermark) = result.and_then(app_state_watermark) {
+                    self.usage.update_context(watermark.0, watermark.1);
                 }
             }
             Some(ControlReq::V4SetGuide {
@@ -3101,6 +3136,11 @@ fi"#
             "session/usage",
             app_usage_params(&session_id),
             ControlReq::Usage("snapshot"),
+        );
+        self.send_control(
+            "session/read",
+            app_session_read_params(&session_id),
+            ControlReq::ContextSnapshot,
         );
     }
 
@@ -4908,7 +4948,8 @@ fn format_usage_status(usage: &UsageSnapshot) -> String {
     let context = match (usage.context_used, usage.context_window) {
         (Some(used), Some(window)) => format_context_watermark(used, window),
         (Some(used), None) => format!("ctx {}", compact_token_count(used)),
-        _ => "ctx --".to_string(),
+        (None, Some(window)) => format!("ctx --/{}", compact_token_count(window)),
+        (None, None) => "ctx --".to_string(),
     };
     let tokens = usage
         .total_tokens
@@ -5477,13 +5518,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             ),
         ])
     } else {
-        Line::from(vec![
-            Span::styled(format!(" {} ", state.status), t.accent_dim()),
-            Span::styled(
-                "  ⏎ send   ^J newline   ^P commands   ? help   ^C quit".to_string(),
-                t.dim(),
-            ),
-        ])
+        Line::from(Span::styled(format!(" {} ", state.status), t.accent_dim()))
     };
     let usage_status = format_usage_status(&state.usage);
     let mut right = usage_status.clone();
@@ -5493,20 +5528,12 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             right.push_str(" · /compact or /new?");
         }
     }
-    right.push_str(" · ");
-    // Current model + permission mode: authoritative from the kernel's state
-    // pushes (SessionControls cache); before the first push fall back to the
-    // configured mode alone (never guess a model name).
-    let mode = state
-        .controls
-        .mode
-        .clone()
-        .unwrap_or_else(|| display_mode(&state.config).to_string());
-    match &state.controls.model_current {
-        Some(model) => right.push_str(&format!("{model} · {mode} · ")),
-        None => right.push_str(&format!("{mode} · ")),
+    // Current model stays visible with usage; mode/auth and key hints live in
+    // /status and /help instead of competing with context telemetry.
+    if let Some(model) = &state.controls.model_current {
+        right.push_str(" · ");
+        right.push_str(model);
     }
-    right.push_str(&format!("auth {} ", state.auth_label));
     if area.width < 80 {
         // Usage is the composer's persistent right-side invariant; model,
         // mode and auth yield first on narrow terminals.
@@ -5983,6 +6010,24 @@ fn display_cwd(config: &AppConfig) -> String {
 mod tests {
     use super::*;
 
+    fn render_footer_text(state: &UiState, width: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render_footer(frame, frame.area(), state))
+            .expect("render footer");
+        (0..width)
+            .map(|x| {
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((x, 0))
+                    .expect("cell")
+                    .symbol()
+            })
+            .collect()
+    }
+
     fn render_inspector_text(state: &UiState, width: u16, height: u16) -> String {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
@@ -6104,6 +6149,20 @@ mod tests {
 
         assert_eq!(state.usage.total_tokens, Some(42_000));
         assert_eq!(state.usage.input_tokens, Some(30_000));
+        state
+            .control_requests
+            .insert(42, ControlReq::ContextSnapshot);
+        state.on_control_ok(
+            42,
+            Some(&serde_json::json!({
+                "snapshot": {"projection": {
+                    "contextUsed": 9_000,
+                    "contextWindow": 200_000
+                }}
+            })),
+        );
+        assert_eq!(state.usage.context_used, Some(9_000));
+        assert_eq!(state.usage.context_window, Some(200_000));
         assert!(
             state.log.is_empty(),
             "automatic snapshots stay out of transcript"
@@ -6118,9 +6177,21 @@ mod tests {
         );
 
         let mut usage = UsageSnapshot::default();
-        usage.update_context(9_055, 200_000);
+        usage.update_context_window(200_000);
         usage.total_tokens = Some(17_859);
+        assert_eq!(format_usage_status(&usage), "ctx --/200k · tok 17k");
+
+        usage.update_context(9_055, 200_000);
         assert_eq!(format_usage_status(&usage), "ctx 9k/200k (4%) · tok 17k");
+
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.usage = usage;
+        state.controls.model_current = Some("glm-5.3".to_string());
+        let footer = render_footer_text(&state, 120);
+        assert!(footer.contains("ctx 9k/200k (4%) · tok 17k · glm-5.3"));
+        assert!(!footer.contains("auth"));
+        assert!(!footer.contains("send"));
+        assert!(!footer.contains("commands"));
     }
 
     #[test]

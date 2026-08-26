@@ -49,6 +49,9 @@ for line in sys.stdin:
         result = {"totalTokens": 42000, "inputTokens": 30000,
                   "outputTokens": 8000, "reasoningTokens": 4000,
                   "cacheReadTokens": 18000, "modelRequestCount": 12}
+    elif method == "session/read":
+        result = {"snapshot": {"projection": {
+            "contextUsed": 12000, "contextWindow": 200000}}}
     elif method == "session/send":
         result = {"accepted": True, "sessionId": "parent-pty", "stateRevision": 1}
         print(json.dumps({"id": ident, "result": result}), flush=True)
@@ -91,21 +94,13 @@ def run(width, switch_background=False):
         [BIN], stdin=slave, stdout=slave, stderr=slave, cwd=temp, env=env, close_fds=True
     )
     os.close(slave)
-    # Give the inline terminal time to finish its startup DSR/redraw before
-    # sending the first Enter. Shorter delays intermittently left `hello` in
-    # the composer and made the next command become `hello/agents`.
-    actions = [(2.0, b"hello\r"), (4.0, b"/agents\r")]
-    if switch_background:
-        actions.append((0.8, b"\t"))
     raw = b""
-    deadline = time.time() + 12
-    next_at = time.time() + actions[0][0]
+    deadline = time.time() + 18
+    sent_hello = False
+    sent_agents = False
+    sent_tab = False
     dsr_tail = b""
     while time.time() < deadline:
-        if actions and time.time() >= next_at:
-            _, data = actions.pop(0)
-            os.write(master, data)
-            next_at = time.time() + actions[0][0] if actions else deadline + 1
         ready, _, _ = select.select([master], [], [], 0.1)
         if ready:
             try:
@@ -119,6 +114,22 @@ def run(width, switch_background=False):
             for _ in range(probe.count(b"\x1b[6n")):
                 os.write(master, b"\x1b[1;1R")
             dsr_tail = probe[-3:]
+            visible = ANSI.sub("", raw.decode("utf-8", errors="replace")).replace("\r", "")
+            screen = re.sub(r"\s+", "", visible)
+            if not sent_hello and "ctx--·tok--" in screen:
+                os.write(master, b"hello\r")
+                sent_hello = True
+            elif sent_hello and not sent_agents and "tok42k" in screen:
+                os.write(master, b"/agents\r")
+                sent_agents = True
+            elif (
+                switch_background
+                and sent_agents
+                and not sent_tab
+                and "ParentAgent" in screen
+            ):
+                os.write(master, b"\t")
+                sent_tab = True
     process.kill()
     process.wait(timeout=2)
     os.close(master)

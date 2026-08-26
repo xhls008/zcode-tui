@@ -119,7 +119,7 @@ pub fn app_subscribe_params(session_id: &str) -> serde_json::Value {
     serde_json::json!({
         "sessionId": session_id,
         "deliveryKind": APP_SERVER_DELIVERY_KIND,
-        "includeSnapshot": false
+        "includeSnapshot": true
     })
 }
 
@@ -767,6 +767,12 @@ pub fn build_runtime_model(config_json: &str, generated_at: u64) -> Option<serde
 /// `session/usage` — per-session token breakdown.
 pub fn app_usage_params(session_id: &str) -> serde_json::Value {
     serde_json::json!({ "sessionId": session_id })
+}
+
+/// `session/read` — a bounded parent-session snapshot whose projection owns
+/// the authoritative `contextUsed/contextWindow` pair.
+pub fn app_session_read_params(session_id: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id, "messageLimit": 1 })
 }
 
 /// `session/subagents` — authoritative snapshot of child agents and shell
@@ -1556,6 +1562,7 @@ pub fn parse_todos(value: &serde_json::Value) -> Option<Vec<TodoItem>> {
 pub struct ModelChoice {
     pub label: String,
     pub provider: String,
+    pub context_window: Option<u64>,
     /// `available[].ref`, echoed back verbatim in `session/setModel`.
     pub reference: serde_json::Value,
 }
@@ -1593,6 +1600,9 @@ fn controls_from_settings(settings: &serde_json::Value) -> Option<SessionControl
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string(),
+                            context_window: m
+                                .get("contextWindow")
+                                .and_then(serde_json::Value::as_u64),
                             reference: m.get("ref")?.clone(),
                         })
                     })

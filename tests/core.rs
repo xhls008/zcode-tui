@@ -1415,6 +1415,7 @@ fn subscribe_params_request_continuous_delivery() {
     assert_eq!(p["sessionId"], "sess_1");
     assert_eq!(p["deliveryKind"], APP_SERVER_DELIVERY_KIND);
     assert_eq!(p["deliveryKind"], "desktop-continuous");
+    assert_eq!(p["includeSnapshot"], true);
 }
 
 #[test]
@@ -1698,8 +1699,8 @@ fn session_control_params_match_pinned_schemas() {
 #[test]
 fn session_lifecycle_params_and_list_parsing() {
     use zcode_tui::{
-        app_resume_params, app_usage_params, build_runtime_model, parse_session_list,
-        usage_stats_params,
+        app_resume_params, app_session_read_params, app_usage_params, build_runtime_model,
+        parse_session_list, usage_stats_params,
     };
     assert_eq!(
         app_resume_params("sess_1", None),
@@ -1740,6 +1741,10 @@ fn session_lifecycle_params_and_list_parsing() {
     assert_eq!(
         app_usage_params("sess_1"),
         serde_json::json!({"sessionId": "sess_1"})
+    );
+    assert_eq!(
+        app_session_read_params("sess_1"),
+        serde_json::json!({"sessionId": "sess_1", "messageLimit": 1})
     );
     assert_eq!(usage_stats_params("7d"), serde_json::json!({"range": "7d"}));
     // session/list result shape captured live 2026-07-07 (kernel 0.15.0).
@@ -1887,6 +1892,7 @@ fn state_controls_extracted_from_mode_changed_patch() {
     assert_eq!(controls.models.len(), 1);
     assert_eq!(controls.models[0].label, "glm-5.1");
     assert_eq!(controls.models[0].provider, "BigModel");
+    assert_eq!(controls.models[0].context_window, Some(200_000));
     assert_eq!(controls.models[0].reference["providerId"], "bigmodel");
     assert_eq!(controls.model_provider.as_deref(), Some("bigmodel"));
     assert_eq!(controls.model_current.as_deref(), Some("glm-5.1"));

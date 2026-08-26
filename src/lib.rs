@@ -1614,7 +1614,7 @@ keys:
   Shift+Tab                    cycle permission mode
   Enter                        accept selected suggestion or send; plain text
                                sent mid-turn steers the running answer
-                               (app-server path; commands still queue)
+                               (/agents and /usage stay live; other commands queue)
   Left/Right Home/End          move the input cursor
   Ctrl+A / Ctrl+E              jump to start / end of input
   Ctrl+G                       edit prompt externally
