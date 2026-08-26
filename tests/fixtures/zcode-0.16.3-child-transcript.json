@@ -1,0 +1,61 @@
+{
+  "schema": "zcode-tui/child-transcript-capability/v1",
+  "observed_at": "2026-08-26T23:45:00+08:00",
+  "kernel_version": "0.16.3",
+  "workspace": "/workspace",
+  "running_subagents_result": {
+    "revision": 1,
+    "childSessionIds": ["child-running"],
+    "running": [{
+      "childSessionId": "child-running",
+      "agentId": "agent-running",
+      "toolCallId": "call-running",
+      "subagentType": "Explore",
+      "title": "Read first heading",
+      "status": "running"
+    }],
+    "ended": {"total": 0, "items": []}
+  },
+  "ended_subagents_result": {
+    "revision": 1,
+    "childSessionIds": ["child-ended"],
+    "running": [],
+    "ended": {"total": 1, "items": [{
+      "childSessionId": "child-ended",
+      "agentId": "agent-ended",
+      "toolCallId": "call-ended",
+      "subagentType": "Explore",
+      "title": "Read first heading",
+      "status": "success",
+      "summary": "summary available from session/subagents"
+    }]}
+  },
+  "direct_reads_while_child_running": [
+    {"method": "session/messages", "error": {"code": -32004, "message": "Session is not active: child-running"}},
+    {"method": "session/events", "error": {"code": -32004, "message": "Session is not active: child-running"}}
+  ],
+  "direct_reads_after_child_ended": [
+    {"method": "session/messages", "error": {"code": -32004, "message": "Session is not active: child-ended"}},
+    {"method": "session/events", "error": {"code": -32004, "message": "Session is not active: child-ended"}}
+  ],
+  "resume_probe": {
+    "request": {"method": "session/resume", "params": {"sessionId": "child-ended"}},
+    "response_summary": {
+      "messageCount": 4,
+      "sessionKind": "subagent_child",
+      "status": "idle",
+      "parentSessionId": "parent-session"
+    },
+    "reads_after_resume": {
+      "session/messages": {"messageCount": 4},
+      "session/events": {"eventCount": 2}
+    },
+    "v4_snapshot": {"inputRouting": {"mode": "startNow"}},
+    "parent_subagents_before_after": {
+      "childSessionIdsUnchanged": true,
+      "endedStatusBefore": "success",
+      "endedStatusAfter": "success"
+    }
+  },
+  "decision": "unsupported_without_stateful_resume"
+}

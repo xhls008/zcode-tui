@@ -2934,6 +2934,30 @@ fn subagents_snapshot_keeps_protocol_identifiers_and_work_kinds_separate() {
 }
 
 #[test]
+fn parses_pinned_zcode_0163_running_and_ended_subagent_shape() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/zcode-0.16.3-child-transcript.json")).unwrap();
+    let running = zcode_tui::parse_subagents_result(&fixture["running_subagents_result"]);
+    assert_eq!(running.len(), 1);
+    assert_eq!(
+        running[0].child_session_id.as_deref(),
+        Some("child-running")
+    );
+    assert_eq!(running[0].agent_id.as_deref(), Some("agent-running"));
+    assert_eq!(running[0].status.as_deref(), Some("running"));
+    assert_eq!(running[0].revision, Some(1));
+
+    let ended = zcode_tui::parse_subagents_result(&fixture["ended_subagents_result"]);
+    assert_eq!(ended.len(), 1);
+    assert_eq!(ended[0].child_session_id.as_deref(), Some("child-ended"));
+    assert_eq!(ended[0].status.as_deref(), Some("success"));
+    assert_eq!(
+        ended[0].summary.as_deref(),
+        Some("summary available from session/subagents")
+    );
+}
+
+#[test]
 fn v4_snapshot_and_subagent_lifecycle_event_are_decoded() {
     let rows = zcode_tui::parse_v4_agent_snapshots(&serde_json::json!({
         "frame": {"payload": {
