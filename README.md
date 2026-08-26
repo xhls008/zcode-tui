@@ -104,6 +104,9 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   只有官方声明 `cancellable=true` 且带真实 `taskId` 的 Background 记录可用 `x`
   取消。ZCode 0.16.3 的非活跃 child transcript 只能经有状态 resume 读取，因此不
   自动恢复 child、不伪造定向消息，也不回退读取 SQLite；详情保留官方摘要和输出尾部。
+- **上下文与 Token 状态栏**：输入框旁始终显示父会话的 `ctx 已用/窗口 (%)` 与
+  累计 `tok`。Context 随 `state.updated` 持续更新，每轮完成后静默刷新
+  `session/usage`；`/usage [7d|30d]` 在回答流式生成期间也可立即查询，不进入队列。
 - **阶段流式（默认开启）**：接内核 `zcode app-server`
   协议（`session/create → subscribe → send`），助手正文经 `session/event`
   的 `text_delta` 累积；工具开始时冻结并追加前一段正文，工具完成时追加结果，

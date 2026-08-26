@@ -111,8 +111,11 @@ for details.
 - Browser Use: `--browser-use headless` and optional `--browser-executable`
   are parsed explicitly and routed to the official classic `zcode --prompt`
   path, because the strict app-server schema does not accept these fields.
-- `/usage [7d|30d]` shows session and period token usage; `/update`
-  self-updates the kernel from the official feed (sha512-verified).
+- The composer footer always shows parent-session `ctx used/window (%)` and
+  cumulative `tok`. Context follows `state.updated`, cumulative tokens refresh
+  silently after every turn, and `/usage [7d|30d]` remains immediately
+  available while a response streams instead of entering the input queue.
+- `/update` self-updates the kernel from the official feed (sha512-verified).
 - ZCode 3.3.6 tool-policy flags (`--allowed-tools`, `--disallowed-tools`, and
   `--disallowedTools`) apply to both classic prompts and app-server
   create/resume sessions; `--permission-mode` is accepted as a legacy alias

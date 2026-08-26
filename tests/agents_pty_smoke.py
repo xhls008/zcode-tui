@@ -45,6 +45,10 @@ for line in sys.stdin:
                       "toolCallId": "call-agent", "subagentType": "Explore",
                       "title": "reviewer", "summary": "checked architecture",
                       "status": "success"}]}}
+    elif method == "session/usage":
+        result = {"totalTokens": 42000, "inputTokens": 30000,
+                  "outputTokens": 8000, "reasoningTokens": 4000,
+                  "cacheReadTokens": 18000, "modelRequestCount": 12}
     elif method == "session/send":
         result = {"accepted": True, "sessionId": "parent-pty", "stateRevision": 1}
         print(json.dumps({"id": ident, "result": result}), flush=True)
@@ -58,7 +62,8 @@ for line in sys.stdin:
                 "kind": "text_delta", "delta": "ready", "done": False}}}), flush=True)
         print(json.dumps({"method": "state.updated", "params": {
             "sessionId": "parent-pty", "reason": "prompt_completed",
-            "patch": {"status": "idle"}}}), flush=True)
+            "patch": {"status": "idle", "context": {
+                "contextUsed": 12000, "contextWindow": 200000}}}}), flush=True)
         continue
     else:
         result = {}
@@ -86,11 +91,14 @@ def run(width, switch_background=False):
         [BIN], stdin=slave, stdout=slave, stderr=slave, cwd=temp, env=env, close_fds=True
     )
     os.close(slave)
-    actions = [(0.8, b"hello\r"), (2.5, b"/agents\r")]
+    # Give the inline terminal time to finish its startup DSR/redraw before
+    # sending the first Enter. Shorter delays intermittently left `hello` in
+    # the composer and made the next command become `hello/agents`.
+    actions = [(2.0, b"hello\r"), (4.0, b"/agents\r")]
     if switch_background:
         actions.append((0.8, b"\t"))
     raw = b""
-    deadline = time.time() + 8
+    deadline = time.time() + 12
     next_at = time.time() + actions[0][0]
     dsr_tail = b""
     while time.time() < deadline:
@@ -134,6 +142,8 @@ narrow = run(80)
 require("80-column Agents tab shows parent", "ParentAgent" in narrow, narrow)
 require("80-column Agents tab shows Subagent", "reviewer" in narrow)
 require("80-column Inspector keeps parent input target", "inputtarget:parent" in narrow, narrow)
+require("80-column footer shows current context", "ctx12k/200k(6%)" in narrow, narrow)
+require("80-column footer shows refreshed tokens", "tok42k" in narrow, narrow)
 
 wide = run(120, switch_background=True)
 require("120-column Background tab shows Bash work", "buildcheck" in wide)
@@ -144,4 +154,4 @@ require(
 )
 require("120-column Inspector keeps parent input target", "inputtarget:parent" in wide)
 
-print("6/6 Agent Inspector PTY checks passed", flush=True)
+print("8/8 Agent Inspector and usage PTY checks passed", flush=True)

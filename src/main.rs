@@ -63,7 +63,7 @@ mod ui;
 
 use agents::AgentInspectorState;
 use app::input::{composer_layout, suggestion_popup_area};
-use app::state::{AppMode, ConnectStage, DbState, V4Mode};
+use app::state::{AppMode, ConnectStage, DbState, UsageSnapshot, V4Mode};
 use transcript::{log_entry_needs_separator, EntryId, LogKind, LogLine};
 use ui::{render_agent_inspector, render_composer, render_conversation, Theme};
 
@@ -599,7 +599,8 @@ struct UiState {
     session_active: bool,
     auth_status: AuthStatus,
     db_state: DbState,
-    context_watermark: Option<(u64, u64)>,
+    /// Parent-session context occupancy plus cumulative model-token usage.
+    usage: UsageSnapshot,
     log: Vec<LogLine>,
     input: String,
     cursor: usize,
@@ -749,6 +750,14 @@ enum ControlReq {
     V4RewindApply(RewindTarget),
 }
 
+fn local_command_runs_while_busy(action: &InputAction) -> bool {
+    matches!(
+        action,
+        InputAction::Local(command)
+            if matches!(command.first().map(String::as_str), Some("agents" | "usage"))
+    )
+}
+
 /// The /rewind overlay. Stage 1 (`preview: None`): pick a target from the
 /// session's captured checkpoints (+ latestCheckpoint). Stage 2: the
 /// previewFileRewind result arrived — show it, pick a scope, Enter applies.
@@ -789,7 +798,7 @@ impl UiState {
             session_active: false,
             auth_status,
             db_state: DbState::Unknown,
-            context_watermark: None,
+            usage: UsageSnapshot::default(),
             log: Vec::new(),
             input: String::new(),
             cursor: 0,
@@ -1364,11 +1373,7 @@ impl UiState {
             // parent turn streams. In particular, active Subagents are most
             // useful while they are still running; queueing /agents until the
             // turn ends makes the inspector appear unresponsive.
-            if matches!(
-                &classified,
-                Ok(InputAction::Local(command))
-                    if command.first().map(String::as_str) == Some("agents")
-            ) {
+            if matches!(&classified, Ok(action) if local_command_runs_while_busy(action)) {
                 self.history.push(input.to_string());
                 self.clear_input();
                 return self.submit_now(input);
@@ -2320,7 +2325,7 @@ fi"#
                 }
                 AppServerMessage::StateUpdated(params) => {
                     if let Some(watermark) = app_state_watermark(&params) {
-                        self.context_watermark = Some(watermark);
+                        self.usage.update_context(watermark.0, watermark.1);
                     }
                     if let Some(controls) = app_state_controls(&params) {
                         self.merge_controls(controls);
@@ -2496,7 +2501,7 @@ fi"#
             match message {
                 AppServerMessage::StateUpdated(params) => {
                     if let Some(watermark) = app_state_watermark(&params) {
-                        self.context_watermark = Some(watermark);
+                        self.usage.update_context(watermark.0, watermark.1);
                     }
                     if app_state_is_turn_end(&params) || app_state_turn_error(&params).is_some() {
                         self.app_draining = None;
@@ -2551,6 +2556,7 @@ fi"#
         // A turn landed in a live kernel session: keep continuity by reusing
         // the same sessionId for later prompts (already stored in app_session).
         self.session_active = true;
+        self.refresh_usage_snapshot();
     }
 
     /// Consume connection messages BETWEEN turns. Control echoes
@@ -2565,7 +2571,7 @@ fi"#
             match message {
                 AppServerMessage::StateUpdated(params) => {
                     if let Some(watermark) = app_state_watermark(&params) {
-                        self.context_watermark = Some(watermark);
+                        self.usage.update_context(watermark.0, watermark.1);
                     }
                     if let Some(controls) = app_state_controls(&params) {
                         self.merge_controls(controls);
@@ -2808,6 +2814,10 @@ fi"#
                 self.queued.push_back(content);
                 true
             }
+            Some(ControlReq::Usage("snapshot")) => {
+                self.log_debug(&format!("usage snapshot refresh failed: {message}"));
+                true
+            }
             Some(ControlReq::Usage(tag)) => {
                 self.push_error(&format!("usage {tag} failed: {message}"));
                 true
@@ -2884,12 +2894,20 @@ fi"#
             }) => self.on_v4_steer_text_ok(content, command_id, result),
             Some(ControlReq::Usage(tag)) => {
                 if let Some(result) = result {
-                    let text = match tag {
-                        "session" => format_session_usage(result),
-                        _ => format_usage_stats(result),
-                    };
-                    self.log.push(LogLine::new(LogKind::System, &text));
-                    self.status = "usage".to_string();
+                    match tag {
+                        "session" => {
+                            self.usage.update_session_usage(result);
+                            self.log
+                                .push(LogLine::new(LogKind::System, &format_session_usage(result)));
+                            self.status = "usage".to_string();
+                        }
+                        "snapshot" => self.usage.update_session_usage(result),
+                        _ => {
+                            self.log
+                                .push(LogLine::new(LogKind::System, &format_usage_stats(result)));
+                            self.status = "usage".to_string();
+                        }
+                    }
                 }
             }
             Some(ControlReq::SubagentsRefresh) => {
@@ -3070,6 +3088,20 @@ fi"#
             ControlReq::Usage("stats"),
         );
         self.status = "fetching usage…".to_string();
+    }
+
+    /// Refresh cumulative parent-session tokens after each completed turn
+    /// without adding a report to the transcript. Context occupancy updates
+    /// independently through `state.updated` while the turn streams.
+    fn refresh_usage_snapshot(&mut self) {
+        let Some(session_id) = self.app_session.clone() else {
+            return;
+        };
+        self.send_control(
+            "session/usage",
+            app_usage_params(&session_id),
+            ControlReq::Usage("snapshot"),
+        );
     }
 
     fn pump_job(&mut self) {
@@ -3916,6 +3948,7 @@ fi"#
         self.v4_state = V4ConversationState::default();
         self.pending_v4_steers.clear();
         self.agents.reset();
+        self.usage = UsageSnapshot::default();
     }
 
     fn open_background_tasks(&mut self) {
@@ -4186,11 +4219,11 @@ fi"#
                     } else {
                         response.to_string()
                     };
-                    if let (Some(used), Some(window)) =
-                        (summary.context_used, summary.context_window)
-                    {
-                        self.context_watermark = Some((used, window));
-                    }
+                    self.usage.update_classic_summary(
+                        summary.context_used,
+                        summary.context_window,
+                        summary.total_tokens,
+                    );
                 }
                 None => self.render_assistant_fallback(active.log_index, &raw),
             }
@@ -4859,6 +4892,31 @@ fn format_session_usage(result: &serde_json::Value) -> String {
     )
 }
 
+fn compact_token_count(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{}m", value / 1_000_000)
+    } else if value >= 1_000 {
+        format!("{}k", value / 1_000)
+    } else {
+        value.to_string()
+    }
+}
+
+/// Stable composer-side summary. Unknown values stay visible as placeholders
+/// so the footer does not jump between having and not having usage telemetry.
+fn format_usage_status(usage: &UsageSnapshot) -> String {
+    let context = match (usage.context_used, usage.context_window) {
+        (Some(used), Some(window)) => format_context_watermark(used, window),
+        (Some(used), None) => format!("ctx {}", compact_token_count(used)),
+        _ => "ctx --".to_string(),
+    };
+    let tokens = usage
+        .total_tokens
+        .map(compact_token_count)
+        .unwrap_or_else(|| "--".to_string());
+    format!("{context} · tok {tokens}")
+}
+
 /// `usage/stats` result → readable summary.
 fn format_usage_stats(result: &serde_json::Value) -> String {
     let range = result.get("range").and_then(|v| v.as_str()).unwrap_or("7d");
@@ -5427,15 +5485,15 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             ),
         ])
     };
-    let mut right = String::new();
-    if let Some((used, window)) = state.context_watermark {
-        right.push_str(&format_context_watermark(used, window));
+    let usage_status = format_usage_status(&state.usage);
+    let mut right = usage_status.clone();
+    if let (Some(used), Some(window)) = (state.usage.context_used, state.usage.context_window) {
         if context_watermark_warn(used, window) {
             // /compact keeps the session (app-server), /new resets it.
             right.push_str(" · /compact or /new?");
         }
-        right.push_str(" · ");
     }
+    right.push_str(" · ");
     // Current model + permission mode: authoritative from the kernel's state
     // pushes (SessionControls cache); before the first push fall back to the
     // configured mode alone (never guess a model name).
@@ -5450,14 +5508,9 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     }
     right.push_str(&format!("auth {} ", state.auth_label));
     if area.width < 80 {
-        right = state
-            .controls
-            .model_current
-            .clone()
-            .unwrap_or_else(|| mode.clone());
-    }
-    if area.width < 48 {
-        right.clear();
+        // Usage is the composer's persistent right-side invariant; model,
+        // mode and auth yield first on narrow terminals.
+        right = usage_status;
     }
     let right_width = u16::try_from(right.width())
         .unwrap_or(u16::MAX)
@@ -6022,6 +6075,52 @@ mod tests {
             state.status,
             "agent inspector: read-only · input target parent"
         );
+    }
+
+    #[test]
+    fn usage_command_is_busy_safe_and_snapshot_updates_silently() {
+        let usage_action = classify_input("/usage").expect("local usage command");
+        let usage_30d_action = classify_input("/usage 30d").expect("local usage command");
+        let diff_action = classify_input("/diff").expect("local diff command");
+        assert!(local_command_runs_while_busy(&usage_action));
+        assert!(local_command_runs_while_busy(&usage_30d_action));
+        assert!(!local_command_runs_while_busy(&diff_action));
+
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state
+            .control_requests
+            .insert(41, ControlReq::Usage("snapshot"));
+        state.on_control_ok(
+            41,
+            Some(&serde_json::json!({
+                "totalTokens": 42_000,
+                "inputTokens": 30_000,
+                "outputTokens": 8_000,
+                "reasoningTokens": 4_000,
+                "cacheReadTokens": 18_000,
+                "modelRequestCount": 12
+            })),
+        );
+
+        assert_eq!(state.usage.total_tokens, Some(42_000));
+        assert_eq!(state.usage.input_tokens, Some(30_000));
+        assert!(
+            state.log.is_empty(),
+            "automatic snapshots stay out of transcript"
+        );
+    }
+
+    #[test]
+    fn usage_status_is_always_present_and_combines_context_with_tokens() {
+        assert_eq!(
+            format_usage_status(&UsageSnapshot::default()),
+            "ctx -- · tok --"
+        );
+
+        let mut usage = UsageSnapshot::default();
+        usage.update_context(9_055, 200_000);
+        usage.total_tokens = Some(17_859);
+        assert_eq!(format_usage_status(&usage), "ctx 9k/200k (4%) · tok 17k");
     }
 
     #[test]
