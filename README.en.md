@@ -164,7 +164,8 @@ for details.
   ordinary drag selection, and system Cmd+C/Ctrl+Shift+C work natively. Sparse
   scrolling-region writes keep trailing spaces out of history so terminal
   reflow remains stable after a window resize.
-- Long output folding via Ctrl+O.
+- Structured summaries for internal tool calls; failures retain a bounded
+  diagnostic tail, while explicit user-requested output remains complete.
 - Bracketed paste support.
 - Ctrl+P command palette, Ctrl+X leader shortcuts, Ctrl+G external editor.
 - `/copy` (or Ctrl+X then y) copies the last assistant reply to the system

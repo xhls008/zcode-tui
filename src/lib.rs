@@ -1614,7 +1614,6 @@ keys:
   Ctrl+G                       edit prompt externally
   Ctrl+J                       insert newline
   Ctrl+R                       reverse-search input history
-  Ctrl+O                       expand / fold the last long output
   Mouse drag                   terminal-native text selection
   Mouse wheel                  scroll terminal history
   Cmd+C / Ctrl+Shift+C         system terminal copy
@@ -3007,7 +3006,7 @@ where
     )
 }
 
-// ---- session picker / history / folding / ui config -----------------------
+// ---- session picker / history / ui config ---------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
@@ -3091,13 +3090,6 @@ pub fn history_search(history: &[String], query: &str, limit: usize) -> Vec<Stri
         .take(limit)
         .cloned()
         .collect()
-}
-
-/// Folding decision for long transcript cells: Some((visible_head_lines,
-/// hidden_count)) when the text exceeds the threshold. Render-time only.
-pub fn fold_preview(text: &str, threshold: usize, head: usize) -> Option<(usize, usize)> {
-    let total = text.lines().count();
-    (total > threshold && head < total).then(|| (head, total - head))
 }
 
 /// User config: theme token overrides plus the notify switch.
@@ -5070,6 +5062,70 @@ pub fn tool_input_summary(input: &str) -> String {
     }
 }
 
+/// Project a completed internal tool call into a compact transcript entry.
+/// Successful mechanical output is summarized; failures retain a bounded
+/// diagnostic tail. The full payload remains available in protocol/debug data.
+pub fn tool_result_summary(
+    name: &str,
+    input: &str,
+    output: &str,
+    success: bool,
+    duration_ms: Option<u64>,
+) -> String {
+    let label = if name.trim().is_empty() {
+        "tool"
+    } else {
+        name.trim()
+    };
+    let kind = label.to_ascii_lowercase();
+    let input = tool_input_summary(input);
+    let output = output.trim_end();
+    let line_count = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+
+    let mut summary = label.to_string();
+    if !input.is_empty() {
+        summary.push_str(&format!("  {input}"));
+    }
+    if kind.contains("read") && line_count > 0 {
+        summary.push_str(&format!("  · {line_count} lines"));
+    } else if (kind.contains("search") || kind.contains("glob") || kind.contains("grep"))
+        && line_count > 0
+    {
+        summary.push_str(&format!("  · {line_count} matches"));
+    }
+    if let Some(ms) = duration_ms {
+        if ms >= 1000 {
+            summary.push_str(&format!("  · {:.1}s", ms as f32 / 1000.0));
+        } else {
+            summary.push_str(&format!("  · {ms}ms"));
+        }
+    }
+    summary.push_str(if success {
+        "  · passed"
+    } else {
+        "  · failed"
+    });
+
+    if !success && !output.is_empty() {
+        let diagnostics = output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        let hidden = diagnostics.len().saturating_sub(4);
+        for line in diagnostics.iter().rev().take(4).rev() {
+            let clipped = line.chars().take(160).collect::<String>();
+            summary.push_str(&format!("\n  {clipped}"));
+        }
+        if hidden > 0 {
+            summary.push_str(&format!("\n  … {hidden} more diagnostic lines"));
+        }
+    }
+    summary
+}
+
 /// Extract `session.sessionId` from a `session/create` result.
 pub fn app_session_id_from_result(result: &serde_json::Value) -> Option<String> {
     result
@@ -5181,7 +5237,7 @@ pub enum TurnDelta {
     Reasoning,
     /// `tools[idx]` just began (show a running chip).
     ToolStarted(usize),
-    /// `tools[idx]` just finished (persist it, foldable, to the transcript).
+    /// `tools[idx]` just finished (persist its presentation to the transcript).
     ToolFinished(usize),
     /// The turn completed.
     Done,

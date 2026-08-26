@@ -35,17 +35,17 @@ use zcode_tui::{
     context_watermark_warn, conversation_target, db_baseline, db_schema_supported,
     detect_auth_status, diff_line_role, discover_zcode_app_dir, encode_interaction_reply,
     encode_runtime_preferences_reply, env_is_headless, extract_file_mentions, file_suggestions,
-    fold_preview, format_context_watermark, git_diff_command, handle_local_command, help_text,
-    history_search, is_newer_version, kernel_config_path_from, kernel_db_path_from,
-    latest_assistant_text, latest_reasoning, latest_session_for_dir, leader_action_for_key,
-    list_recent_sessions, live_tool_chips, load_mcp_config, load_ui_config, login_command,
-    markdown_lines, mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence,
+    format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
+    is_newer_version, kernel_config_path_from, kernel_db_path_from, latest_assistant_text,
+    latest_reasoning, latest_session_for_dir, leader_action_for_key, list_recent_sessions,
+    live_tool_chips, load_mcp_config, load_ui_config, login_command, markdown_lines,
+    mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence,
     parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
     parse_kernel_slash_commands, parse_prompt_summary, parse_resume_messages, parse_rewind_preview,
     parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
     parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age,
     resolve_update_download_url, rewind_failure, run_command, select_update_feed_url, shorten_home,
-    skyline_mode, slash_suggestions_merged, spawn_streaming_command, tool_input_summary,
+    skyline_mode, slash_suggestions_merged, spawn_streaming_command, tool_result_summary,
     usage_stats_params, user_mcp_config_path, v4_command_params, v4_conversation_subscribe_params,
     v4_file_rewind_preview_params, v4_rewind_target, with_mcp_servers, with_tool_policy,
     wrap_display, zcode_app_version_from_path, AppConfig, AppServerConn, AppServerEvent,
@@ -64,9 +64,6 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SUGGESTION_LIMIT: usize = 8;
-/// Foldable cells longer than this render as a head preview by default.
-const FOLD_THRESHOLD: usize = 24;
-const FOLD_HEAD: usize = 8;
 const HISTORY_SEARCH_LIMIT: usize = 8;
 /// OSC52 clipboard payload cap (base64 bytes) — larger sequences get
 /// truncated or rejected by terminals.
@@ -782,12 +779,6 @@ struct UiState {
     model_provider: Option<String>,
     /// Ctrl+R reverse search overlay: query + selected index.
     history_query: Option<(String, usize)>,
-    /// Log indices the user expanded with Ctrl+O (folding is the default
-    /// for long foldable cells).
-    unfolded: HashSet<usize>,
-    /// A completed, scrollback-owned long entry shown in a read-only overlay.
-    /// Terminal scrollback is immutable, so Ctrl+O cannot redraw it in place.
-    expanded_log: Option<(usize, u16)>,
     /// Number of log entries already committed to terminal scrollback.
     flushed_log: usize,
     /// Incremented by /clear so the inline terminal purges its scrollback.
@@ -964,8 +955,6 @@ impl UiState {
             pending_model: None,
             model_provider: None,
             history_query: None,
-            unfolded: HashSet::new(),
-            expanded_log: None,
             flushed_log: 0,
             clear_generation: 0,
             app_mode,
@@ -1300,10 +1289,6 @@ impl UiState {
             self.handle_background_task_key(key);
             return None;
         }
-        if self.expanded_log.is_some() {
-            self.handle_expanded_log_key(key);
-            return None;
-        }
         if self.model_picker.is_some() {
             return self.handle_model_picker_key(key);
         }
@@ -1323,7 +1308,6 @@ impl UiState {
                 self.history_query = Some((String::new(), 0));
                 self.status = "reverse search: type to filter, Enter recalls".to_string();
             }
-            KeyCode::Char('o') if ctrl => self.toggle_fold(),
             KeyCode::Char('q') if ctrl => return Some(UiEffect::Quit),
             KeyCode::Char('c') if ctrl => {
                 if self.is_busy() {
@@ -1496,8 +1480,6 @@ impl UiState {
             return;
         }
         self.log.clear();
-        self.unfolded.clear();
-        self.expanded_log = None;
         self.flushed_log = 0;
         self.clear_generation = self.clear_generation.wrapping_add(1);
         self.push_startup_frame();
@@ -1641,10 +1623,8 @@ impl UiState {
                 self.launch_ide(output.trim_start_matches("__IDE__"));
             }
             Ok(output) => {
-                // Direct answer to a user command (/skills list, /mcp list,
-                // /status, …): show it whole, never folded.
                 self.log
-                    .push(LogLine::unfolded(LogKind::System, output.trim_end()));
+                    .push(LogLine::new(LogKind::System, output.trim_end()));
                 self.status = "ok".to_string();
             }
             Err(error) => self.push_error(&format!("{error:#}")),
@@ -2565,40 +2545,21 @@ fi"#
         }
     }
 
-    /// Persist a finished tool call into the transcript as a foldable `Tool`
-    /// entry (header + output), then close the current text run so following
-    /// answer text opens a new entry — tools and text stay in turn order.
+    /// Persist a finished internal tool call as a structured summary, then
+    /// close the current text run so following answer text stays in order.
     fn app_push_tool_entry(&mut self, idx: usize) {
         let text = {
             let Some(turn) = &self.app_turn else { return };
             let Some(tool) = turn.turn.tools.get(idx) else {
                 return;
             };
-            let mut header = if tool.name.is_empty() {
-                "tool".to_string()
-            } else {
-                tool.name.clone()
-            };
-            let summary = tool_input_summary(&tool.input);
-            if !summary.is_empty() {
-                header.push_str(&format!("  {summary}"));
-            }
-            if let Some(ms) = tool.duration_ms {
-                if ms >= 1000 {
-                    header.push_str(&format!("  · {:.1}s", ms as f32 / 1000.0));
-                } else {
-                    header.push_str(&format!("  · {ms}ms"));
-                }
-            }
-            if !tool.success {
-                header.push_str("  · failed");
-            }
-            let output = tool.output.trim_end();
-            if output.is_empty() {
-                header
-            } else {
-                format!("{header}\n{output}")
-            }
+            tool_result_summary(
+                &tool.name,
+                &tool.input,
+                &tool.output,
+                tool.success,
+                tool.duration_ms,
+            )
         };
         self.log.push(LogLine::new(LogKind::Tool, &text));
         self.app_commit_phase();
@@ -3028,8 +2989,7 @@ fi"#
                         "session" => format_session_usage(result),
                         _ => format_usage_stats(result),
                     };
-                    // /usage is a user-requested report: never fold.
-                    self.log.push(LogLine::unfolded(LogKind::System, &text));
+                    self.log.push(LogLine::new(LogKind::System, &text));
                     self.status = "usage".to_string();
                 }
             }
@@ -4175,71 +4135,6 @@ fi"#
         }
     }
 
-    /// Toggle the most recent foldable over-threshold cell between the
-    /// folded preview and the full text.
-    fn toggle_fold(&mut self) {
-        if self.expanded_log.take().is_some() {
-            self.status = "expanded output closed".to_string();
-            return;
-        }
-        let target = self
-            .log
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, entry)| {
-                foldable_kind(entry.kind)
-                    && !entry.no_fold
-                    && fold_preview(&entry.text, FOLD_THRESHOLD, FOLD_HEAD).is_some()
-            })
-            .map(|(index, _)| index);
-        match target {
-            Some(index) if index < self.flushed_log => {
-                self.expanded_log = Some((index, 0));
-                self.status = "expanded output: ↑↓/PageUp/PageDown scroll · Esc closes".to_string();
-            }
-            Some(index) => {
-                let expanded = if self.unfolded.remove(&index) {
-                    false
-                } else {
-                    self.unfolded.insert(index);
-                    true
-                };
-                self.status = if expanded {
-                    "expanded (Ctrl+O folds back)".to_string()
-                } else {
-                    "folded".to_string()
-                };
-            }
-            None => self.status = "no long output to fold".to_string(),
-        }
-    }
-
-    /// Navigate a completed transcript entry without taking ownership of
-    /// terminal mouse selection or clipboard shortcuts.
-    fn handle_expanded_log_key(&mut self, key: KeyEvent) {
-        let Some((_, scroll)) = self.expanded_log.as_mut() else {
-            return;
-        };
-        match key.code {
-            KeyCode::Esc => {
-                self.expanded_log = None;
-                self.status = "expanded output closed".to_string();
-            }
-            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.expanded_log = None;
-                self.status = "expanded output closed".to_string();
-            }
-            KeyCode::Up => *scroll = scroll.saturating_sub(1),
-            KeyCode::Down => *scroll = scroll.saturating_add(1),
-            KeyCode::PageUp => *scroll = scroll.saturating_sub(8),
-            KeyCode::PageDown => *scroll = scroll.saturating_add(8),
-            KeyCode::Home => *scroll = 0,
-            KeyCode::End => *scroll = u16::MAX,
-            _ => {}
-        }
-    }
-
     /// Fallback when stdout isn't the --json summary (older kernel or plain
     /// output): replay the buffered lines through the streamed-event
     /// interpretation the pump used to apply live.
@@ -4310,25 +4205,6 @@ fi"#
             };
         } else if self.log[active.log_index].text.is_empty() {
             self.log.remove(active.log_index);
-            // Fold state is keyed by log index; shift entries past the hole.
-            self.unfolded = self
-                .unfolded
-                .iter()
-                .map(|&index| {
-                    if index > active.log_index {
-                        index - 1
-                    } else {
-                        index
-                    }
-                })
-                .collect();
-            if let Some((index, _)) = &mut self.expanded_log {
-                if *index > active.log_index {
-                    *index -= 1;
-                } else if *index == active.log_index {
-                    self.expanded_log = None;
-                }
-            }
         }
         let elapsed = active.started.elapsed().as_secs_f32();
         let (success, detail) = active
@@ -4580,18 +4456,6 @@ fi"#
                 active.log_index += inserted;
             }
         }
-        if !self.unfolded.is_empty() {
-            self.unfolded = self
-                .unfolded
-                .iter()
-                .map(|&i| if i >= shift_at { i + inserted } else { i })
-                .collect();
-        }
-        if let Some((index, _)) = &mut self.expanded_log {
-            if *index >= shift_at {
-                *index += inserted;
-            }
-        }
         self.status = format!("update available: ZCode {}", feed.version);
     }
 
@@ -4634,23 +4498,10 @@ enum LogKind {
     Tool,
 }
 
-/// Long assistant replies stay full; everything mechanical can fold.
-fn foldable_kind(kind: LogKind) -> bool {
-    matches!(
-        kind,
-        LogKind::Tool | LogKind::System | LogKind::Diff | LogKind::Error
-    )
-}
-
 #[derive(Debug)]
 struct LogLine {
     kind: LogKind,
     text: String,
-    /// Exempt from long-output folding. Set for DIRECT ANSWERS the user
-    /// asked to read (/skills list, /mcp list, /status, /usage): folding
-    /// exists to keep mechanical tool/shell output from flooding the
-    /// transcript, not to hide a listing the user explicitly requested.
-    no_fold: bool,
 }
 
 impl LogLine {
@@ -4658,16 +4509,6 @@ impl LogLine {
         Self {
             kind,
             text: text.to_string(),
-            no_fold: false,
-        }
-    }
-
-    /// A user-requested listing: renders like its kind but never folds.
-    fn unfolded(kind: LogKind, text: &str) -> Self {
-        Self {
-            kind,
-            text: text.to_string(),
-            no_fold: true,
         }
     }
 }
@@ -4862,9 +4703,6 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     if state.history_query.is_some() {
         render_history_search(frame, centered_rect(72, 50, root), state);
     }
-    if state.expanded_log.is_some() {
-        render_expanded_log(frame, centered_rect(88, 82, root), state);
-    }
     // Topmost: the kernel is blocked on this answer.
     if state.interaction.is_some() {
         render_interaction(frame, centered_rect(74, 62, root), state);
@@ -4916,7 +4754,7 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
             t.accent(),
         )));
         // Tools still running show as spinner chips; finished ones have already
-        // dropped into the transcript (foldable), so they leave the panel.
+        // dropped into the transcript as summaries, so they leave the panel.
         let running: Vec<&zcode_tui::AppToolCall> = turn
             .turn
             .tools
@@ -5098,18 +4936,6 @@ fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
 
 fn rendered_log_entry(state: &UiState, index: usize, width: usize) -> Vec<ListItem<'static>> {
     let entry = &state.log[index];
-    if foldable_kind(entry.kind) && !entry.no_fold && !state.unfolded.contains(&index) {
-        if let Some((head, hidden)) = fold_preview(&entry.text, FOLD_THRESHOLD, FOLD_HEAD) {
-            let preview_text = entry.text.lines().take(head).collect::<Vec<_>>().join("\n");
-            let preview = LogLine::new(entry.kind, &preview_text);
-            let mut items = log_to_items(&preview, width, &state.theme, state.skyline_mode);
-            items.push(ListItem::new(Line::from(Span::styled(
-                format!("  … (+{hidden} lines)"),
-                state.theme.dim(),
-            ))));
-            return items;
-        }
-    }
     log_to_items(entry, width, &state.theme, state.skyline_mode)
 }
 
@@ -6339,38 +6165,6 @@ fn render_help_modal(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     frame.render_widget(help, area);
 }
 
-fn render_expanded_log(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
-    let Some((index, requested_scroll)) = state.expanded_log else {
-        return;
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(state.theme.frame())
-        .title(Line::from(Span::styled(
-            " expanded output · ↑↓/PageUp/PageDown · Esc closes ",
-            state.theme.dim(),
-        )));
-    let inner = block.inner(area);
-    let items = log_to_items(
-        &state.log[index],
-        inner.width.max(1) as usize,
-        &state.theme,
-        state.skyline_mode,
-    );
-    let max_scroll = (items.len() as u16).saturating_sub(inner.height);
-    let scroll = requested_scroll.min(max_scroll);
-    if let Some((_, current_scroll)) = state.expanded_log.as_mut() {
-        *current_scroll = scroll;
-    }
-    frame.render_widget(Clear, area);
-    frame.render_stateful_widget(
-        List::new(items).block(block),
-        area,
-        &mut ListState::default().with_offset(scroll as usize),
-    );
-}
-
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -6517,23 +6311,6 @@ mod tests {
     }
 
     #[test]
-    fn completed_long_output_expands_in_read_only_overlay() {
-        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
-        let output = (0..=FOLD_THRESHOLD)
-            .map(|line| format!("line {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        state.log.push(LogLine::new(LogKind::Tool, &output));
-        state.flushed_log = 1;
-
-        state.toggle_fold();
-        assert_eq!(state.expanded_log, Some((0, 0)));
-
-        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(state.expanded_log, None);
-    }
-
-    #[test]
     fn user_message_spaces_share_the_message_band_background() {
         let theme = Theme::zhipu(false);
         let entry = LogLine::new(LogKind::User, "hello   world");
@@ -6558,6 +6335,24 @@ mod tests {
         assert_eq!(items.len(), 2);
         let log = vec![entry, LogLine::new(LogKind::System, "next")];
         assert!(!log_entry_needs_separator(&log, 1));
+    }
+
+    #[test]
+    fn ctrl_o_no_longer_mutates_transcript_state() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.log.push(LogLine::new(
+            LogKind::Tool,
+            &(1..=40)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+        let before = state.log[0].text.clone();
+
+        assert!(state
+            .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
+            .is_none());
+        assert_eq!(state.log[0].text, before);
     }
 
     #[test]
