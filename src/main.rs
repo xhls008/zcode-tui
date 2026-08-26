@@ -53,12 +53,19 @@ use zcode_tui::{
     DebugLog, DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction,
     LiveToolChip, MdLineKind, ModelChoice, RewindPreview, RewindTarget, SessionControls,
     SessionRow, SkylineMode, SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem,
-    ToolChipStatus, TurnDelta, UiConfig, UpdateFeed, V4CommandBase, V4ConversationState,
+    ToolChipStatus, TurnDelta, UpdateFeed, V4CommandBase, V4ConversationState,
 };
 
 mod agents;
+mod app;
+mod transcript;
+mod ui;
 
 use agents::AgentInspectorState;
+use app::input::{composer_layout, suggestion_popup_area};
+use app::state::{AppMode, ConnectStage, DbState, V4Mode};
+use transcript::{log_entry_needs_separator, EntryId, LogKind, LogLine};
+use ui::{render_background_tasks, render_composer, render_conversation, Theme};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -480,123 +487,6 @@ enum UiEffect {
     Login,
 }
 
-/// 智谱-flavored theme in a Codex-like shell: one GLM-blue accent, cool
-/// neutrals, elevated background bands instead of borders, semantic
-/// green/red for state. `plain` honors --no-color/NO_COLOR.
-#[derive(Clone, Copy)]
-struct Theme {
-    plain: bool,
-    accent: Color,
-    accent_dim: Color,
-    text: Color,
-    dim: Color,
-    good: Color,
-    bad: Color,
-    frame: Color,
-    code_bg: Color,
-    band_bg: Color,
-}
-
-impl Theme {
-    fn zhipu(plain: bool) -> Self {
-        Self {
-            plain,
-            accent: Color::Rgb(96, 136, 255),
-            accent_dim: Color::Rgb(64, 88, 168),
-            text: Color::Rgb(222, 226, 234),
-            dim: Color::Rgb(122, 130, 146),
-            good: Color::Rgb(126, 200, 154),
-            bad: Color::Rgb(232, 116, 116),
-            frame: Color::Rgb(56, 62, 78),
-            code_bg: Color::Rgb(33, 38, 51),
-            band_bg: Color::Rgb(48, 52, 63),
-        }
-    }
-
-    fn styled(&self, color: Color) -> Style {
-        if self.plain {
-            Style::default()
-        } else {
-            Style::default().fg(color)
-        }
-    }
-
-    fn accent(&self) -> Style {
-        self.styled(self.accent)
-    }
-
-    fn accent_dim(&self) -> Style {
-        self.styled(self.accent_dim)
-    }
-
-    fn text(&self) -> Style {
-        self.styled(self.text)
-    }
-
-    fn dim(&self) -> Style {
-        self.styled(self.dim)
-    }
-
-    fn good(&self) -> Style {
-        self.styled(self.good)
-    }
-
-    fn bad(&self) -> Style {
-        self.styled(self.bad)
-    }
-
-    fn frame(&self) -> Style {
-        self.styled(self.frame)
-    }
-
-    fn code(&self) -> Style {
-        if self.plain {
-            Style::default()
-        } else {
-            Style::default().fg(self.text).bg(self.code_bg)
-        }
-    }
-
-    /// Elevated background band, Codex-style, for user messages and the
-    /// composer instead of drawn borders.
-    fn band(&self) -> Style {
-        if self.plain {
-            Style::default()
-        } else {
-            Style::default().bg(self.band_bg)
-        }
-    }
-
-    fn selection(&self) -> Style {
-        if self.plain {
-            Style::default().reversed()
-        } else {
-            Style::default().fg(Color::Rgb(14, 18, 30)).bg(self.accent)
-        }
-    }
-
-    /// Apply user config color overrides; NO_COLOR (plain) still wins
-    /// because every accessor checks `plain` first.
-    fn with_overrides(mut self, config: &UiConfig) -> Self {
-        for (key, (r, g, b)) in &config.colors {
-            let color = Color::Rgb(*r, *g, *b);
-            match key.as_str() {
-                "accent" => self.accent = color,
-                "accent_dim" => self.accent_dim = color,
-                "text" => self.text = color,
-                "dim" => self.dim = color,
-                "good" => self.good = color,
-                "bad" => self.bad = color,
-                "frame" => self.frame = color,
-                "code_bg" => self.code_bg = color,
-                "band_bg" => self.band_bg = color,
-                _ => {}
-            }
-        }
-        self
-    }
-}
-
 #[derive(Clone)]
 struct Suggestion {
     insert: String,
@@ -655,24 +545,6 @@ impl ActiveJob {
 
 const PERMISSION_MODES: [&str; 4] = ["build", "edit", "plan", "yolo"];
 
-/// State of the app-server streaming path for this process.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AppMode {
-    /// Explicit opt-out: always use the classic `--prompt` path.
-    Off,
-    /// Healthy: prompts stream through the app-server.
-    Ready,
-    /// A failure permanently downgraded this run to `--prompt`.
-    Downgraded,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum V4Mode {
-    Unknown,
-    Available,
-    Unavailable,
-}
-
 /// A single in-flight app-server turn. The open text entry remains mutable;
 /// completed text phases and tool results advance `committable_end` and append
 /// to terminal scrollback without rewriting earlier rows.
@@ -682,7 +554,7 @@ struct AppTurn {
     committable_end: usize,
     /// The open assistant text entry, or None between text runs (e.g. right
     /// after a tool landed, before the next text token). Created lazily.
-    text_index: Option<usize>,
+    text_entry_id: Option<EntryId>,
     /// Bytes of `turn.text` already flushed into transcript entries; the rest
     /// is the unwritten suffix appended on the next Text delta.
     written: usize,
@@ -716,26 +588,6 @@ enum ConnectPhase {
     Resume(u64),
     Subscribe(u64),
     V4Subscribe(u64),
-}
-
-/// Stage tag copied out of `ConnectPhase` so a poll loop can mutate `self`
-/// without holding a borrow of `app_connect` across the arms.
-#[derive(Clone, Copy)]
-enum ConnectStage {
-    Create,
-    Resume,
-    Subscribe,
-    V4Subscribe,
-}
-
-/// Availability of the kernel's sqlite database for live progress.
-/// Resolved once by the startup probe; anything but Enabled degrades every
-/// db-derived feature to the pre-db behaviour.
-#[derive(Clone, PartialEq, Eq)]
-enum DbState {
-    Unknown,
-    Enabled(PathBuf),
-    Disabled,
 }
 
 struct UiState {
@@ -1896,7 +1748,7 @@ impl UiState {
         self.app_turn = Some(AppTurn {
             turn: AppServerTurn::default(),
             committable_end: self.log.len(),
-            text_index: None,
+            text_entry_id: None,
             written: 0,
             started: Instant::now(),
             cancel_requested: false,
@@ -2515,21 +2367,24 @@ fi"#
     /// fresh one if the previous run was closed by a tool landing.
     fn app_append_text(&mut self) {
         let (full_len, written, existing) = match &self.app_turn {
-            Some(turn) => (turn.turn.text.len(), turn.written, turn.text_index),
+            Some(turn) => (turn.turn.text.len(), turn.written, turn.text_entry_id),
             None => return,
         };
         if full_len <= written {
             return;
         }
         let suffix = self.app_turn.as_ref().unwrap().turn.text[written..].to_string();
-        let idx = existing.unwrap_or_else(|| {
-            self.log.push(LogLine::new(LogKind::Assistant, ""));
-            self.log.len() - 1
-        });
+        let idx = existing
+            .and_then(|entry_id| self.log.iter().position(|entry| entry.id == entry_id))
+            .unwrap_or_else(|| {
+                self.log.push(LogLine::new(LogKind::Assistant, ""));
+                self.log.len() - 1
+            });
+        let entry_id = self.log[idx].id;
         self.log[idx].text.push_str(&suffix);
         let non_empty = !self.log[idx].text.is_empty();
         if let Some(turn) = &mut self.app_turn {
-            turn.text_index = Some(idx);
+            turn.text_entry_id = Some(entry_id);
             turn.written = full_len;
             turn.got_text |= non_empty;
         }
@@ -2540,7 +2395,7 @@ fi"#
     fn app_commit_phase(&mut self) {
         let end = self.log.len();
         if let Some(turn) = &mut self.app_turn {
-            turn.text_index = None;
+            turn.text_entry_id = None;
             turn.committable_end = end;
         }
     }
@@ -4437,18 +4292,11 @@ fi"#
                 .insert(logo_at + 1, LogLine::new(LogKind::Tip, &tip));
             (logo_at, 2)
         };
-        // The probe can land mid-turn: entries were just inserted near the top,
-        // so every live index that pointed at or past the insertion point must
-        // shift — otherwise streamed text lands in the wrong entry (and a later
-        // remove() could delete the wrong one).
+        // The probe can land mid-turn. Stable transcript entry IDs keep the
+        // open answer target valid; only remaining index-based cursors shift.
         if let Some(turn) = &mut self.app_turn {
             if turn.committable_end >= shift_at {
                 turn.committable_end += inserted;
-            }
-            if let Some(ti) = turn.text_index {
-                if ti >= shift_at {
-                    turn.text_index = Some(ti + inserted);
-                }
             }
         }
         if let Some(active) = &mut self.job {
@@ -4482,34 +4330,6 @@ fi"#
     fn push_error(&mut self, text: &str) {
         self.log.push(LogLine::new(LogKind::Error, text));
         self.status = "error".to_string();
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LogKind {
-    Banner,
-    Logo,
-    Tip,
-    User,
-    Assistant,
-    System,
-    Error,
-    Diff,
-    Tool,
-}
-
-#[derive(Debug)]
-struct LogLine {
-    kind: LogKind,
-    text: String,
-}
-
-impl LogLine {
-    fn new(kind: LogKind, text: &str) -> Self {
-        Self {
-            kind,
-            text: text.to_string(),
-        }
     }
 }
 
@@ -4915,32 +4735,9 @@ fn format_usage_stats(result: &serde_json::Value) -> String {
     )
 }
 
-fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
-    let inner = Rect {
-        x: area.x.saturating_add(1),
-        y: area.y,
-        width: area.width.saturating_sub(2),
-        height: area.height,
-    };
-    let live_lines = live_panel_lines(state);
-    if live_lines.is_empty() {
-        return;
-    }
-    frame.render_widget(
-        Paragraph::new(live_lines)
-            .wrap(Wrap { trim: false })
-            .scroll((0, 0)),
-        inner,
-    );
-}
-
 fn rendered_log_entry(state: &UiState, index: usize, width: usize) -> Vec<ListItem<'static>> {
     let entry = &state.log[index];
     log_to_items(entry, width, &state.theme, state.skyline_mode)
-}
-
-fn log_entry_needs_separator(log: &[LogLine], index: usize) -> bool {
-    index > 0 && log[index].kind != LogKind::User && log[index - 1].kind != LogKind::Assistant
 }
 
 /// Split a line into (matches, chunk) runs so adjacent chars of the same
@@ -5452,128 +5249,6 @@ fn spans_with_links(text: &str, base: Style, link: Style) -> Vec<Span<'static>> 
     spans
 }
 
-fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
-    let t = &state.theme;
-    // Elevated band instead of a border, like the Codex composer.
-    frame.render_widget(Paragraph::new("").style(t.band()), area);
-
-    let mut lines: Vec<Line> = vec![Line::default()];
-    if state.input.is_empty() {
-        let placeholder = if area.width >= 54 {
-            "describe a task   /commands   @files   !shell"
-        } else if area.width >= 28 {
-            "describe a task   /commands"
-        } else {
-            "describe a task"
-        };
-        lines.push(Line::from(vec![
-            Span::styled(" › ".to_string(), t.accent().bold()),
-            Span::styled(placeholder.to_string(), t.dim()),
-        ]));
-    } else {
-        let content_width = area.width.saturating_sub(3).max(1) as usize;
-        let layout = composer_layout(&state.input, state.cursor, content_width);
-        let visible_rows = area.height.saturating_sub(2).max(1) as usize;
-        let first_row = layout.cursor_row.saturating_sub(visible_rows - 1);
-        for (offset, raw) in layout
-            .lines
-            .iter()
-            .skip(first_row)
-            .take(visible_rows)
-            .enumerate()
-        {
-            let index = first_row + offset;
-            let prefix = if index == 0 {
-                Span::styled(" › ".to_string(), t.accent().bold())
-            } else {
-                Span::raw("   ".to_string())
-            };
-            lines.push(Line::from(vec![
-                prefix,
-                Span::styled(raw.clone(), t.text()),
-            ]));
-        }
-        frame.render_widget(Paragraph::new(Text::from(lines)).style(t.band()), area);
-        let cursor_x = area
-            .x
-            .saturating_add(3)
-            .saturating_add(layout.cursor_col.min(content_width) as u16);
-        let cursor_y = area.y.saturating_add(1).saturating_add(
-            layout
-                .cursor_row
-                .saturating_sub(first_row)
-                .min(visible_rows - 1) as u16,
-        );
-        frame.set_cursor_position((cursor_x, cursor_y));
-        return;
-    }
-    frame.render_widget(Paragraph::new(Text::from(lines)).style(t.band()), area);
-    frame.set_cursor_position((area.x.saturating_add(3), area.y.saturating_add(1)));
-}
-
-struct ComposerLayout {
-    lines: Vec<String>,
-    cursor_row: usize,
-    cursor_col: usize,
-}
-
-/// Wrap composer text by terminal cell width and locate the character cursor.
-fn composer_layout(input: &str, cursor: usize, width: usize) -> ComposerLayout {
-    let width = width.max(1);
-    let chars = input.chars().collect::<Vec<_>>();
-    let mut lines = vec![String::new()];
-    let mut line_width = 0usize;
-    for ch in &chars {
-        if *ch == '\n' {
-            lines.push(String::new());
-            line_width = 0;
-            continue;
-        }
-        let char_width = UnicodeWidthChar::width(*ch).unwrap_or(0);
-        if line_width > 0 && line_width.saturating_add(char_width) > width {
-            lines.push(String::new());
-            line_width = 0;
-        }
-        lines.last_mut().expect("composer has a line").push(*ch);
-        line_width = line_width.saturating_add(char_width);
-    }
-
-    let cursor = cursor.min(chars.len());
-    let mut cursor_row = 0usize;
-    let mut cursor_col = 0usize;
-    for ch in chars.iter().take(cursor) {
-        if *ch == '\n' {
-            cursor_row += 1;
-            cursor_col = 0;
-            continue;
-        }
-        let char_width = UnicodeWidthChar::width(*ch).unwrap_or(0);
-        if cursor_col > 0 && cursor_col.saturating_add(char_width) > width {
-            cursor_row += 1;
-            cursor_col = 0;
-        }
-        cursor_col = cursor_col.saturating_add(char_width);
-    }
-    if cursor_col >= width {
-        cursor_row += cursor_col / width;
-        cursor_col %= width;
-    } else if let Some(next) = chars.get(cursor).filter(|ch| **ch != '\n') {
-        let next_width = UnicodeWidthChar::width(*next).unwrap_or(0);
-        if cursor_col > 0 && cursor_col.saturating_add(next_width) > width {
-            cursor_row += 1;
-            cursor_col = 0;
-        }
-    }
-    while lines.len() <= cursor_row {
-        lines.push(String::new());
-    }
-    ComposerLayout {
-        lines,
-        cursor_row,
-        cursor_col,
-    }
-}
-
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     let t = &state.theme;
     let left = if let Some(job) = &state.job {
@@ -5688,17 +5363,6 @@ fn render_suggestions(frame: &mut Frame<'_>, input_area: Rect, state: &UiState) 
         area,
         &mut ListState::default().with_selected(Some(state.suggestion_index)),
     );
-}
-
-fn suggestion_popup_area(viewport: Rect, input_area: Rect, item_count: usize) -> Option<Rect> {
-    let requested_height = (item_count as u16).min(SUGGESTION_LIMIT as u16) + 2;
-    let height = requested_height.min(input_area.y.saturating_sub(viewport.y));
-    (height > 0).then_some(Rect {
-        x: input_area.x,
-        y: input_area.y - height,
-        width: input_area.width,
-        height,
-    })
 }
 
 fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
@@ -6035,89 +5699,6 @@ fn render_session_picker(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     );
 }
 
-fn render_background_tasks(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
-    let Some(selected) = state.agents.selected() else {
-        return;
-    };
-    let t = &state.theme;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(t.frame())
-        .title(Line::from(Span::styled(
-            " agents · observed lifecycle · ↑↓ selects · Esc closes ".to_string(),
-            t.dim(),
-        )));
-    let inner = block.inner(area);
-    let parts = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(3)])
-        .split(inner);
-    let items = state
-        .agents
-        .tasks()
-        .iter()
-        .map(|task| {
-            let status = task.status.to_ascii_lowercase();
-            let (symbol, style) = if status == "running" || status == "started" {
-                ("●", t.accent())
-            } else if status == "completed" || status == "success" {
-                ("✓", t.good())
-            } else if status.contains("fail") || status == "lost" {
-                ("✗", t.bad())
-            } else {
-                ("·", t.dim())
-            };
-            let short_id: String = task.id.chars().take(18).collect();
-            let pid = task.pid.map(|pid| format!("pid {pid}")).unwrap_or_default();
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{symbol} {:<10}", task.status), style),
-                Span::styled(format!("{:<14}", task.tool), t.text()),
-                Span::styled(format!("{short_id:<20}"), t.dim()),
-                Span::styled(pid, t.dim()),
-            ]))
-        })
-        .collect::<Vec<_>>();
-    let selected = selected.min(state.agents.tasks().len().saturating_sub(1));
-    frame.render_widget(Clear, area);
-    frame.render_widget(block, area);
-    frame.render_stateful_widget(
-        List::new(items)
-            .highlight_style(t.selection())
-            .highlight_symbol("› "),
-        parts[0],
-        &mut ListState::default().with_selected(Some(selected)),
-    );
-
-    if let Some(task) = state.agents.tasks().get(selected) {
-        let command = task
-            .command
-            .as_deref()
-            .unwrap_or("(not provided by kernel)");
-        let command = command.replace(['\r', '\n'], " ");
-        let command: String = command.chars().take(120).collect();
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled("task: ".to_string(), t.dim()),
-                    Span::styled(task.id.clone(), t.text()),
-                ]),
-                Line::from(vec![
-                    Span::styled("command: ".to_string(), t.dim()),
-                    Span::styled(command, t.text()),
-                ]),
-                Line::from(Span::styled(
-                    "read-only: kernel exposes lifecycle events, not task logs or controls"
-                        .to_string(),
-                    t.dim(),
-                )),
-            ])
-            .wrap(Wrap { trim: false }),
-            parts[1],
-        );
-    }
-}
-
 fn render_history_search(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     let t = &state.theme;
     let Some((query, index)) = &state.history_query else {
@@ -6201,21 +5782,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn composer_wraps_ascii_and_cjk_at_display_width() {
-        let ascii = composer_layout("abcdef", 6, 5);
-        assert_eq!(ascii.lines, vec!["abcde", "f"]);
-        assert_eq!((ascii.cursor_row, ascii.cursor_col), (1, 1));
-
-        let cjk = composer_layout("中文a", 3, 4);
-        assert_eq!(cjk.lines, vec!["中文", "a"]);
-        assert_eq!((cjk.cursor_row, cjk.cursor_col), (1, 1));
-
-        let explicit = composer_layout("abcd\nef", 7, 4);
-        assert_eq!(explicit.lines, vec!["abcd", "ef"]);
-        assert_eq!((explicit.cursor_row, explicit.cursor_col), (1, 2));
-    }
-
-    #[test]
     fn transcript_does_not_wait_for_startup_probe() {
         let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
         state.log.push(LogLine::new(LogKind::User, "hello"));
@@ -6247,7 +5813,7 @@ mod tests {
 
         state.app_commit_phase();
         assert_eq!(state.committable_log_end(), 1);
-        assert_eq!(state.app_turn.as_ref().unwrap().text_index, None);
+        assert_eq!(state.app_turn.as_ref().unwrap().text_entry_id, None);
 
         state
             .app_turn
