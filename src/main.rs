@@ -1300,7 +1300,7 @@ impl UiState {
             }
             KeyCode::BackTab => self.cycle_mode(),
             KeyCode::Enter => {
-                if !self.suggestions.is_empty() && self.input.starts_with('/') {                                                                                                                                                                                                                                                        
+                if !self.suggestions.is_empty() && self.input.starts_with('/') {
                     self.accept_suggestion();
                     let input = self.input.trim().to_string();
                     if let Some(effect) = self.handle_submit(&input) {
@@ -5889,4 +5889,23 @@ fn display_cwd(config: &AppConfig) -> String {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| ".".to_string())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enter_accepts_and_runs_partial_slash_command() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.set_input("/he");
+
+        assert!(!state.suggestions.is_empty());
+        assert!(!state.show_help);
+        assert!(state
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .is_none());
+        assert!(state.show_help);
+        assert!(state.input.is_empty());
+    }
 }

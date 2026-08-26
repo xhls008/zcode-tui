@@ -1685,6 +1685,11 @@ fn session_lifecycle_params_and_list_parsing() {
         "https://open.bigmodel.cn/api/anthropic"
     );
     assert_eq!(provider["models"].as_array().unwrap().len(), 2);
+    // Some ZCode configs store the selected model directly at the root.
+    let mut root_model_config: serde_json::Value = serde_json::from_str(config).unwrap();
+    root_model_config["model"] = serde_json::json!("bigmodel/glm-4.7");
+    let root_runtime = build_runtime_model(&root_model_config.to_string(), 1235).unwrap();
+    assert_eq!(root_runtime["model"]["modelId"], "glm-4.7");
     let with = app_resume_params("sess_1", Some(&runtime));
     assert_eq!(with["runtimeModel"]["revision"], "zcode-tui-resume");
     // Unknown layouts -> None (bare resume + create fallback), never panic.
