@@ -1360,9 +1360,22 @@ impl UiState {
         }
 
         if self.is_busy() {
+            // Read-only local overlays must remain inspectable while the
+            // parent turn streams. In particular, active Subagents are most
+            // useful while they are still running; queueing /agents until the
+            // turn ends makes the inspector appear unresponsive.
+            if matches!(
+                &classified,
+                Ok(InputAction::Local(command))
+                    if command.first().map(String::as_str) == Some("agents")
+            ) {
+                self.history.push(input.to_string());
+                self.clear_input();
+                return self.submit_now(input);
+            }
             // Plain text during a live app-server turn steers it instead of
-            // queueing (session/steer). Slash/shell commands, and inputs
-            // during the handshake or drain phases, still queue.
+            // queueing (session/steer). Other slash/shell commands, and
+            // inputs during the handshake or drain phases, still queue.
             if self.app_turn.is_some() && matches!(&classified, Ok(InputAction::Prompt(_))) {
                 self.history.push(input.to_string());
                 self.clear_input();
@@ -5964,6 +5977,51 @@ mod tests {
         assert!(narrow.contains("viewing: read-only"));
         assert!(narrow.contains("input target: parent"));
         assert!(narrow.contains("child-render"));
+    }
+
+    #[test]
+    fn agents_command_opens_immediately_during_active_turn() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.agents.merge_snapshots(vec![
+            zcode_tui::AgentSnapshot {
+                kind: "subagent".to_string(),
+                child_session_id: Some("child-one".to_string()),
+                title: Some("backend explorer".to_string()),
+                status: Some("running".to_string()),
+                ..Default::default()
+            },
+            zcode_tui::AgentSnapshot {
+                kind: "subagent".to_string(),
+                child_session_id: Some("child-two".to_string()),
+                title: Some("frontend explorer".to_string()),
+                status: Some("running".to_string()),
+                ..Default::default()
+            },
+        ]);
+        state.begin_app_turn(1);
+        state.input = "/agents".to_string();
+        state.cursor = state.char_count();
+
+        let effect = state.handle_submit("/agents");
+
+        assert!(effect.is_none());
+        assert!(state.agents.is_open());
+        assert!(
+            state.app_turn.is_some(),
+            "opening Inspector must not cancel the turn"
+        );
+        assert!(
+            state.queued.is_empty(),
+            "/agents must not wait behind the turn"
+        );
+        assert!(state.input.is_empty());
+        assert_eq!(state.history.last().map(String::as_str), Some("/agents"));
+        assert!(state.agents.selected_is_parent());
+        assert_eq!(state.agents.visible_tasks().len(), 2);
+        assert_eq!(
+            state.status,
+            "agent inspector: read-only · input target parent"
+        );
     }
 
     #[test]
