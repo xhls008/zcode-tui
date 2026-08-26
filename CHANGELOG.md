@@ -12,9 +12,10 @@
   `workspace/readState` 读取内核模型目录，仅缓存公开模型元数据并只展示当前
   provider；该流程不读取 API Key、不直连供应商接口，也不改写 ZCode 配置。
   `/model` 在首次 prompt 前即可选择，建会话后先应用选择再发送消息；完整
-  `session/create|resume` 设置也会被吸收，不再只保留当前模型。感谢
-  [@auenger](https://github.com/auenger) 提交
-  [PR #3](https://github.com/xhls008/zcode-tui/pull/3)。
+  `session/create|resume` 设置也会被吸收，不再只保留当前模型。本项改进由
+  [@auenger](https://github.com/auenger) 通过
+  [PR #3](https://github.com/xhls008/zcode-tui/pull/3) 贡献，感谢对
+  zcode-tui 项目的支持。
 
 ### 修复
 
