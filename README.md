@@ -157,7 +157,7 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   Up/Down 跨进程可用；`Ctrl+R` 反向搜索（子串过滤、新→旧、Enter 取回）。
 - 使用普通屏幕的 Ratatui inline viewport：完成的对话写入终端 scrollback，底部
   只重绘流式状态和输入框。应用不捕获鼠标，滚轮、普通拖选以及 macOS
-  `Cmd+C` / Windows、Linux `Ctrl+C` 全部由系统终端原生处理；scrolling-region
+  `Cmd+C` / Windows、Linux `Ctrl+Shift+C` 全部由系统终端原生处理；scrolling-region
   稀疏写入不会把行尾空格固化到历史中，窗口缩放时由终端正常重排。
 - 对话按产生顺序持续追加：完成的用户、正文阶段、工具结果和助手尾段进入系统
   scrollback，底部只显示尚未完成的 thinking 状态与输入框；不固定轮数，也不按
@@ -491,7 +491,9 @@ cargo clippy --all-targets --all-features
 ([PR #1](https://github.com/xhls008/zcode-tui/pull/1)) 和斜杠命令 Enter 补全行为
 ([PR #2](https://github.com/xhls008/zcode-tui/pull/2))；感谢
 [@auenger](https://github.com/auenger) 贡献动态模型目录与首轮模型切换
-([PR #3](https://github.com/xhls008/zcode-tui/pull/3))。
+([PR #3](https://github.com/xhls008/zcode-tui/pull/3))，以及原生 scrollback、
+阶段追加和界面排版重构
+([PR #4](https://github.com/xhls008/zcode-tui/pull/4))，感谢对项目的持续支持。
 
 ## 背景与吐槽
 

@@ -10,7 +10,8 @@
 
 - **对话阅读与复制**：改用普通屏幕的 Ratatui inline viewport，完成的对话写入
   系统终端 scrollback，底部只重绘实时内容和输入框；不再捕获鼠标或模拟选区，
-  滚轮、普通拖选、macOS `Cmd+C` 与 Windows/Linux `Ctrl+C` 均走系统原生行为。
+  滚轮、普通拖选、macOS `Cmd+C` 与 Windows/Linux `Ctrl+Shift+C` 均走系统原生
+  行为。
   对话区和输入框之间增加留白，思考及回复标识与正文之间增加间距；输入框按
   终端显示宽度自动换行（含中文双宽字符），超过五行时视口自动跟随光标。
 - **官方 Logo 与自适应渲染**：欢迎框内保留原始 Z 图标，并加入以官方 SVG 为
@@ -27,6 +28,11 @@
   系统 scrollback 的消息不再回写或重新排列。
 - **启动与回看**：欢迎横幅不再等待模型目录、版本、更新源和数据库探测；移除已
   无渲染消费者的 PgUp/PgDn 假滚动状态，历史回看统一使用终端原生 scrollback。
+
+以上原生 scrollback、阶段追加、输入换行与界面排版改进由
+[@auenger](https://github.com/auenger) 通过
+[PR #4](https://github.com/xhls008/zcode-tui/pull/4) 贡献，感谢对 zcode-tui
+项目的持续支持。
 
 ## [0.5.6] - 2026-08-26
 

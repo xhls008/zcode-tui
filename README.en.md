@@ -157,7 +157,7 @@ for details.
   to terminal scrollback in chronological order; only unfinished thinking
   state and the composer remain in the viewport. Mouse capture is
   never enabled, so wheel scrolling,
-  ordinary drag selection, and system Cmd+C/Ctrl+C work natively. Sparse
+  ordinary drag selection, and system Cmd+C/Ctrl+Shift+C work natively. Sparse
   scrolling-region writes keep trailing spaces out of history so terminal
   reflow remains stable after a window resize.
 - Long output folding via Ctrl+O.
@@ -420,7 +420,10 @@ model-config compatibility fix
 completion behavior ([PR #2](https://github.com/xhls008/zcode-tui/pull/2)); and
 to [@auenger](https://github.com/auenger) for dynamic model discovery and
 pre-session model selection
-([PR #3](https://github.com/xhls008/zcode-tui/pull/3)).
+([PR #3](https://github.com/xhls008/zcode-tui/pull/3)), plus the native
+scrollback, phased output, and layout refactor
+([PR #4](https://github.com/xhls008/zcode-tui/pull/4)). Thank you for the
+continued support of the project.
 
 ## License
 

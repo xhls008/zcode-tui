@@ -1611,7 +1611,7 @@ keys:
   Ctrl+O                       expand / fold the last long output
   Mouse drag                   terminal-native text selection
   Mouse wheel                  scroll terminal history
-  Cmd+C / Ctrl+C               system terminal copy
+  Cmd+C / Ctrl+Shift+C         system terminal copy
   Esc                          close popups / cancel running job
 "#
 }
@@ -3094,13 +3094,12 @@ pub fn fold_preview(text: &str, threshold: usize, head: usize) -> Option<(usize,
     (total > threshold && head < total).then(|| (head, total - head))
 }
 
-/// User config: theme token overrides plus the mouse and notify switches.
+/// User config: theme token overrides plus the notify switch.
 /// Parsing never fails — bad lines fall back to defaults so startup cannot
 /// break.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UiConfig {
     pub colors: BTreeMap<String, (u8, u8, u8)>,
-    pub mouse: Option<bool>,
     /// `notify = off` silences the >30s turn-complete terminal bell.
     pub notify: Option<bool>,
 }
@@ -3115,8 +3114,6 @@ pub const UI_CONFIG_COLOR_KEYS: &[&str] = &[
     "frame",
     "code_bg",
     "band_bg",
-    "brand",
-    "brand_dim",
 ];
 
 pub fn parse_hex_color(value: &str) -> Option<(u8, u8, u8)> {
@@ -3139,13 +3136,7 @@ pub fn parse_ui_config(content: &str) -> UiConfig {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
-        if key == "mouse" {
-            config.mouse = match value.to_ascii_lowercase().as_str() {
-                "on" | "true" | "1" => Some(true),
-                "off" | "false" | "0" => Some(false),
-                _ => config.mouse,
-            };
-        } else if key == "notify" {
+        if key == "notify" {
             config.notify = match value.to_ascii_lowercase().as_str() {
                 "on" | "true" | "1" => Some(true),
                 "off" | "false" | "0" => Some(false),

@@ -84,11 +84,7 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// The ZCODE block wordmark. Rendered bright (`█` blocks) over a dim/shadow
-/// secondary layer; the responsive Beijing-skyline wireframe (`skyline_lines`)
-/// is drawn beneath it at render time so it stretches to the terminal width.
-/// Used for both the not-configured welcome (Brand → 清华紫) and the update
-/// notice (Logo → GLM 蓝).
+/// Selectable ASCII reconstruction of the ZCODE block wordmark.
 const ZCODE_WORDMARK: &str = r#"███████╗  ██████╗  ██████╗  ██████╗  ███████╗
 ╚══███╔╝ ██╔════╝ ██╔═══██╗ ██╔══██╗ ██╔════╝
   ███╔╝  ██║      ██║   ██║ ██║  ██║ █████╗
@@ -1687,8 +1683,8 @@ impl UiState {
             self.start_prompt_job_via_cli(prompt);
             return;
         }
-        // Experimental streaming path: true token streaming through the
-        // long-lived app-server. Any failure downgrades this process
+        // Default streaming path through the long-lived app-server. Any
+        // failure downgrades this process
         // permanently and falls through to the classic --prompt path so the
         // user is never stuck (design D4).
         if self.app_mode == AppMode::Ready {

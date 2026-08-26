@@ -99,12 +99,8 @@ def run_pty(env_extra, cwd, script, timeout=90, args=None):
     env.pop("NO_COLOR", None)
     env["ZCODE_TUI_NO_UPDATE_CHECK"] = "1"
     env["ZCODE_TUI_ZCODE_BIN"] = os.path.expanduser("~/.local/bin/zcode")
-    # Force the text skyline so the graphics-protocol probe is skipped: this
-    # dumb pty can neither render a graphics protocol nor answer the probe's
-    # DSR terminator, which would otherwise leave a thread blocked reading
-    # stdin for 2s and racing the event loop for scripted input. Real terminals
-    # answer DSR in ms; the true-image path can only be verified by a human in
-    # kitty/sixel/iTerm2. Scenarios may override.
+    # Keep the ASCII logo deterministic. The harness answers Ratatui's inline
+    # viewport DSR cursor query below, as a real terminal emulator would.
     env["ZCODE_TUI_SKYLINE"] = "braille"
     env.update(env_extra)
     master, slave = pty.openpty()
@@ -118,6 +114,7 @@ def run_pty(env_extra, cwd, script, timeout=90, args=None):
     deadline = time.time() + timeout
     pending = list(script)
     next_at = time.time() + pending[0][0] if pending else None
+    dsr_tail = b""
     while time.time() < deadline:
         if pending and time.time() >= next_at:
             _, data = pending.pop(0)
@@ -132,6 +129,10 @@ def run_pty(env_extra, cwd, script, timeout=90, args=None):
             if not chunk:
                 break
             buf += chunk
+            probe = dsr_tail + chunk
+            for _ in range(probe.count(b"\x1b[6n")):
+                os.write(master, b"\x1b[1;1R")
+            dsr_tail = probe[-3:]
         if proc.poll() is not None and not pending:
             break
     if proc.poll() is None:
@@ -163,7 +164,7 @@ raw = run_pty.last_raw
 check("s0: startup welcome card shown", "Welcome to ZCODE" in plain)
 check("s0: startup compact identity line shown", screen_seen(raw, "ZhiPU terminal TUI"))
 check("s0: startup official-style Z mark shown", "██████" in plain)
-check("s0: startup does not use the large logo", "███████" not in plain)
+check("s0: adaptive ASCII wordmark shown", "███████" in plain)
 
 # ---- scenario 1: live tool chips + summary render + watermark + cancel ----
 print("== scenario 1: real prompt with live progress ==", flush=True)
@@ -220,8 +221,7 @@ out = run_pty(
     timeout=20,
 )
 plain = strip_ansi(out)
-check("s3: purple wordmark shown", "178;108;196" in out)
-check("s3: skyline strip shown (ZhiPU on horizon, braille or wire)", "ZhiPU" in plain)
+check("s3: selectable ASCII wordmark shown", "███████" in plain)
 check("s3: not-configured headline", "not configured" in plain)
 check("s3: coding-plan login paths listed", "bigmodel-coding-plan-api-key" in plain)
 check("s3: no crash with missing db (banner rendered)", "ZCODE" in plain or "zcode" in plain)
@@ -236,8 +236,8 @@ out = run_pty(
     ],
     timeout=20,
 )
-check("s4: art still present", "ZhiPU" in strip_ansi(out))
-check("s4: no brand purple escape", "178;108;196" not in out)
+check("s4: art still present", "███████" in strip_ansi(out))
+check("s4: no RGB color escape", "38;2;" not in out)
 
 
 # ---- scenario 5: /sessions picker (user story: 找回昨天的会话) ----
@@ -296,9 +296,8 @@ out = run_pty(
 )
 plain = strip_ansi(out)
 raw = run_pty.last_raw
-check("s7: long output folded with hidden count",
-      screen_seen(raw, "+112 lines") and screen_seen(raw, "Ctrl+O"))
-check("s7: Ctrl+O expands", screen_seen(raw, "expanded (Ctrl+O folds back)"))
+check("s7: long output folded with hidden count", screen_seen(raw, "+112 lines"))
+check("s7: Ctrl+O opens read-only expansion", screen_seen(raw, "expanded output"))
 
 # ---- scenario 7b: user-requested listings never fold ----
 # /skills list is a direct answer the user asked to read; unlike shell/tool
@@ -351,11 +350,10 @@ out = run_pty(
 )
 check("s9: no panic under mouse events", "panicked" not in strip_ansi(out))
 
-# ---- scenario 10: app-server true streaming (user story: 单轮问答也流式) ----
-# Default-on streaming: the reply must stream token-by-token straight
-# into the transcript (status bar reads "streaming (app-server)"), not land in
-# one block at the end. Needs the real kernel + model.
-print("== scenario 10: app-server streaming (opt-in) ==", flush=True)
+# ---- scenario 10: default app-server streaming (user story: 单轮问答也流式) ----
+# The reply must appear incrementally in the live viewport before its completed
+# phase is committed to terminal scrollback. Needs the real kernel + model.
+print("== scenario 10: default app-server streaming ==", flush=True)
 out = run_pty(
     {}, SPIKE,
     [
@@ -435,7 +433,7 @@ plain = strip_ansi(out)
 raw = run_pty.last_raw
 check("s12: tool call persisted to transcript",
       screen_seen(raw, "• Read") or screen_seen(raw, "• Bash"))
-check("s12: long tool output folded with Ctrl+O", "Ctrl+O" in plain and "lines" in plain)
+check("s12: long tool output folded", "lines" in plain)
 # Status-bar text: pyte screen check (diff rendering; see screen_seen).
 check("s12: turn finalized (no hang)", screen_seen(raw, "done ("))
 

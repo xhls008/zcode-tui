@@ -1334,22 +1334,20 @@ fn fold_preview_thresholds() {
 }
 
 #[test]
-fn ui_config_parses_colors_and_mouse_ignoring_junk() {
+fn ui_config_parses_colors_and_notify_ignoring_junk() {
     let config = parse_ui_config(
         "# comment\n\
          accent = #ff8800\n\
-         brand=#B26CC4\n\
          accent = 不是颜色\n\
          unknown_key = #112233\n\
-         mouse = off\n\
-         mouse = maybe\n\
+         notify = off\n\
+         notify = maybe\n\
          no equals sign here\n",
     );
     // A later malformed value must not clobber an earlier good one.
     assert_eq!(config.colors.get("accent"), Some(&(0xff, 0x88, 0x00)));
-    assert_eq!(config.colors.get("brand"), Some(&(0xb2, 0x6c, 0xc4)));
     assert!(!config.colors.contains_key("unknown_key"));
-    assert_eq!(config.mouse, Some(false));
+    assert_eq!(config.notify, Some(false));
 
     assert_eq!(parse_ui_config(""), zcode_tui::UiConfig::default());
     assert_eq!(parse_hex_color("#12345"), None);
