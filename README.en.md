@@ -6,7 +6,7 @@
 
 > v0.5.4 captured from the real TUI on ZCode 3.5.3 / CLI kernel 0.15.2,
 > Linux x86_64.
-> The current source is also verified against ZCode 3.7.7 / CLI kernel 0.16.3.
+> The current source is also verified against ZCode 3.8.1 / CLI kernel 0.16.3.
 
 > **Unofficial notice**: `zcode-tui` is not an official ZCode / Zhipu project
 > and is not endorsed by ZCode or Zhipu. It is a community/personal Linux
@@ -27,11 +27,11 @@ handled locally.
 
 | Component | Current version / status |
 |---|---|
-| ZCode Linux x64 desktop | **3.7.7** (official feed, released 2026-08-14) |
-| Official CLI kernel | **0.16.3** (bundled with ZCode 3.7.7) |
-| zcode-tui | **0.5.5** (unreleased) |
-| Protocol compatibility | 3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 105/105 Rust tests; targeted real 3.7.6/3.7.7 PTY checks; Clippy and release build |
+| ZCode Linux x64 desktop | **3.8.1** (official feed) |
+| Official CLI kernel | **0.16.3** (bundled with ZCode 3.8.1) |
+| zcode-tui | **0.5.5** |
+| Protocol compatibility | 3.8.1/3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
+| Current source verification | 106/106 Rust tests; targeted real 3.7.6/3.7.7 PTY checks; Clippy and release build |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -184,6 +184,17 @@ for details.
 
 Recommended for SSH servers and machines without a Rust toolchain.
 
+Each [GitHub Release](https://github.com/xhls008/zcode-tui/releases) contains:
+
+| Platform | Release asset |
+|---|---|
+| Linux x86_64 | `zcode-tui-x86_64-unknown-linux-musl` (statically linked) |
+| Windows x86_64 | `zcode-tui-x86_64-pc-windows-msvc.exe` |
+| macOS Intel | `zcode-tui-x86_64-apple-darwin` |
+| macOS Apple Silicon | `zcode-tui-aarch64-apple-darwin` |
+
+Linux installation:
+
 ```bash
 mkdir -p ~/.local/bin
 curl -fL -o ~/.local/bin/zcode-tui \
@@ -197,6 +208,12 @@ If you also want the `zcode` wrapper:
 curl -fLO https://github.com/xhls008/zcode-tui/releases/latest/download/install.sh
 bash install.sh --no-build
 ```
+
+On macOS, download the asset matching the machine architecture, save it as
+`zcode-tui`, and run `chmod +x zcode-tui`. On Windows, download the `.exe`.
+Both platforms need a `zcode` command that can invoke the official kernel on
+`PATH`, or an explicit `ZCODE_TUI_ZCODE_BIN`. `install.sh` and the built-in
+`/update` command remain Linux-only.
 
 > **macOS auth and model configuration:** with ZCode 3.8.1 / CLI 0.16.3,
 > upstream `zcode login` OAuth may still fail with

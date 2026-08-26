@@ -8,16 +8,10 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install musl toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-          rustup target add x86_64-unknown-linux-musl
 
       - name: Quality gates
         run: |
@@ -25,20 +19,78 @@ jobs:
           cargo clippy --all-targets --all-features -- -D warnings
           cargo test --locked
 
-      - name: Build static binary
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+  build:
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            source: target/x86_64-unknown-linux-musl/release/zcode-tui
+            asset: zcode-tui-x86_64-unknown-linux-musl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            source: target/x86_64-pc-windows-msvc/release/zcode-tui.exe
+            asset: zcode-tui-x86_64-pc-windows-msvc.exe
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            source: target/x86_64-apple-darwin/release/zcode-tui
+            asset: zcode-tui-x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            source: target/aarch64-apple-darwin/release/zcode-tui
+            asset: zcode-tui-aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Package
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install musl toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
-          BIN=zcode-tui-x86_64-unknown-linux-musl
-          cp target/x86_64-unknown-linux-musl/release/zcode-tui "$BIN"
-          sha256sum "$BIN" install.sh > SHA256SUMS
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Name release asset
+        shell: bash
+        run: cp "${{ matrix.source }}" "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+
+      - name: Package release
+        run: |
+          cp install.sh dist/
+          cd dist
+          sha256sum zcode-tui-* install.sh > SHA256SUMS
+
           VERSION="${GITHUB_REF_NAME#v}"
           awk -v ver="$VERSION" '
             $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
             grab && /^## \[/ { exit }
             grab { print }
-          ' CHANGELOG.md > RELEASE_NOTES.md
+          ' ../CHANGELOG.md > RELEASE_NOTES.md
           if ! [ -s RELEASE_NOTES.md ]; then
             echo "See CHANGELOG.md." > RELEASE_NOTES.md
           fi
@@ -49,5 +101,5 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "zcode-tui $GITHUB_REF_NAME" \
-            --notes-file RELEASE_NOTES.md \
-            zcode-tui-x86_64-unknown-linux-musl SHA256SUMS install.sh
+            --notes-file dist/RELEASE_NOTES.md \
+            dist/zcode-tui-* dist/SHA256SUMS dist/install.sh

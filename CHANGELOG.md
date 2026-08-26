@@ -1,10 +1,16 @@
 # Changelog
 
 每个版本都会发布对应的 GitHub Release：打 `v*` tag 后 CI 跑全部质量门禁，
-构建 x86_64-musl 静态 Linux 二进制（无需 Rust 工具链即可使用），连同
-SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版本段。
+构建 Linux x86_64-musl、Windows x86_64、macOS Intel/Apple Silicon 二进制，
+连同 SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版本段。
 
-## [Unreleased]
+## [0.5.5] - 2026-08-26
+
+### 新增
+
+- **Windows 与 macOS Release**:tag 发布改为质量门禁、四目标原生构建、统一
+  Release 三阶段；新增 Windows x86_64、macOS Intel 与 macOS Apple Silicon
+  二进制，保留 Linux x86_64-musl 静态版本，并为所有产物统一生成 SHA256SUMS。
 
 ### 修复
 
@@ -32,7 +38,7 @@ SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版�
   一致；CLI kernel 都为 `0.16.3`，Linux 包仍缺 `@zcode/tui`。真实 3.7.6
   与 3.7.7 临时工作区 PTY 中运行偏好请求均成功应答，legacy 正文流、V4
   subscribe、`text_delta` 与 `prompt_completed` 全部通过且无 downgrade。
-  Rust 105/105、PTY 83/83、Clippy 零告警、原生/musl release 构建与 shell
+  Rust 106/106、PTY 83/83、Clippy 零告警、原生/musl release 构建与 shell
   syntax check 通过。
 
 ## [0.5.4] - 2026-07-30

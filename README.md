@@ -5,7 +5,7 @@
 ![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
 
 > v0.5.4 实机截图：ZCode 3.5.3 / CLI kernel 0.15.2，Linux x86_64。
-> 当前源码另已实测适配 ZCode 3.7.7 / CLI kernel 0.16.3。
+> 当前源码另已实测适配 ZCode 3.8.1 / CLI kernel 0.16.3。
 
 > **非官方声明**：`zcode-tui` 不是 ZCode / 智谱官方项目，也未获得官方背书。
 > 它是社区/个人维护的 Linux 终端 fallback，用来补齐官方包当前缺失的 TUI 体验。
@@ -21,11 +21,11 @@ shell escape、命令面板、会话选择、流式输出和编辑器工作流�
 
 | 组件 | 当前版本 / 状态 |
 |---|---|
-| ZCode Linux x64 桌面包 | **3.7.7**（官方 feed，2026-08-14 发布） |
-| 官方 CLI kernel | **0.16.3**（随 ZCode 3.7.7） |
-| zcode-tui | **0.5.5**（待发布） |
-| 协议兼容 | 3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 单测 105/105；真实 3.7.6/3.7.7 定向 PTY；Clippy / release 构建 |
+| ZCode Linux x64 桌面包 | **3.8.1**（官方 feed） |
+| 官方 CLI kernel | **0.16.3**（随 ZCode 3.8.1，版本未变） |
+| zcode-tui | **0.5.5** |
+| 协议兼容 | 3.8.1/3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
+| 当前源码验证 | 3.8.1 app-server 握手和 TUI 启停正常；Rust 单测 106/106；真实 3.7.6/3.7.7 定向 PTY；Clippy / release 构建 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -199,7 +199,17 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 **方式一：下载 Release 二进制（SSH 服务器推荐，无需 Rust 工具链）**
 
 每个版本都会发布 [GitHub Release](https://github.com/xhls008/zcode-tui/releases)，
-附带静态链接的 Linux x86_64 二进制（musl，任何发行版开箱可用）和校验和：
+附带 Linux x86_64、Windows x86_64、macOS Intel 和 macOS Apple Silicon
+二进制及统一的 `SHA256SUMS`：
+
+| 平台 | Release 文件 |
+|---|---|
+| Linux x86_64 | `zcode-tui-x86_64-unknown-linux-musl`（静态链接） |
+| Windows x86_64 | `zcode-tui-x86_64-pc-windows-msvc.exe` |
+| macOS Intel | `zcode-tui-x86_64-apple-darwin` |
+| macOS Apple Silicon | `zcode-tui-aarch64-apple-darwin` |
+
+Linux 安装：
 
 ```bash
 mkdir -p ~/.local/bin
@@ -215,6 +225,11 @@ chmod +x ~/.local/bin/zcode-tui
 curl -fLO https://github.com/xhls008/zcode-tui/releases/latest/download/install.sh
 bash install.sh --no-build
 ```
+
+macOS 下载与当前机器架构对应的文件，保存为 `zcode-tui` 后执行
+`chmod +x zcode-tui`。Windows 直接下载 `.exe`。两者都需要让可调用官方内核的
+`zcode` 命令位于 `PATH`，或通过 `ZCODE_TUI_ZCODE_BIN` 指定；`install.sh` 及
+内置 `/update` 仍只适用于 Linux。
 
 > **macOS 授权与模型配置**：ZCode 3.8.1 / CLI 0.16.3 的官方
 > `zcode login` OAuth 路径仍可能返回 `OAuth response is not valid JSON`；这是

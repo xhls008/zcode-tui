@@ -3781,7 +3781,7 @@ pub fn mcp_servers_param(project: &McpConfig, user: &McpConfig) -> Option<serde_
 /// caller resumes without it and relies on the create-fallback path.
 pub fn build_runtime_model(config_json: &str, generated_at: u64) -> Option<serde_json::Value> {
     let config: serde_json::Value = serde_json::from_str(config_json).ok()?;
-    // `model.main` is "provider/modelId".
+    // Selected model is either `model.main` or a root `model` string.
     let main = config
         .pointer("/model/main")
         .and_then(|v| v.as_str())
