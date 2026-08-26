@@ -697,6 +697,16 @@ struct AppTurn {
     send_id: u64,
 }
 
+/// A background task observed through the kernel's lifecycle-only events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackgroundTask {
+    id: String,
+    tool: String,
+    status: String,
+    pid: Option<u64>,
+    command: Option<String>,
+}
+
 /// A non-blocking `session/create` → `session/subscribe` handshake in flight.
 /// Driven off the main loop so the UI keeps rendering (and Esc keeps working)
 /// instead of freezing on two synchronous 20s blocking calls.
@@ -766,6 +776,9 @@ struct UiState {
     tick: usize,
     /// /sessions picker overlay: rows + selected index.
     session_picker: Option<(Vec<SessionRow>, usize)>,
+    /// Background tasks observed in the current session + /agents selection.
+    background_tasks: Vec<BackgroundTask>,
+    background_task_picker: Option<usize>,
     /// /model picker overlay: selected index into `controls.models`.
     model_picker: Option<usize>,
     /// Model selected before the first app-server session exists. Applied
@@ -953,6 +966,8 @@ impl UiState {
             queued: VecDeque::new(),
             tick: 0,
             session_picker: None,
+            background_tasks: Vec::new(),
+            background_task_picker: None,
             model_picker: None,
             pending_model: None,
             model_provider: None,
@@ -1289,6 +1304,10 @@ impl UiState {
         if self.interaction.is_some() {
             return self.handle_interaction_key(key);
         }
+        if self.background_task_picker.is_some() {
+            self.handle_background_task_key(key);
+            return None;
+        }
         if self.expanded_log.is_some() {
             self.handle_expanded_log_key(key);
             return None;
@@ -1566,6 +1585,10 @@ impl UiState {
             Some("login") => return Some(UiEffect::Login),
             Some("sessions") => {
                 self.open_session_picker();
+                return None;
+            }
+            Some("agents") => {
+                self.open_background_tasks();
                 return None;
             }
             Some("diff") => {
@@ -2426,6 +2449,7 @@ fi"#
                             | "background_task_updated"
                             | "background_task_completed"
                     ) {
+                        self.capture_background_task_event(&event);
                         self.log.push(LogLine::new(
                             LogKind::System,
                             &format_background_task(&event),
@@ -2737,7 +2761,10 @@ fi"#
                 // Idle events matter to /rewind: the kernel runs a rewind as
                 // a synthetic turn (turn.started → rewind.triggered →
                 // turn.completed) outside any prompt of ours.
-                AppServerMessage::Event(event) => self.capture_rewind_event(&event),
+                AppServerMessage::Event(event) => {
+                    self.capture_rewind_event(&event);
+                    self.capture_background_task_event(&event);
+                }
                 AppServerMessage::Other => {}
             }
         }
@@ -2771,6 +2798,59 @@ fi"#
                 self.rewind_trigger = Some((strategy, reason));
             }
             _ => {}
+        }
+    }
+
+    /// Cache the latest lifecycle state for the read-only /agents overlay.
+    fn capture_background_task_event(&mut self, event: &AppServerEvent) {
+        if !matches!(
+            event.kind.as_str(),
+            "background_task_started" | "background_task_updated" | "background_task_completed"
+        ) {
+            return;
+        }
+        let Some(id) = event.task_id.as_ref().or(event.tool_call_id.as_ref()) else {
+            return;
+        };
+        let fallback_status = match event.kind.as_str() {
+            "background_task_started" => "running",
+            "background_task_completed" => "completed",
+            _ => "updated",
+        };
+        if let Some(task) = self.background_tasks.iter_mut().find(|task| task.id == *id) {
+            task.status = event
+                .status
+                .clone()
+                .unwrap_or_else(|| fallback_status.to_string());
+            if let Some(tool) = &event.tool_name {
+                task.tool.clone_from(tool);
+            }
+            if event.pid.is_some() {
+                task.pid = event.pid;
+            }
+            if event.command.is_some() {
+                task.command.clone_from(&event.command);
+            }
+        } else {
+            self.background_tasks.insert(
+                0,
+                BackgroundTask {
+                    id: id.clone(),
+                    tool: event
+                        .tool_name
+                        .clone()
+                        .unwrap_or_else(|| "task".to_string()),
+                    status: event
+                        .status
+                        .clone()
+                        .unwrap_or_else(|| fallback_status.to_string()),
+                    pid: event.pid,
+                    command: event.command.clone(),
+                },
+            );
+        }
+        if let Some(index) = &mut self.background_task_picker {
+            *index = (*index).min(self.background_tasks.len().saturating_sub(1));
         }
     }
 
@@ -3991,6 +4071,43 @@ fi"#
         self.v4_mode = V4Mode::Unknown;
         self.v4_state = V4ConversationState::default();
         self.pending_v4_steers.clear();
+        self.background_tasks.clear();
+        self.background_task_picker = None;
+    }
+
+    fn open_background_tasks(&mut self) {
+        if self.background_tasks.is_empty() {
+            self.push_system("no background tasks observed in this session");
+            return;
+        }
+        self.background_task_picker = Some(0);
+        self.show_palette = false;
+        self.show_help = false;
+        self.status = "background tasks: ↑↓ select · Esc close (read-only)".to_string();
+    }
+
+    fn handle_background_task_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.background_task_picker = None;
+                self.status = "background task list closed".to_string();
+            }
+            KeyCode::Up => {
+                if let Some(index) = &mut self.background_task_picker {
+                    *index = index.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(index) = &mut self.background_task_picker {
+                    *index = (*index + 1).min(self.background_tasks.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Home => self.background_task_picker = Some(0),
+            KeyCode::End => {
+                self.background_task_picker = Some(self.background_tasks.len().saturating_sub(1));
+            }
+            _ => {}
+        }
     }
 
     fn handle_session_picker_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
@@ -4800,6 +4917,9 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     }
     if state.session_picker.is_some() {
         render_session_picker(frame, centered_rect(84, 60, root), state);
+    }
+    if state.background_task_picker.is_some() {
+        render_background_tasks(frame, centered_rect(92, 90, root), state);
     }
     if state.model_picker.is_some() {
         render_model_picker(frame, centered_rect(64, 46, root), state);
@@ -6157,6 +6277,88 @@ fn render_session_picker(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     );
 }
 
+fn render_background_tasks(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    let Some(selected) = state.background_task_picker else {
+        return;
+    };
+    let t = &state.theme;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(t.frame())
+        .title(Line::from(Span::styled(
+            " agents · observed lifecycle · ↑↓ selects · Esc closes ".to_string(),
+            t.dim(),
+        )));
+    let inner = block.inner(area);
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .split(inner);
+    let items = state
+        .background_tasks
+        .iter()
+        .map(|task| {
+            let status = task.status.to_ascii_lowercase();
+            let (symbol, style) = if status == "running" || status == "started" {
+                ("●", t.accent())
+            } else if status == "completed" || status == "success" {
+                ("✓", t.good())
+            } else if status.contains("fail") || status == "lost" {
+                ("✗", t.bad())
+            } else {
+                ("·", t.dim())
+            };
+            let short_id: String = task.id.chars().take(18).collect();
+            let pid = task.pid.map(|pid| format!("pid {pid}")).unwrap_or_default();
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{symbol} {:<10}", task.status), style),
+                Span::styled(format!("{:<14}", task.tool), t.text()),
+                Span::styled(format!("{short_id:<20}"), t.dim()),
+                Span::styled(pid, t.dim()),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    let selected = selected.min(state.background_tasks.len().saturating_sub(1));
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_style(t.selection())
+            .highlight_symbol("› "),
+        parts[0],
+        &mut ListState::default().with_selected(Some(selected)),
+    );
+
+    if let Some(task) = state.background_tasks.get(selected) {
+        let command = task
+            .command
+            .as_deref()
+            .unwrap_or("(not provided by kernel)");
+        let command = command.replace(['\r', '\n'], " ");
+        let command: String = command.chars().take(120).collect();
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled("task: ".to_string(), t.dim()),
+                    Span::styled(task.id.clone(), t.text()),
+                ]),
+                Line::from(vec![
+                    Span::styled("command: ".to_string(), t.dim()),
+                    Span::styled(command, t.text()),
+                ]),
+                Line::from(Span::styled(
+                    "read-only: kernel exposes lifecycle events, not task logs or controls"
+                        .to_string(),
+                    t.dim(),
+                )),
+            ])
+            .wrap(Wrap { trim: false }),
+            parts[1],
+        );
+    }
+}
+
 fn render_history_search(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     let t = &state.theme;
     let Some((query, index)) = &state.history_query else {
@@ -6349,6 +6551,39 @@ mod tests {
 
         state.finalize_app_turn();
         assert_eq!(state.committable_log_end(), 3);
+    }
+
+    #[test]
+    fn background_task_events_update_the_read_only_task_list() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.capture_background_task_event(&AppServerEvent {
+            kind: "background_task_started".to_string(),
+            task_id: Some("bg-1".to_string()),
+            tool_name: Some("Bash".to_string()),
+            command: Some("sleep 12".to_string()),
+            pid: Some(4242),
+            ..Default::default()
+        });
+        state.capture_background_task_event(&AppServerEvent {
+            kind: "background_task_completed".to_string(),
+            task_id: Some("bg-1".to_string()),
+            status: Some("completed".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(state.background_tasks.len(), 1);
+        assert_eq!(state.background_tasks[0].status, "completed");
+        assert_eq!(state.background_tasks[0].pid, Some(4242));
+        assert_eq!(
+            state.background_tasks[0].command.as_deref(),
+            Some("sleep 12")
+        );
+
+        state.open_background_tasks();
+        assert_eq!(state.background_task_picker, Some(0));
+        state.reset_rewind_state();
+        assert!(state.background_tasks.is_empty());
+        assert_eq!(state.background_task_picker, None);
     }
 
     #[test]

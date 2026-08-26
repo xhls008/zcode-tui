@@ -255,6 +255,10 @@ fn classify_auth_commands_as_local() {
         classify_input("/status").unwrap(),
         InputAction::Local(vec!["status".into()])
     );
+    assert_eq!(
+        classify_input("/agents").unwrap(),
+        InputAction::Local(vec!["agents".into()])
+    );
 }
 
 #[test]
@@ -312,6 +316,7 @@ fn command_palette_exposes_common_commands() {
     assert!(rows.iter().any(|row| row.contains("/skills list")));
     assert!(rows.iter().any(|row| row.contains("/login")));
     assert!(rows.iter().any(|row| row.contains("/usage")));
+    assert!(rows.iter().any(|row| row.contains("/agents")));
     assert!(rows.iter().any(|row| row.contains("/update")));
     assert!(rows.iter().any(|row| row.contains("! <cmd>")));
 }

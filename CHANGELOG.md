@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **只读 `/agents` 后台任务面板**：缓存当前 session 收到的
+  `background_task_started/updated/completed` 事件，展示状态、工具名、task ID、
+  PID 与内核提供的命令；支持上下选择查看详情，并明确标注内核尚未提供任务日志、
+  创建、定向消息或单任务控制接口。idle 阶段到达的后台任务事件也不再被忽略。
+
 ## [0.6.0] - 2026-08-26
 
 ### 优化

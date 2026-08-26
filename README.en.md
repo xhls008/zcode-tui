@@ -154,6 +154,9 @@ for details.
   path traversal and symlink escapes.
 - Persistent prompt history from the ZCode kernel database, plus Ctrl+R reverse
   search.
+- `/agents` shows a read-only list of `background_task_*` lifecycle events
+  observed in the current session: status, tool, task ID, PID, and command.
+  The UI does not invent task logs or controls that the kernel does not expose.
 - The TUI uses a normal-screen Ratatui inline viewport. Completed phases append
   to terminal scrollback in chronological order; only unfinished thinking
   state and the composer remain in the viewport. Mouse capture is
@@ -316,6 +319,7 @@ text                         send through app-server (fallback: --prompt)
 /auth                        show local auth status
 /status                      show session, auth, and MCP overview
 /sessions                    open recent session picker
+/agents                      show observed background tasks (read-only)
 /mcp list                    list project and user MCP servers
 /mcp add <name> <cmd> [args] add stdio MCP server
 /mcp add --transport http|sse <name> <url>

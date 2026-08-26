@@ -601,7 +601,7 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
         "exit" | "quit" => Ok(InputAction::Quit),
         "help" | "clear" | "editor" | "login" | "logout" | "auth" | "status" | "diff" | "ide"
         | "sessions" | "mode" | "resume" | "new" | "model" | "think" | "compact" | "usage"
-        | "update" | "copy" | "rewind" => Ok(InputAction::Local(parts)),
+        | "update" | "copy" | "rewind" | "agents" => Ok(InputAction::Local(parts)),
         "skills" => {
             let mut local = parts;
             if local.len() == 1 {
@@ -721,6 +721,11 @@ pub fn command_catalog() -> &'static [CommandSpec] {
         CommandSpec {
             command: "/sessions",
             summary: "pick a recent kernel session to resume",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/agents",
+            summary: "show background tasks observed in this session",
             route: "local",
         },
         CommandSpec {
@@ -1590,6 +1595,7 @@ launch options:
                                clipboard (OSC52; tmux needs set-clipboard on)
   /resume [sess_id]            resume latest (bare) or a specific session
   /sessions                    pick a recent session from a list
+  /agents                      show observed background tasks (read-only)
   /new                         start a fresh session; context resets
   /editor                      edit current prompt in $VISUAL or $EDITOR
   /clear                       clear this screen

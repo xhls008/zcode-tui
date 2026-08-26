@@ -98,6 +98,9 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   内核边跑边写），工作区实时显示工具 chip（运行中 spinner → 完成 ✓ + 耗时 /
   失败 ✗）和最新 reasoning；仅运行时显示、结束即清场；schema 不识别或库缺失
   时整组自动降级。
+- **后台任务观察**：`/agents` 以只读浮层汇总本 session 收到的
+  `background_task_*` 生命周期事件，可查看状态、工具名、task ID、PID 和命令。
+  内核未提供任务日志、创建、定向消息或单任务取消接口，因此界面不虚构这些操作。
 - **阶段流式（默认开启）**：接内核 `zcode app-server`
   协议（`session/create → subscribe → send`），助手正文经 `session/event`
   的 `text_delta` 累积；工具开始时冻结并追加前一段正文，工具完成时追加结果，
@@ -386,6 +389,7 @@ text                         通过 app-server 发送 prompt（不可用时回�
 /resume [sess_id]            恢复最近（不带参数）或指定会话；流式路径续接
                              后回放最近对话
 /sessions                    浮层选择最近会话并接续
+/agents                      查看本 session 观察到的后台任务（只读）
 /new                         重开会话，上下文重置
 /diff [args]                 git diff 语法着色（--staged、路径等）
 /ide [path]                  在 IDE 中打开 cwd 或指定路径
