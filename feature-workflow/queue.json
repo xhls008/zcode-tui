@@ -1,26 +1,11 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-26T14:43:37Z"
+    "last_updated": "2026-08-26T15:00:44Z"
   },
   "parents": [],
   "active": [],
   "pending": [
-    {
-      "id": "feat-tool-output-clarity",
-      "name": "Clear tool output without manual folding",
-      "description": "Keep the parent transcript concise with structured tool summaries while preserving diagnostics and all user-requested output.",
-      "priority": 100,
-      "workflow_mode": "deep",
-      "risk_signals": [
-        "multi_module",
-        "compatibility",
-        "parallel_split"
-      ],
-      "dependencies": [],
-      "status": "pending",
-      "created_at": "2026-08-26T14:43:35Z"
-    },
     {
       "id": "feat-tui-module-boundaries",
       "name": "Stable TUI module boundaries",
@@ -133,5 +118,46 @@
     }
   ],
   "blocked": [],
-  "completed": []
+  "completed": [
+    {
+      "id": "feat-tool-output-clarity",
+      "name": "Clear tool output without manual folding",
+      "status": "completed",
+      "completed_at": "2026-08-26T15:00:44Z",
+      "archive_path": "features/archive/done-feat-tool-output-clarity-20260826",
+      "tag": "feat-tool-output-clarity-20260826",
+      "merge_commit": "eaa16201c4bee7382cb7d8603ae63a27c635d893",
+      "workflow_mode": "deep",
+      "verification": {
+        "schema": "feature-verification/v1",
+        "feature_id": "feat-tool-output-clarity",
+        "status": "passed",
+        "verified_at": "2026-08-26T15:02:00Z",
+        "tasks": {
+          "total": 5,
+          "completed": 5,
+          "incomplete": 0
+        },
+        "quality": {
+          "status": "passed",
+          "passed": 3,
+          "failed": 0
+        },
+        "tests": {
+          "status": "passed",
+          "passed": 121,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scenarios": {
+          "total": 5,
+          "passed": 5,
+          "failed": 0
+        },
+        "blocking_failures": [],
+        "warnings": [],
+        "report": "features/active-feat-tool-output-clarity/evidence/verification-report.md"
+      }
+    }
+  ]
 }

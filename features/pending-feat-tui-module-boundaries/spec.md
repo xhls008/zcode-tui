@@ -19,6 +19,7 @@ Existing session, streaming, rewind, model, interaction, transcript, and renderi
 - Move protocol parsing and presentation projections toward independently testable pure functions.
 - Preserve classic fallback, app-server streaming, create/resume, rewind, model, interaction, and inline viewport behavior.
 - Do not create empty module trees before responsibilities are ready to move.
+- New cross-domain logic must land in its owning module; `main.rs` remains an entry point/event-loop shell and `lib.rs` exposes only deliberate reusable APIs.
 
 ## Acceptance scenarios
 
@@ -27,6 +28,7 @@ Existing session, streaming, rewind, model, interaction, transcript, and renderi
 3. Protocol parsing, agents reduction, and transcript projection have focused unit tests outside the main event loop.
 4. Rendering remains stable at 80 and 120 columns and after resize.
 5. Formatting, Clippy, tests, and release build pass.
+6. A checked-in responsibility map documents what moved out of `main.rs` and `lib.rs` and where future app, protocol, transcript, agents, and UI changes belong.
 
 ## Technical notes
 

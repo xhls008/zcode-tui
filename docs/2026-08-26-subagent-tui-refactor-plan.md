@@ -332,6 +332,8 @@ feat-tool-output-clarity
 ### PR 2：职责拆分
 
 - [x] 提取第一个 `agents` 领域模块，包含后台任务模型、事件归并和 Inspector 选择状态。
+- [ ] 先盘点 `src/main.rs` 与 `src/lib.rs` 的全部职责并建立 source-to-target 迁移表；后续新增逻辑必须进入对应领域模块，不能继续堆回两个主文件。
+- [ ] 将 `main.rs` 收敛为启动、终端生命周期和顶层事件循环，将 `lib.rs` 收敛为有意设计的可复用公共 API。
 - [ ] 继续提取 protocol、transcript、ui 和 app 状态模块。
 - 为 transcript entry 引入稳定 ID。
 - 保持现有交互和输出不变。

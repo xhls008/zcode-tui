@@ -1,0 +1,13 @@
+{
+  "schema": "feature-verification/v1",
+  "feature_id": "feat-tool-output-clarity",
+  "status": "passed",
+  "verified_at": "2026-08-26T15:02:00Z",
+  "tasks": {"total": 5, "completed": 5, "incomplete": 0},
+  "quality": {"status": "passed", "passed": 3, "failed": 0},
+  "tests": {"status": "passed", "passed": 121, "failed": 0, "skipped": 0},
+  "scenarios": {"total": 5, "passed": 5, "failed": 0},
+  "blocking_failures": [],
+  "warnings": [],
+  "report": "features/active-feat-tool-output-clarity/evidence/verification-report.md"
+}
