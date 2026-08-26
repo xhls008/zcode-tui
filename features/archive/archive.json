@@ -1,8 +1,8 @@
 {
   "schema": "feature-archive/v1",
   "meta": {
-    "last_updated": "2026-08-26T15:00:44Z",
-    "total_completed": 1
+    "last_updated": "2026-08-26T15:15:24Z",
+    "total_completed": 2
   },
   "records": [
     {
@@ -43,6 +43,46 @@
         "blocking_failures": [],
         "warnings": [],
         "report": "features/active-feat-tool-output-clarity/evidence/verification-report.md"
+      }
+    },
+    {
+      "id": "feat-tui-module-boundaries",
+      "name": "Stable TUI module boundaries",
+      "status": "completed",
+      "completed_at": "2026-08-26T15:15:24Z",
+      "archive_path": "features/archive/done-feat-tui-module-boundaries-20260826",
+      "tag": "feat-tui-module-boundaries-20260826",
+      "merge_commit": "ac384365d139902512214900a699aed218601d9f",
+      "workflow_mode": "deep",
+      "verification": {
+        "schema": "feature-verification/v1",
+        "feature_id": "feat-tui-module-boundaries",
+        "status": "passed",
+        "verified_at": "2026-08-26T15:18:00Z",
+        "tasks": {
+          "total": 8,
+          "completed": 8,
+          "incomplete": 0
+        },
+        "quality": {
+          "status": "passed",
+          "passed": 3,
+          "failed": 0
+        },
+        "tests": {
+          "status": "passed",
+          "passed": 122,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scenarios": {
+          "total": 5,
+          "passed": 5,
+          "failed": 0
+        },
+        "blocking_failures": [],
+        "warnings": [],
+        "report": "features/active-feat-tui-module-boundaries/evidence/verification-report.md"
       }
     }
   ]
