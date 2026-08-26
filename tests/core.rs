@@ -706,7 +706,10 @@ fn markdown_renders_headings_emphasis_and_code() {
     assert_eq!(lines[0].kind, MdLineKind::Heading);
     assert_eq!(lines[0].spans[0].text, "Title");
 
-    let body = &lines[1];
+    let body = lines
+        .iter()
+        .find(|line| line.spans.iter().any(|span| span.role == SpanRole::Strong))
+        .expect("strong body line");
     assert_eq!(body.spans[0].role, SpanRole::Strong);
     assert_eq!(body.spans[0].text, "bold");
     assert!(body
@@ -942,6 +945,10 @@ fn markdown_renders_lists_and_wraps() {
     let wrapped = markdown_lines("abcdefghij", 4);
     assert_eq!(wrapped.len(), 3);
     assert_eq!(wrapped[0].spans[0].text, "abcd");
+
+    let paragraphs = markdown_lines("first paragraph\n\nsecond paragraph", 80);
+    assert!(paragraphs[1].spans.is_empty());
+    assert_eq!(paragraphs[2].spans[0].text, "second paragraph");
 }
 
 #[test]

@@ -10,24 +10,19 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
 };
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear as TerminalClear, ClearType};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Widget, Wrap,
 };
-use ratatui::{Frame, Terminal};
-use ratatui_image::picker::{Picker, ProtocolType};
-use ratatui_image::protocol::StatefulProtocol;
-use ratatui_image::StatefulImage;
+use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zcode_tui::{
     app_close_params, app_compact_params, app_create_params, app_file_rewind_params,
@@ -50,9 +45,8 @@ use zcode_tui::{
     parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
     parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age,
     resolve_update_download_url, rewind_failure, run_command, select_update_feed_url, shorten_home,
-    skyline_braille, skyline_graphics_wanted, skyline_lines, skyline_mode,
-    slash_suggestions_merged, spawn_streaming_command, tool_input_summary, usage_stats_params,
-    user_mcp_config_path, v4_command_params, v4_conversation_subscribe_params,
+    skyline_mode, slash_suggestions_merged, spawn_streaming_command, tool_input_summary,
+    usage_stats_params, user_mcp_config_path, v4_command_params, v4_conversation_subscribe_params,
     v4_file_rewind_preview_params, v4_rewind_target, with_mcp_servers, with_tool_policy,
     wrap_display, zcode_app_version_from_path, AppConfig, AppServerConn, AppServerEvent,
     AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, CheckpointEntry, DbBaseline,
@@ -60,7 +54,6 @@ use zcode_tui::{
     LiveToolChip, MdLineKind, ModelChoice, RewindPreview, RewindTarget, SessionControls,
     SessionRow, SkylineMode, SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem,
     ToolChipStatus, TurnDelta, UiConfig, UpdateFeed, V4CommandBase, V4ConversationState,
-    SKYLINE_LOGO_W,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -80,6 +73,9 @@ const NOTIFY_AFTER_SECS: f32 = 30.0;
 /// Resume history replay: how many messages, and the per-message char cap.
 const REPLAY_LIMIT: usize = 6;
 const REPLAY_CAP: usize = 400;
+/// Avoid the terminal's last column: ambiguous-width glyphs and autowrap can
+/// otherwise leak one or two cells onto the next physical row at column zero.
+const TRANSCRIPT_RIGHT_GUTTER: usize = 2;
 
 fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()
@@ -100,15 +96,19 @@ const ZCODE_WORDMARK: &str = r#"███████╗  ██████╗ 
 ███████╗ ╚██████╗ ╚██████╔╝ ██████╔╝ ███████╗
 ╚══════╝  ╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝"#;
 
-/// The true ZCODE logo (清华紫 purple block letters + Beijing-landmark line art
-/// on the ZhiPU horizon), rendered via a terminal graphics protocol when
-/// available. 480×231 RGBA, transparent background, duotoned onto the brand
-/// purple so it matches the text wordmark. Falls back to the text skyline.
-const LOGO_PNG: &[u8] = include_bytes!("../assets/zcode-logo.png");
-/// Cell footprint reserved for the graphics logo. The 2.04:1 source is fit
-/// (aspect-preserving) into this box; ~2:1 cell aspect keeps margins small.
-const LOGO_IMG_ROWS: u16 = 14;
-const LOGO_IMG_COLS: u16 = 58;
+const LOGO_ROWS: u16 = 6;
+const MINI_Z_ICON: [&str; 8] = [
+    "╭──────────────╮",
+    "│███████████ ██│",
+    "│         ██   │",
+    "│       ██     │",
+    "│     ██       │",
+    "│   ██         │",
+    "│██ ███████████│",
+    "╰──────────────╯",
+];
+/// Bottom live viewport; completed transcript lives above in scrollback.
+const INLINE_VIEWPORT_ROWS: u16 = 10;
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -128,10 +128,7 @@ fn main() -> Result<()> {
 
 fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
     let mut state = UiState::new(config, zcode_bin.to_string());
-    let mut terminal = TerminalGuard::enter(state.mouse_enabled)?;
-    // Probe for a graphics protocol now that the alt-screen is active and
-    // before the event loop reads stdin (ratatui-image queries via stdio).
-    state.init_graphics_logo();
+    let mut terminal = TerminalGuard::enter()?;
     state.push_startup_frame();
     let probe = spawn_startup_probe(zcode_bin.to_string(), state.app_workspace());
 
@@ -150,6 +147,7 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
         state.pump_app_idle();
         state.poll_live_progress();
         state.drain_queue();
+        terminal.flush_transcript(&mut state)?;
         terminal.draw(&mut state)?;
 
         if !event::poll(Duration::from_millis(80))? {
@@ -165,15 +163,7 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
             Event::Paste(text) => {
                 state.insert_text(&text.replace("\r\n", "\n").replace('\r', "\n"));
             }
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    state.scroll = state.scroll.saturating_add(3);
-                }
-                MouseEventKind::ScrollDown => {
-                    state.scroll = state.scroll.saturating_sub(3);
-                }
-                _ => {}
-            },
+            Event::Resize(width, height) => terminal.resize(width, height)?,
             _ => {}
         }
     }
@@ -508,10 +498,6 @@ struct Theme {
     frame: Color,
     code_bg: Color,
     band_bg: Color,
-    /// Tsinghua purple, logo-only: never used on interactive elements, so
-    /// the GLM-blue single-accent discipline stays intact.
-    brand: Color,
-    brand_dim: Color,
 }
 
 impl Theme {
@@ -527,10 +513,6 @@ impl Theme {
             frame: Color::Rgb(56, 62, 78),
             code_bg: Color::Rgb(33, 38, 51),
             band_bg: Color::Rgb(48, 52, 63),
-            // 清华紫 #660874 as the shadow; a lightened variant carries the
-            // wordmark so it stays readable on dark terminals.
-            brand: Color::Rgb(178, 108, 196),
-            brand_dim: Color::Rgb(122, 42, 134),
         }
     }
 
@@ -568,14 +550,6 @@ impl Theme {
 
     fn frame(&self) -> Style {
         self.styled(self.frame)
-    }
-
-    fn brand(&self) -> Style {
-        self.styled(self.brand)
-    }
-
-    fn brand_dim(&self) -> Style {
-        self.styled(self.brand_dim)
     }
 
     fn code(&self) -> Style {
@@ -619,8 +593,6 @@ impl Theme {
                 "frame" => self.frame = color,
                 "code_bg" => self.code_bg = color,
                 "band_bg" => self.band_bg = color,
-                "brand" => self.brand = color,
-                "brand_dim" => self.brand_dim = color,
                 _ => {}
             }
         }
@@ -704,12 +676,13 @@ enum V4Mode {
     Unavailable,
 }
 
-/// A single in-flight app-server turn. Answer text streams into an assistant
-/// transcript entry token by token; running tools show as live chips and drop
-/// into the transcript (foldable) as they finish, so text and tools interleave
-/// in chronological order — the way Codex / Claude Code render a turn.
+/// A single in-flight app-server turn. The open text entry remains mutable;
+/// completed text phases and tool results advance `committable_end` and append
+/// to terminal scrollback without rewriting earlier rows.
 struct AppTurn {
     turn: AppServerTurn,
+    /// Exclusive end of the immutable prefix that may enter scrollback.
+    committable_end: usize,
     /// The open assistant text entry, or None between text runs (e.g. right
     /// after a tool landed, before the next text token). Created lazily.
     text_index: Option<usize>,
@@ -783,7 +756,6 @@ struct UiState {
     cursor: usize,
     history: Vec<String>,
     history_index: Option<usize>,
-    scroll: u16,
     status: String,
     auth_label: String,
     show_help: bool,
@@ -811,7 +783,13 @@ struct UiState {
     /// Log indices the user expanded with Ctrl+O (folding is the default
     /// for long foldable cells).
     unfolded: HashSet<usize>,
-    mouse_enabled: bool,
+    /// A completed, scrollback-owned long entry shown in a read-only overlay.
+    /// Terminal scrollback is immutable, so Ctrl+O cannot redraw it in place.
+    expanded_log: Option<(usize, u16)>,
+    /// Number of log entries already committed to terminal scrollback.
+    flushed_log: usize,
+    /// Incremented by /clear so the inline terminal purges its scrollback.
+    clear_generation: u64,
     /// App-server streaming path (default-on, seamless fallback).
     app_mode: AppMode,
     app_conn: Option<AppServerConn>,
@@ -826,15 +804,8 @@ struct UiState {
     v4_command_seq: u64,
     pending_v4_steers: HashMap<String, String>,
     app_turn: Option<AppTurn>,
-    /// Welcome-skyline renderer (braille / wireframe / off), resolved once.
+    /// Welcome wordmark visibility; `off` suppresses the ASCII logo.
     skyline_mode: SkylineMode,
-    /// Whether to attempt the true graphics-protocol logo before falling back
-    /// to `skyline_mode`. Set from env; the actual capability probe runs once
-    /// after entering the alt-screen (`init_graphics_logo`).
-    skyline_graphics: bool,
-    /// The decoded logo bound to a live graphics protocol (Sixel/Kitty/iTerm2)
-    /// once the probe confirms support; `None` keeps the text skyline.
-    graphics_logo: Option<StatefulProtocol>,
     /// Non-blocking create+subscribe handshake in flight (first prompt of a run).
     app_connect: Option<AppConnect>,
     /// After an Esc-cancel the reused session keeps emitting the stopped turn's
@@ -953,8 +924,6 @@ impl UiState {
         let auth_label = auth_status.short_label();
         let plain = config.no_color || env::var_os("NO_COLOR").is_some();
         let ui_config = load_ui_config();
-        let mouse_enabled =
-            env::var_os("ZCODE_TUI_NO_MOUSE").is_none() && ui_config.mouse != Some(false);
         let notify_enabled = ui_config.notify != Some(false);
         let app_mode = if app_server_enabled(|key| env::var(key).ok()) {
             AppMode::Ready
@@ -975,7 +944,6 @@ impl UiState {
             cursor: 0,
             history: Vec::new(),
             history_index: None,
-            scroll: 0,
             status: "ready".to_string(),
             auth_label,
             show_help: false,
@@ -994,7 +962,9 @@ impl UiState {
             model_provider: None,
             history_query: None,
             unfolded: HashSet::new(),
-            mouse_enabled,
+            expanded_log: None,
+            flushed_log: 0,
+            clear_generation: 0,
             app_mode,
             app_conn: None,
             app_session: None,
@@ -1005,8 +975,6 @@ impl UiState {
             pending_v4_steers: HashMap::new(),
             app_turn: None,
             skyline_mode: skyline_mode(|key| env::var(key).ok()),
-            skyline_graphics: skyline_graphics_wanted(|key| env::var(key).ok()),
-            graphics_logo: None,
             app_connect: None,
             app_draining: None,
             interaction: None,
@@ -1030,6 +998,18 @@ impl UiState {
         if let Some(log) = &self.debug_log {
             log.line(text);
         }
+    }
+
+    /// Prefix of immutable transcript entries that can move into scrollback.
+    fn committable_log_end(&self) -> usize {
+        let mut end = self.log.len();
+        if let Some(active) = &self.job {
+            end = end.min(active.log_index);
+        }
+        if let Some(turn) = &self.app_turn {
+            end = end.min(turn.committable_end);
+        }
+        end.max(self.flushed_log)
     }
 
     fn next_v4_command_id(&mut self, kind: &str) -> String {
@@ -1081,29 +1061,6 @@ impl UiState {
         self.log_debug(&format!(
             "v4 steer command={command_id} delivery={delivery}"
         ));
-        self.scroll = 0;
-    }
-
-    /// Probe the terminal for a graphics protocol and, if one is available,
-    /// decode the embedded logo into a resize protocol. Call once after the
-    /// alt-screen is active and before reading events (per ratatui-image). Any
-    /// failure — probe error, no real protocol, decode error — leaves
-    /// `graphics_logo` as `None`, so the text skyline renders instead.
-    fn init_graphics_logo(&mut self) {
-        if !self.skyline_graphics {
-            return;
-        }
-        let Ok(picker) = Picker::from_query_stdio() else {
-            return;
-        };
-        // Halfblocks is the no-graphics-protocol fallback; prefer our own
-        // braille/wire skyline over ratatui-image's half-block cells.
-        if picker.protocol_type() == ProtocolType::Halfblocks {
-            return;
-        }
-        if let Ok(img) = image::load_from_memory(LOGO_PNG) {
-            self.graphics_logo = Some(picker.new_resize_protocol(img));
-        }
     }
 
     /// Whether a job or an app-server turn (including the handshake before it,
@@ -1120,9 +1077,7 @@ impl UiState {
         self.auth_label = self.auth_status.short_label();
     }
 
-    /// Startup skeleton: a Kimi/Claude-style welcome card. Configured launches
-    /// keep the logo compact inside the card; unauthenticated launches append
-    /// the larger login guidance below it.
+    /// Startup skeleton: the official logo followed by a compact welcome card.
     fn push_startup_frame(&mut self) {
         self.push_banner();
         if !self.auth_status.is_configured() {
@@ -1130,24 +1085,11 @@ impl UiState {
         }
     }
 
-    fn push_brand_logo_if_missing(&mut self) {
-        if self
-            .log
-            .iter()
-            .any(|entry| matches!(entry.kind, LogKind::Brand | LogKind::Logo))
-        {
-            return;
-        }
-        self.log.push(LogLine::new(LogKind::Brand, ZCODE_WORDMARK));
-    }
-
-    /// Codex-style unauthenticated welcome: purple wordmark over the
-    /// skyline strip, then the three browser-free ways in.
+    /// Browser-free sign-in guidance appended to the welcome frame.
     fn push_unauth_screen_if_needed(&mut self) {
         if self.auth_status.is_configured() {
             return;
         }
-        self.push_brand_logo_if_missing();
         let headline = match &self.auth_status {
             AuthStatus::Partial { evidence } => format!(
                 "partially configured: {evidence} found, but the kernel still needs \
@@ -1351,6 +1293,10 @@ impl UiState {
         if self.interaction.is_some() {
             return self.handle_interaction_key(key);
         }
+        if self.expanded_log.is_some() {
+            self.handle_expanded_log_key(key);
+            return None;
+        }
         if self.model_picker.is_some() {
             return self.handle_model_picker_key(key);
         }
@@ -1476,18 +1422,6 @@ impl UiState {
                     self.recall_history(1);
                 }
             }
-            KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_add(6);
-                self.status = format!("scrollback +{}", self.scroll);
-            }
-            KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_sub(6);
-                self.status = if self.scroll == 0 {
-                    "following tail".to_string()
-                } else {
-                    format!("scrollback +{}", self.scroll)
-                };
-            }
             _ => {}
         }
         None
@@ -1556,7 +1490,9 @@ impl UiState {
         }
         self.log.clear();
         self.unfolded.clear();
-        self.scroll = 0;
+        self.expanded_log = None;
+        self.flushed_log = 0;
+        self.clear_generation = self.clear_generation.wrapping_add(1);
         self.push_startup_frame();
     }
 
@@ -1598,7 +1534,6 @@ impl UiState {
 
     fn submit_now(&mut self, input: &str) -> Option<UiEffect> {
         self.push_user(input);
-        self.scroll = 0;
 
         match classify_input(input) {
             Ok(InputAction::Prompt(prompt)) => self.start_prompt_job(&prompt),
@@ -1969,6 +1904,7 @@ impl UiState {
     fn begin_app_turn(&mut self, send_id: u64) {
         self.app_turn = Some(AppTurn {
             turn: AppServerTurn::default(),
+            committable_end: self.log.len(),
             text_index: None,
             written: 0,
             started: Instant::now(),
@@ -1976,7 +1912,6 @@ impl UiState {
             got_text: false,
             send_id,
         });
-        self.scroll = 0;
         self.status = "streaming (app-server)".to_string();
     }
 
@@ -2499,6 +2434,7 @@ fi"#
                             LogKind::System,
                             &format_background_task(&event),
                         ));
+                        self.app_commit_phase();
                         return;
                     }
                     let Some(turn) = &mut self.app_turn else {
@@ -2511,9 +2447,9 @@ fi"#
                             self.finalize_app_turn();
                             return;
                         }
-                        // ToolStarted shows only as a live chip; Reasoning/None
-                        // need no transcript change.
-                        TurnDelta::ToolStarted(_) | TurnDelta::Reasoning | TurnDelta::None => {}
+                        TurnDelta::ToolStarted(_) => self.app_commit_phase(),
+                        // Reasoning/None need no transcript change.
+                        TurnDelta::Reasoning | TurnDelta::None => {}
                     }
                 }
                 AppServerMessage::StateUpdated(params) => {
@@ -2605,7 +2541,16 @@ fi"#
             turn.written = full_len;
             turn.got_text |= non_empty;
         }
-        self.scroll = 0;
+    }
+
+    /// Freeze the current phase so its entries can append to scrollback. Any
+    /// later text delta opens a new entry and never mutates a flushed row.
+    fn app_commit_phase(&mut self) {
+        let end = self.log.len();
+        if let Some(turn) = &mut self.app_turn {
+            turn.text_index = None;
+            turn.committable_end = end;
+        }
     }
 
     /// Persist a finished tool call into the transcript as a foldable `Tool`
@@ -2644,10 +2589,7 @@ fi"#
             }
         };
         self.log.push(LogLine::new(LogKind::Tool, &text));
-        if let Some(turn) = &mut self.app_turn {
-            turn.text_index = None;
-        }
-        self.scroll = 0;
+        self.app_commit_phase();
     }
 
     /// The connection dropped while a turn was streaming. If nothing reached the
@@ -2759,7 +2701,6 @@ fi"#
         // A turn landed in a live kernel session: keep continuity by reusing
         // the same sessionId for later prompts (already stored in app_session).
         self.session_active = true;
-        self.scroll = 0;
     }
 
     /// Consume connection messages BETWEEN turns. Control echoes
@@ -3236,7 +3177,6 @@ fi"#
                         // Shell/diff jobs keep the merged live view.
                         self.append_job_text(&text);
                     }
-                    self.scroll = 0;
                 }
                 Ok(JobEvent::Eof) => {
                     if let Some(active) = &mut self.job {
@@ -3566,7 +3506,6 @@ fi"#
         }
         self.push_user(content);
         self.push_system("↪ steering the running turn");
-        self.scroll = 0;
         self.status = "steering (app-server)".to_string();
         self.send_control(
             "session/steer",
@@ -4194,6 +4133,10 @@ fi"#
     /// Toggle the most recent foldable over-threshold cell between the
     /// folded preview and the full text.
     fn toggle_fold(&mut self) {
+        if self.expanded_log.take().is_some() {
+            self.status = "expanded output closed".to_string();
+            return;
+        }
         let target = self
             .log
             .iter()
@@ -4206,6 +4149,10 @@ fi"#
             })
             .map(|(index, _)| index);
         match target {
+            Some(index) if index < self.flushed_log => {
+                self.expanded_log = Some((index, 0));
+                self.status = "expanded output: ↑↓/PageUp/PageDown scroll · Esc closes".to_string();
+            }
             Some(index) => {
                 let expanded = if self.unfolded.remove(&index) {
                     false
@@ -4218,9 +4165,33 @@ fi"#
                 } else {
                     "folded".to_string()
                 };
-                self.scroll = 0;
             }
             None => self.status = "no long output to fold".to_string(),
+        }
+    }
+
+    /// Navigate a completed transcript entry without taking ownership of
+    /// terminal mouse selection or clipboard shortcuts.
+    fn handle_expanded_log_key(&mut self, key: KeyEvent) {
+        let Some((_, scroll)) = self.expanded_log.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.expanded_log = None;
+                self.status = "expanded output closed".to_string();
+            }
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.expanded_log = None;
+                self.status = "expanded output closed".to_string();
+            }
+            KeyCode::Up => *scroll = scroll.saturating_sub(1),
+            KeyCode::Down => *scroll = scroll.saturating_add(1),
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(8),
+            KeyCode::PageDown => *scroll = scroll.saturating_add(8),
+            KeyCode::Home => *scroll = 0,
+            KeyCode::End => *scroll = u16::MAX,
+            _ => {}
         }
     }
 
@@ -4306,6 +4277,13 @@ fi"#
                     }
                 })
                 .collect();
+            if let Some((index, _)) = &mut self.expanded_log {
+                if *index > active.log_index {
+                    *index -= 1;
+                } else if *index == active.log_index {
+                    self.expanded_log = None;
+                }
+            }
         }
         let elapsed = active.started.elapsed().as_secs_f32();
         let (success, detail) = active
@@ -4334,7 +4312,6 @@ fi"#
             self.status = "error".to_string();
             self.push_error(&format!("{} failed: {detail}", active.label));
         }
-        self.scroll = 0;
     }
 
     // ---- log helpers -----------------------------------------------------
@@ -4354,7 +4331,7 @@ fi"#
             "fresh".to_string()
         };
         format!(
-            "╭──────╮  Welcome to ZCODE! ({version})\n│██████│  ZhiPU terminal TUI   /help for shortcuts\n│   ██ │\n│  ██  │\n│ ██   │\n│██████│\n╰──────╯\n\ndirectory: {cwd}\nmode: {}   /mode to change\nsession: {session}   /new to reset\nauth: {}   /login to sign in",
+            "Welcome to ZCODE! ({version})\nZhiPU terminal TUI   /help for shortcuts\n\ndirectory: {cwd}\nmode: {}   /mode to change\nsession: {session}   /new to reset\nauth: {}   /login to sign in",
             display_mode(&self.config),
             self.auth_label
         )
@@ -4369,7 +4346,9 @@ fi"#
         if let Some(pos) = self
             .log
             .iter()
-            .position(|entry| matches!(entry.kind, LogKind::Banner))
+            .enumerate()
+            .skip(self.flushed_log)
+            .find_map(|(index, entry)| matches!(entry.kind, LogKind::Banner).then_some(index))
         {
             self.log[pos].text = self.banner_text();
         }
@@ -4512,6 +4491,11 @@ fi"#
             return;
         }
         let tip = build_update_tip(installed, feed, report.feed_base.as_deref());
+        if banner_pos.is_some_and(|pos| pos < self.flushed_log) {
+            self.log.push(LogLine::new(LogKind::Tip, &tip));
+            self.status = format!("update available: ZCode {}", feed.version);
+            return;
+        }
         let logo_at = banner_pos.map(|pos| pos + 1).unwrap_or(self.log.len());
         // Unauthenticated startup already shows a Brand logo after the banner.
         // Reuse that slot for the update Logo, then insert only the Tip. Normal
@@ -4519,7 +4503,7 @@ fi"#
         // update case inserts the big Logo + Tip here.
         let (shift_at, inserted) = if matches!(
             self.log.get(logo_at).map(|entry| entry.kind),
-            Some(LogKind::Brand | LogKind::Logo)
+            Some(LogKind::Logo)
         ) {
             self.log[logo_at] = LogLine::new(LogKind::Logo, ZCODE_WORDMARK);
             self.log
@@ -4537,6 +4521,9 @@ fi"#
         // shift — otherwise streamed text lands in the wrong entry (and a later
         // remove() could delete the wrong one).
         if let Some(turn) = &mut self.app_turn {
+            if turn.committable_end >= shift_at {
+                turn.committable_end += inserted;
+            }
             if let Some(ti) = turn.text_index {
                 if ti >= shift_at {
                     turn.text_index = Some(ti + inserted);
@@ -4555,8 +4542,12 @@ fi"#
                 .map(|&i| if i >= shift_at { i + inserted } else { i })
                 .collect();
         }
+        if let Some((index, _)) = &mut self.expanded_log {
+            if *index >= shift_at {
+                *index += inserted;
+            }
+        }
         self.status = format!("update available: ZCode {}", feed.version);
-        self.scroll = 0;
     }
 
     fn apply_model_catalog(&mut self, catalog: ModelCatalogReport) {
@@ -4589,7 +4580,6 @@ fi"#
 enum LogKind {
     Banner,
     Logo,
-    Brand,
     Tip,
     User,
     Assistant,
@@ -4670,24 +4660,78 @@ fn edit_input_in_editor(initial: &str) -> Result<String> {
 
 struct TerminalGuard {
     terminal: Tui,
-    mouse: bool,
+    clear_generation: u64,
 }
 
 impl TerminalGuard {
-    fn enter(mouse: bool) -> Result<Self> {
+    fn enter() -> Result<Self> {
         enable_raw_mode().context("failed to enable raw mode")?;
-        execute!(
-            io::stdout(),
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            Hide
-        )?;
-        if mouse {
-            execute!(io::stdout(), EnableMouseCapture)?;
+        execute!(io::stdout(), EnableBracketedPaste, Hide)?;
+        let terminal = (|| -> Result<Tui> {
+            let (_, rows) = crossterm::terminal::size().context("failed to read terminal size")?;
+            let backend = CrosstermBackend::new(io::stdout());
+            Ok(Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Inline(
+                        rows.saturating_sub(1).clamp(1, INLINE_VIEWPORT_ROWS),
+                    ),
+                },
+            )?)
+        })();
+        match terminal {
+            Ok(terminal) => Ok(Self {
+                terminal,
+                clear_generation: 0,
+            }),
+            Err(error) => {
+                let _ = disable_raw_mode();
+                let _ = execute!(io::stdout(), Show, DisableBracketedPaste);
+                Err(error)
+            }
         }
-        let backend = CrosstermBackend::new(io::stdout());
-        let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal, mouse })
+    }
+
+    fn flush_transcript(&mut self, state: &mut UiState) -> Result<()> {
+        if self.clear_generation != state.clear_generation {
+            execute!(self.terminal.backend_mut(), TerminalClear(ClearType::Purge))?;
+            self.terminal.clear()?;
+            self.clear_generation = state.clear_generation;
+        }
+        let end = state.committable_log_end();
+        while state.flushed_log < end {
+            let index = state.flushed_log;
+            let area = self.terminal.size()?;
+            let width = area.width.saturating_sub(2).max(1) as usize;
+            if state.log[index].kind == LogKind::Logo
+                && !ascii_logo_fits(width, area.height, state.skyline_mode)
+            {
+                state.flushed_log += 1;
+                continue;
+            }
+            let mut items = Vec::new();
+            if log_entry_needs_separator(&state.log, index) {
+                items.push(ListItem::new(Line::default()));
+            }
+            items.extend(rendered_log_entry(state, index, width));
+            self.insert_transcript_items(items)?;
+            state.flushed_log += 1;
+        }
+        Ok(())
+    }
+
+    fn insert_transcript_items(&mut self, items: Vec<ListItem<'static>>) -> Result<()> {
+        let height = u16::try_from(items.len()).unwrap_or(u16::MAX).max(1);
+        self.terminal.insert_before(height, move |buffer| {
+            let area = Rect {
+                x: buffer.area.x.saturating_add(1),
+                y: buffer.area.y,
+                width: buffer.area.width.saturating_sub(2),
+                height: buffer.area.height,
+            };
+            Widget::render(List::new(items), area, buffer);
+        })?;
+        Ok(())
     }
 
     fn draw(&mut self, state: &mut UiState) -> Result<()> {
@@ -4695,30 +4739,24 @@ impl TerminalGuard {
         Ok(())
     }
 
+    /// Apply the terminal's resize event immediately and invalidate the prior
+    /// frame. Inline autoresize can otherwise consume the new dimensions
+    /// before the queued event arrives, leaving unchanged footer cells absent
+    /// after the viewport clear.
+    fn resize(&mut self, width: u16, height: u16) -> Result<()> {
+        self.terminal.resize(Rect::new(0, 0, width, height))?;
+        self.terminal.clear()?;
+        Ok(())
+    }
+
     /// Leave the TUI, run `f` with the normal terminal, then restore.
     fn suspend<T>(&mut self, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        if self.mouse {
-            let _ = execute!(io::stdout(), DisableMouseCapture);
-        }
         disable_raw_mode().context("failed to disable raw mode")?;
-        execute!(
-            io::stdout(),
-            LeaveAlternateScreen,
-            DisableBracketedPaste,
-            Show
-        )
-        .context("failed to leave alternate screen")?;
+        execute!(io::stdout(), DisableBracketedPaste, Show)
+            .context("failed to suspend inline terminal")?;
         let result = f();
-        execute!(
-            io::stdout(),
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            Hide
-        )
-        .context("failed to re-enter alternate screen")?;
-        if self.mouse {
-            let _ = execute!(io::stdout(), EnableMouseCapture);
-        }
+        execute!(io::stdout(), EnableBracketedPaste, Hide)
+            .context("failed to resume inline terminal")?;
         enable_raw_mode().context("failed to re-enable raw mode")?;
         self.terminal
             .clear()
@@ -4730,37 +4768,28 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        if self.mouse {
-            let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
-        }
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            Show,
-            DisableBracketedPaste,
-            LeaveAlternateScreen
-        );
+        let _ = execute!(self.terminal.backend_mut(), Show, DisableBracketedPaste);
     }
 }
 
 fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     let root = frame.area();
-    let input_lines = state.input.split('\n').count() as u16;
+    let composer_width = root.width.saturating_sub(3).max(1) as usize;
+    let input_lines = composer_layout(&state.input, state.cursor, composer_width)
+        .lines
+        .len() as u16;
     let composer_height = input_lines.clamp(1, 5) + 2;
-    let live_lines = live_panel_lines(state);
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(6),
-            Constraint::Length(live_lines.len() as u16),
+            Constraint::Min(1),
+            Constraint::Length(1),
             Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
         .split(root);
 
     render_conversation(frame, vertical[0], state);
-    if !live_lines.is_empty() {
-        frame.render_widget(Paragraph::new(live_lines), vertical[1]);
-    }
     render_composer(frame, vertical[2], state);
     render_footer(frame, vertical[3], state);
 
@@ -4785,18 +4814,20 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     if state.history_query.is_some() {
         render_history_search(frame, centered_rect(72, 50, root), state);
     }
+    if state.expanded_log.is_some() {
+        render_expanded_log(frame, centered_rect(88, 82, root), state);
+    }
     // Topmost: the kernel is blocked on this answer.
     if state.interaction.is_some() {
         render_interaction(frame, centered_rect(74, 62, root), state);
     }
 }
 
-/// Max lines of forming assistant text shown in the run-only work panel.
+/// Max lines of forming assistant text shown with the current turn.
 const LIVE_TEXT_TAIL: usize = 4;
 
-/// Run-only work panel above the composer: tool chips, the newest reasoning
-/// line, and the tail of the assistant text as it forms — all gone the
-/// moment the job finalizes (the authoritative reply lands in the transcript).
+/// In-progress reasoning and tool state inserted immediately below the current
+/// user message. These rows disappear when the authoritative result lands.
 fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
     let t = &state.theme;
     // The kernel's TODO list persists across turns while non-empty (state
@@ -4827,14 +4858,13 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
             )));
         }
     }
-    // App-server streaming turn: the answer streams straight into the
-    // transcript, so the work panel only carries a live marker and the
-    // newest reasoning, both gone when the turn finalizes.
+    // App-server streaming turn: answer text already streams into the current
+    // transcript; these rows explain the work occurring before and around it.
     if let Some(turn) = &state.app_turn {
         let mut lines = todo_lines;
         let symbol = SPINNER_FRAMES[state.tick % SPINNER_FRAMES.len()];
         lines.push(Line::from(Span::styled(
-            format!(" {symbol} streaming"),
+            format!(" {symbol} thinking"),
             t.accent(),
         )));
         // Tools still running show as spinner chips; finished ones have already
@@ -4871,7 +4901,7 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
                 .collect();
             for line in tail.into_iter().rev() {
                 let clipped: String = line.chars().take(120).collect();
-                lines.push(Line::from(Span::styled(format!(" {clipped}"), t.dim())));
+                lines.push(Line::from(Span::styled(format!("    {clipped}"), t.dim())));
             }
         }
         return lines;
@@ -4916,7 +4946,10 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
         lines.push(Line::from(spans));
     }
     if let Some(reasoning) = &live.reasoning {
-        lines.push(Line::from(Span::styled(format!(" {reasoning}"), t.dim())));
+        lines.push(Line::from(Span::styled(
+            format!(" ⠿ thinking  {reasoning}"),
+            t.dim(),
+        )));
     }
     // The answer forming, tail-first so the newest content stays in view.
     if let Some(text) = &live.text {
@@ -4926,9 +4959,13 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
             .rev()
             .take(LIVE_TEXT_TAIL)
             .collect();
-        for line in tail.into_iter().rev() {
+        for (index, line) in tail.into_iter().rev().enumerate() {
             let clipped: String = line.chars().take(120).collect();
-            lines.push(Line::from(Span::styled(format!(" {clipped}"), t.text())));
+            let prefix = if index == 0 { " •  " } else { "    " };
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{clipped}"),
+                t.text(),
+            )));
         }
     }
     lines
@@ -4999,80 +5036,37 @@ fn render_conversation(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
         width: area.width.saturating_sub(2),
         height: area.height,
     };
-    let width = inner.width as usize;
-    let graphics_logo = state.graphics_logo.is_some();
-    // Item index where the reserved graphics-logo block starts, once placed.
-    let mut logo_span: Option<u16> = None;
-    let mut items: Vec<ListItem<'static>> = Vec::new();
-    for (index, entry) in state.log.iter().enumerate() {
-        if index > 0 {
-            items.push(ListItem::new(Line::default()));
-        }
-        // With a graphics protocol the wordmark+skyline block is drawn as a
-        // real image overlay; reserve blank rows here and remember where the
-        // first such block sits so the image can be painted over it below.
-        if graphics_logo
-            && logo_span.is_none()
-            && matches!(entry.kind, LogKind::Logo | LogKind::Brand)
-        {
-            logo_span = Some(items.len() as u16);
-            for _ in 0..LOGO_IMG_ROWS {
-                items.push(ListItem::new(Line::default()));
-            }
-            continue;
-        }
-        // Long mechanical output folds to a head preview unless expanded.
-        // User-requested listings (no_fold) always render in full.
-        if foldable_kind(entry.kind) && !entry.no_fold && !state.unfolded.contains(&index) {
-            if let Some((head, hidden)) = fold_preview(&entry.text, FOLD_THRESHOLD, FOLD_HEAD) {
-                let preview_text = entry.text.lines().take(head).collect::<Vec<_>>().join("\n");
-                let preview = LogLine::new(entry.kind, &preview_text);
-                items.extend(log_to_items(
-                    &preview,
-                    width,
-                    &state.theme,
-                    state.skyline_mode,
-                ));
-                items.push(ListItem::new(Line::from(Span::styled(
-                    format!("  … (+{hidden} lines · Ctrl+O)"),
-                    state.theme.dim(),
-                ))));
-                continue;
-            }
-        }
-        items.extend(log_to_items(entry, width, &state.theme, state.skyline_mode));
+    let live_lines = live_panel_lines(state);
+    if live_lines.is_empty() {
+        return;
     }
-    let total = items.len() as u16;
-    let max_scroll = total.saturating_sub(inner.height);
-    if state.scroll > max_scroll {
-        state.scroll = max_scroll;
-    }
-    // scroll counts lines back from the bottom; 0 follows the tail.
-    let offset = max_scroll.saturating_sub(state.scroll);
-
-    frame.render_stateful_widget(
-        List::new(items),
+    frame.render_widget(
+        Paragraph::new(live_lines)
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0)),
         inner,
-        &mut ListState::default().with_offset(offset as usize),
     );
+}
 
-    // Paint the true logo over its reserved rows, but only when the whole
-    // block is scrolled fully into view (partial draws corrupt the protocol).
-    if let Some(start) = logo_span {
-        let end = start.saturating_add(LOGO_IMG_ROWS);
-        if start >= offset && end <= offset.saturating_add(inner.height) {
-            let img_w = LOGO_IMG_COLS.min(inner.width);
-            let rect = Rect {
-                x: inner.x + (inner.width.saturating_sub(img_w)) / 2,
-                y: inner.y + (start - offset),
-                width: img_w,
-                height: LOGO_IMG_ROWS,
-            };
-            if let Some(protocol) = state.graphics_logo.as_mut() {
-                frame.render_stateful_widget(StatefulImage::new(), rect, protocol);
-            }
+fn rendered_log_entry(state: &UiState, index: usize, width: usize) -> Vec<ListItem<'static>> {
+    let entry = &state.log[index];
+    if foldable_kind(entry.kind) && !entry.no_fold && !state.unfolded.contains(&index) {
+        if let Some((head, hidden)) = fold_preview(&entry.text, FOLD_THRESHOLD, FOLD_HEAD) {
+            let preview_text = entry.text.lines().take(head).collect::<Vec<_>>().join("\n");
+            let preview = LogLine::new(entry.kind, &preview_text);
+            let mut items = log_to_items(&preview, width, &state.theme, state.skyline_mode);
+            items.push(ListItem::new(Line::from(Span::styled(
+                format!("  … (+{hidden} lines)"),
+                state.theme.dim(),
+            ))));
+            return items;
         }
     }
+    log_to_items(entry, width, &state.theme, state.skyline_mode)
+}
+
+fn log_entry_needs_separator(log: &[LogLine], index: usize) -> bool {
+    index > 0 && log[index].kind != LogKind::User && log[index - 1].kind != LogKind::Assistant
 }
 
 /// Split a line into (matches, chunk) runs so adjacent chars of the same
@@ -5089,48 +5083,126 @@ fn chunk_by(text: &str, pred: impl Fn(char) -> bool) -> Vec<(bool, String)> {
     runs
 }
 
-/// The welcome skyline + the width it centres to. Braille is a fixed 45-col
-/// block; the wireframe is capped to a logo width (not full-panel) so both
-/// centre under the wordmark. `outer` centres the whole logo in the panel;
-/// `inner` centres the 45-col wordmark within a wider skyline.
-fn skyline_layout(mode: SkylineMode, width: usize) -> (Vec<String>, usize, usize) {
-    let sky = match mode {
-        SkylineMode::Braille => skyline_braille(),
-        SkylineMode::Wire => skyline_lines(width.min(70)),
-        SkylineMode::None => Vec::new(),
-    };
-    let sky_w = sky.first().map(|row| row.width()).unwrap_or(0);
-    let logo_w = sky_w.max(SKYLINE_LOGO_W);
-    let outer = width.saturating_sub(logo_w) / 2;
-    let inner = logo_w.saturating_sub(SKYLINE_LOGO_W) / 2;
-    (sky, outer, inner)
+fn wrap_words_display(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rest = text.trim_end();
+    let mut lines = Vec::new();
+    while rest.width() > width {
+        let mut used = 0usize;
+        let mut hard_break = rest.len();
+        let mut word_break = None;
+        for (byte, ch) in rest.char_indices() {
+            let cell_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cell_width > width {
+                hard_break = byte;
+                break;
+            }
+            used += cell_width;
+            if ch.is_whitespace() {
+                word_break = Some(byte);
+            }
+        }
+        let split = word_break.filter(|index| *index > 0).unwrap_or(hard_break);
+        let split = if split == 0 {
+            rest.char_indices()
+                .nth(1)
+                .map(|(byte, _)| byte)
+                .unwrap_or(rest.len())
+        } else {
+            split
+        };
+        lines.push(rest[..split].trim_end().to_string());
+        rest = rest[split..].trim_start();
+    }
+    lines.push(rest.to_string());
+    lines
+}
+
+fn ascii_logo_width() -> usize {
+    ZCODE_WORDMARK
+        .lines()
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0)
+}
+
+fn ascii_logo_fits(width: usize, height: u16, mode: SkylineMode) -> bool {
+    mode != SkylineMode::None && width >= ascii_logo_width() && height >= LOGO_ROWS
 }
 
 fn log_to_items(
     entry: &LogLine,
     width: usize,
     theme: &Theme,
-    mode: SkylineMode,
+    _mode: SkylineMode,
 ) -> Vec<ListItem<'static>> {
     let mut items: Vec<ListItem<'static>> = Vec::new();
     match entry.kind {
         LogKind::Banner => {
-            // Codex-style rounded welcome box.
-            let content: Vec<&str> = entry.text.lines().collect();
+            let max_inner = width.saturating_sub(4).max(1);
+            let source = entry.text.lines().collect::<Vec<_>>();
+            let title = source.first().copied().unwrap_or_default();
+            let subtitle = source.get(1).copied().unwrap_or_default();
+            let icon_width = MINI_Z_ICON[0].width();
+            let right_header_width = title.width().max(subtitle.width());
+            let show_icon = max_inner >= icon_width + 3 + right_header_width;
+            let show_wordmark = show_icon && max_inner >= icon_width + 3 + ascii_logo_width();
+            let wordmark = ZCODE_WORDMARK.lines().collect::<Vec<_>>();
+            let mut content: Vec<(Option<&str>, String)> = Vec::new();
+            if show_icon {
+                for (row, icon) in MINI_Z_ICON.iter().enumerate() {
+                    let right = match row {
+                        0 => title,
+                        1 => subtitle,
+                        2..=7 if show_wordmark => wordmark[row - 2],
+                        _ => "",
+                    };
+                    content.push((Some(*icon), right.to_string()));
+                }
+                for line in source.iter().skip(2) {
+                    if line.is_empty() {
+                        content.push((None, String::new()));
+                    } else {
+                        content.extend(
+                            wrap_words_display(line, max_inner)
+                                .into_iter()
+                                .map(|line| (None, line)),
+                        );
+                    }
+                }
+            } else {
+                for line in source {
+                    if line.is_empty() {
+                        content.push((None, String::new()));
+                    } else {
+                        content.extend(
+                            wrap_words_display(line, max_inner)
+                                .into_iter()
+                                .map(|line| (None, line)),
+                        );
+                    }
+                }
+            }
             let inner = content
                 .iter()
-                .map(|line| line.width())
+                .map(|(icon, line)| icon.map_or(0, |icon| icon.width() + 3) + line.width())
                 .max()
                 .unwrap_or(0)
-                .min(width.saturating_sub(4));
+                .min(max_inner);
             items.push(ListItem::new(Line::from(Span::styled(
                 format!("╭{}╮", "─".repeat(inner + 2)),
                 theme.frame(),
             ))));
-            for raw in &content {
+            for (icon, raw) in &content {
                 let mut spans = vec![Span::styled("│ ".to_string(), theme.frame())];
+                let mut used = raw.width();
+                if let Some(icon) = icon {
+                    spans.extend(official_icon_spans(icon, theme));
+                    spans.push(Span::raw("   ".to_string()));
+                    used += icon.width() + 3;
+                }
                 spans.extend(banner_spans(raw, theme));
-                let pad = inner.saturating_sub(raw.width());
+                let pad = inner.saturating_sub(used);
                 spans.push(Span::raw(" ".repeat(pad)));
                 spans.push(Span::styled(" │".to_string(), theme.frame()));
                 items.push(ListItem::new(Line::from(spans)));
@@ -5141,43 +5213,12 @@ fn log_to_items(
             ))));
         }
         LogKind::Logo => {
-            // Wordmark bright (GLM 蓝) with the skyline dim beneath it, together
-            // as one centred logo block (wordmark inset within a wider skyline).
-            let (sky, outer, inner) = skyline_layout(mode, width);
+            // Text reconstruction of the official SVG wordmark. It remains
+            // selectable and reflow-safe because it uses ordinary cells only.
             for raw in entry.text.lines() {
                 items.push(ListItem::new(Line::from(Span::styled(
-                    format!("{}{raw}", " ".repeat(outer + inner)),
+                    format!(" {raw}"),
                     theme.accent().bold(),
-                ))));
-            }
-            for line in sky {
-                items.push(ListItem::new(Line::from(Span::styled(
-                    format!("{}{line}", " ".repeat(outer)),
-                    theme.dim(),
-                ))));
-            }
-        }
-        LogKind::Brand => {
-            // Solid blocks carry the bright purple; the skyline beneath is the
-            // shadow layer (清华紫 dim). Both centre together as one logo block.
-            let (sky, outer, inner) = skyline_layout(mode, width);
-            for raw in entry.text.lines() {
-                let padded = format!("{}{raw}", " ".repeat(outer + inner));
-                let mut spans = Vec::new();
-                for (is_block, chunk) in chunk_by(&padded, |c| c == '█') {
-                    let style = if is_block {
-                        theme.brand().bold()
-                    } else {
-                        theme.brand_dim()
-                    };
-                    spans.push(Span::styled(chunk, style));
-                }
-                items.push(ListItem::new(Line::from(spans)));
-            }
-            for line in sky {
-                items.push(ListItem::new(Line::from(Span::styled(
-                    format!("{}{line}", " ".repeat(outer)),
-                    theme.brand_dim(),
                 ))));
             }
         }
@@ -5200,9 +5241,11 @@ fn log_to_items(
             }
         }
         LogKind::User => {
-            // Codex-style elevated band with a `›` prompt marker.
+            // Restore the compact background band without a textual label.
+            // Every span inherits the same background so spaces do not look
+            // like isolated highlighted cells.
             items.push(ListItem::new(Line::default()).style(theme.band()));
-            let content_width = width.saturating_sub(3).max(10);
+            let content_width = width.saturating_sub(3 + TRANSCRIPT_RIGHT_GUTTER).max(1);
             for (index, piece) in wrap_display(&entry.text, content_width)
                 .into_iter()
                 .enumerate()
@@ -5220,18 +5263,18 @@ fn log_to_items(
             items.push(ListItem::new(Line::default()).style(theme.band()));
         }
         LogKind::Assistant => {
-            let content_width = width.saturating_sub(2).max(10);
+            let content_width = width.saturating_sub(3 + TRANSCRIPT_RIGHT_GUTTER).max(1);
             for (index, styled) in markdown_lines(&entry.text, content_width)
                 .into_iter()
                 .enumerate()
             {
                 let mut spans = Vec::new();
                 if index == 0 {
-                    spans.push(Span::styled("• ".to_string(), theme.dim()));
+                    spans.push(Span::styled("•  ".to_string(), theme.dim()));
                 } else if styled.kind == MdLineKind::Quote {
-                    spans.push(Span::styled("> ".to_string(), theme.good()));
+                    spans.push(Span::styled(">  ".to_string(), theme.good()));
                 } else {
-                    spans.push(Span::raw("  ".to_string()));
+                    spans.push(Span::raw("   ".to_string()));
                 }
                 if styled.kind == MdLineKind::DiffBlock {
                     // Colored ```diff fences, like /diff output.
@@ -5291,9 +5334,10 @@ fn log_to_items(
                 }
                 items.push(ListItem::new(Line::from(spans)));
             }
+            items.push(ListItem::new(Line::default()));
         }
         LogKind::Diff => {
-            let content_width = width.saturating_sub(2).max(10);
+            let content_width = width.saturating_sub(2 + TRANSCRIPT_RIGHT_GUTTER).max(1);
             for raw in entry.text.lines() {
                 let style = match diff_line_role(raw) {
                     DiffRole::Add => theme.good(),
@@ -5312,11 +5356,11 @@ fn log_to_items(
         }
         LogKind::Tool | LogKind::System | LogKind::Error => {
             let (marker, style) = match entry.kind {
-                LogKind::Tool => ("• ", theme.accent_dim()),
-                LogKind::Error => ("✗ ", theme.bad()),
-                _ => ("• ", theme.dim()),
+                LogKind::Tool => ("•  ", theme.accent_dim()),
+                LogKind::Error => ("✗  ", theme.bad()),
+                _ => ("•  ", theme.dim()),
             };
-            let content_width = width.saturating_sub(2).max(10);
+            let content_width = width.saturating_sub(3 + TRANSCRIPT_RIGHT_GUTTER).max(1);
             for (index, piece) in wrap_display(&entry.text, content_width)
                 .into_iter()
                 .enumerate()
@@ -5324,7 +5368,7 @@ fn log_to_items(
                 let prefix = if index == 0 {
                     Span::styled(marker.to_string(), style)
                 } else {
-                    Span::raw("  ".to_string())
+                    Span::raw("   ".to_string())
                 };
                 items.push(ListItem::new(Line::from(vec![
                     prefix,
@@ -5400,6 +5444,21 @@ fn md_style(theme: &Theme, kind: MdLineKind, role: SpanRole) -> Style {
 fn banner_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
     if line.is_empty() {
         return Vec::new();
+    }
+    if line.width() > 12 && line.contains('█') {
+        return chunk_by(line, |ch| ch == '█')
+            .into_iter()
+            .map(|(block, text)| {
+                Span::styled(
+                    text,
+                    if block {
+                        theme.text().bold()
+                    } else {
+                        theme.dim()
+                    },
+                )
+            })
+            .collect();
     }
     if let Some(rest) = line.strip_prefix("╭──────╮  Welcome to ZCODE!") {
         let mut spans = official_icon_spans("╭──────╮", theme);
@@ -5526,15 +5585,30 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
 
     let mut lines: Vec<Line> = vec![Line::default()];
     if state.input.is_empty() {
+        let placeholder = if area.width >= 54 {
+            "describe a task   /commands   @files   !shell"
+        } else if area.width >= 28 {
+            "describe a task   /commands"
+        } else {
+            "describe a task"
+        };
         lines.push(Line::from(vec![
             Span::styled(" › ".to_string(), t.accent().bold()),
-            Span::styled(
-                "describe a task   /commands   @files   !shell".to_string(),
-                t.dim(),
-            ),
+            Span::styled(placeholder.to_string(), t.dim()),
         ]));
     } else {
-        for (index, raw) in state.input.split('\n').enumerate() {
+        let content_width = area.width.saturating_sub(3).max(1) as usize;
+        let layout = composer_layout(&state.input, state.cursor, content_width);
+        let visible_rows = area.height.saturating_sub(2).max(1) as usize;
+        let first_row = layout.cursor_row.saturating_sub(visible_rows - 1);
+        for (offset, raw) in layout
+            .lines
+            .iter()
+            .skip(first_row)
+            .take(visible_rows)
+            .enumerate()
+        {
+            let index = first_row + offset;
             let prefix = if index == 0 {
                 Span::styled(" › ".to_string(), t.accent().bold())
             } else {
@@ -5542,32 +5616,88 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             };
             lines.push(Line::from(vec![
                 prefix,
-                Span::styled(raw.to_string(), t.text()),
+                Span::styled(raw.clone(), t.text()),
             ]));
         }
+        frame.render_widget(Paragraph::new(Text::from(lines)).style(t.band()), area);
+        let cursor_x = area
+            .x
+            .saturating_add(3)
+            .saturating_add(layout.cursor_col.min(content_width) as u16);
+        let cursor_y = area.y.saturating_add(1).saturating_add(
+            layout
+                .cursor_row
+                .saturating_sub(first_row)
+                .min(visible_rows - 1) as u16,
+        );
+        frame.set_cursor_position((cursor_x, cursor_y));
+        return;
     }
     frame.render_widget(Paragraph::new(Text::from(lines)).style(t.band()), area);
+    frame.set_cursor_position((area.x.saturating_add(3), area.y.saturating_add(1)));
+}
 
-    let mut line = 0usize;
-    let mut column = 0usize;
-    for ch in state.input.chars().take(state.cursor) {
-        if ch == '\n' {
-            line += 1;
-            column = 0;
-        } else {
-            // Display columns, not chars: CJK characters occupy two cells.
-            column += UnicodeWidthChar::width(ch).unwrap_or(0);
+struct ComposerLayout {
+    lines: Vec<String>,
+    cursor_row: usize,
+    cursor_col: usize,
+}
+
+/// Wrap composer text by terminal cell width and locate the character cursor.
+fn composer_layout(input: &str, cursor: usize, width: usize) -> ComposerLayout {
+    let width = width.max(1);
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut lines = vec![String::new()];
+    let mut line_width = 0usize;
+    for ch in &chars {
+        if *ch == '\n' {
+            lines.push(String::new());
+            line_width = 0;
+            continue;
+        }
+        let char_width = UnicodeWidthChar::width(*ch).unwrap_or(0);
+        if line_width > 0 && line_width.saturating_add(char_width) > width {
+            lines.push(String::new());
+            line_width = 0;
+        }
+        lines.last_mut().expect("composer has a line").push(*ch);
+        line_width = line_width.saturating_add(char_width);
+    }
+
+    let cursor = cursor.min(chars.len());
+    let mut cursor_row = 0usize;
+    let mut cursor_col = 0usize;
+    for ch in chars.iter().take(cursor) {
+        if *ch == '\n' {
+            cursor_row += 1;
+            cursor_col = 0;
+            continue;
+        }
+        let char_width = UnicodeWidthChar::width(*ch).unwrap_or(0);
+        if cursor_col > 0 && cursor_col.saturating_add(char_width) > width {
+            cursor_row += 1;
+            cursor_col = 0;
+        }
+        cursor_col = cursor_col.saturating_add(char_width);
+    }
+    if cursor_col >= width {
+        cursor_row += cursor_col / width;
+        cursor_col %= width;
+    } else if let Some(next) = chars.get(cursor).filter(|ch| **ch != '\n') {
+        let next_width = UnicodeWidthChar::width(*next).unwrap_or(0);
+        if cursor_col > 0 && cursor_col.saturating_add(next_width) > width {
+            cursor_row += 1;
+            cursor_col = 0;
         }
     }
-    let cursor_x = area
-        .x
-        .saturating_add(3)
-        .saturating_add(column.min(area.width.saturating_sub(4) as usize) as u16);
-    let cursor_y = area
-        .y
-        .saturating_add(1)
-        .saturating_add(line.min(area.height.saturating_sub(2) as usize) as u16);
-    frame.set_cursor_position((cursor_x, cursor_y));
+    while lines.len() <= cursor_row {
+        lines.push(String::new());
+    }
+    ComposerLayout {
+        lines,
+        cursor_row,
+        cursor_col,
+    }
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
@@ -5599,7 +5729,6 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             ),
         ])
     };
-    frame.render_widget(Paragraph::new(left), area);
     let mut right = String::new();
     if let Some((used, window)) = state.context_watermark {
         right.push_str(&format_context_watermark(used, window));
@@ -5622,20 +5751,40 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
         None => right.push_str(&format!("{mode} · ")),
     }
     right.push_str(&format!("auth {} ", state.auth_label));
+    if area.width < 80 {
+        right = state
+            .controls
+            .model_current
+            .clone()
+            .unwrap_or_else(|| mode.clone());
+    }
+    if area.width < 48 {
+        right.clear();
+    }
+    let right_width = u16::try_from(right.width())
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    let left_area = Rect {
+        width: area.width.saturating_sub(right_width.saturating_add(1)),
+        ..area
+    };
+    let right_area = Rect {
+        x: area.right().saturating_sub(right_width),
+        width: right_width,
+        ..area
+    };
+    frame.render_widget(Paragraph::new(left), left_area);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(right, t.dim()))).alignment(Alignment::Right),
-        area,
+        right_area,
     );
 }
 
 fn render_suggestions(frame: &mut Frame<'_>, input_area: Rect, state: &UiState) {
     let t = &state.theme;
-    let height = (state.suggestions.len() as u16).min(SUGGESTION_LIMIT as u16) + 2;
-    let area = Rect {
-        x: input_area.x,
-        y: input_area.y.saturating_sub(height),
-        width: input_area.width,
-        height,
+    let Some(area) = suggestion_popup_area(frame.area(), input_area, state.suggestions.len())
+    else {
+        return;
     };
     let items = state
         .suggestions
@@ -5665,6 +5814,17 @@ fn render_suggestions(frame: &mut Frame<'_>, input_area: Rect, state: &UiState) 
         area,
         &mut ListState::default().with_selected(Some(state.suggestion_index)),
     );
+}
+
+fn suggestion_popup_area(viewport: Rect, input_area: Rect, item_count: usize) -> Option<Rect> {
+    let requested_height = (item_count as u16).min(SUGGESTION_LIMIT as u16) + 2;
+    let height = requested_height.min(input_area.y.saturating_sub(viewport.y));
+    (height > 0).then_some(Rect {
+        x: input_area.x,
+        y: input_area.y - height,
+        width: input_area.width,
+        height,
+    })
 }
 
 fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
@@ -6048,6 +6208,38 @@ fn render_help_modal(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     frame.render_widget(help, area);
 }
 
+fn render_expanded_log(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
+    let Some((index, requested_scroll)) = state.expanded_log else {
+        return;
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(state.theme.frame())
+        .title(Line::from(Span::styled(
+            " expanded output · ↑↓/PageUp/PageDown · Esc closes ",
+            state.theme.dim(),
+        )));
+    let inner = block.inner(area);
+    let items = log_to_items(
+        &state.log[index],
+        inner.width.max(1) as usize,
+        &state.theme,
+        state.skyline_mode,
+    );
+    let max_scroll = (items.len() as u16).saturating_sub(inner.height);
+    let scroll = requested_scroll.min(max_scroll);
+    if let Some((_, current_scroll)) = state.expanded_log.as_mut() {
+        *current_scroll = scroll;
+    }
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(
+        List::new(items).block(block),
+        area,
+        &mut ListState::default().with_offset(scroll as usize),
+    );
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -6082,6 +6274,142 @@ fn display_cwd(config: &AppConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composer_wraps_ascii_and_cjk_at_display_width() {
+        let ascii = composer_layout("abcdef", 6, 5);
+        assert_eq!(ascii.lines, vec!["abcde", "f"]);
+        assert_eq!((ascii.cursor_row, ascii.cursor_col), (1, 1));
+
+        let cjk = composer_layout("中文a", 3, 4);
+        assert_eq!(cjk.lines, vec!["中文", "a"]);
+        assert_eq!((cjk.cursor_row, cjk.cursor_col), (1, 1));
+
+        let explicit = composer_layout("abcd\nef", 7, 4);
+        assert_eq!(explicit.lines, vec!["abcd", "ef"]);
+        assert_eq!((explicit.cursor_row, explicit.cursor_col), (1, 2));
+    }
+
+    #[test]
+    fn transcript_does_not_wait_for_startup_probe() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.log.push(LogLine::new(LogKind::User, "hello"));
+        assert_eq!(state.committable_log_end(), 1);
+    }
+
+    #[test]
+    fn late_startup_probe_does_not_rewrite_flushed_banner() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.push_banner();
+        let original = state.log[0].text.clone();
+        state.flushed_log = 1;
+        state.kernel_version = Some("9.9.9".to_string());
+
+        state.refresh_banner();
+
+        assert_eq!(state.log[0].text, original);
+    }
+
+    #[test]
+    fn app_turn_commits_completed_phases_without_rewriting_open_text() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.db_state = DbState::Disabled;
+        state.begin_app_turn(1);
+
+        state.app_turn.as_mut().unwrap().turn.text = "before tool".to_string();
+        state.app_append_text();
+        assert_eq!(state.committable_log_end(), 0);
+
+        state.app_commit_phase();
+        assert_eq!(state.committable_log_end(), 1);
+        assert_eq!(state.app_turn.as_ref().unwrap().text_index, None);
+
+        state
+            .app_turn
+            .as_mut()
+            .unwrap()
+            .turn
+            .tools
+            .push(zcode_tui::AppToolCall {
+                name: "Bash".to_string(),
+                output: "done".to_string(),
+                success: true,
+                finished: true,
+                ..Default::default()
+            });
+        state.app_push_tool_entry(0);
+        assert_eq!(state.committable_log_end(), 2);
+
+        state
+            .app_turn
+            .as_mut()
+            .unwrap()
+            .turn
+            .text
+            .push_str(" after tool");
+        state.app_append_text();
+        assert_eq!(state.committable_log_end(), 2);
+        assert_eq!(state.log.len(), 3);
+
+        state.finalize_app_turn();
+        assert_eq!(state.committable_log_end(), 3);
+    }
+
+    #[test]
+    fn completed_long_output_expands_in_read_only_overlay() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        let output = (0..=FOLD_THRESHOLD)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state.log.push(LogLine::new(LogKind::Tool, &output));
+        state.flushed_log = 1;
+
+        state.toggle_fold();
+        assert_eq!(state.expanded_log, Some((0, 0)));
+
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(state.expanded_log, None);
+    }
+
+    #[test]
+    fn user_message_spaces_share_the_message_band_background() {
+        let theme = Theme::zhipu(false);
+        let entry = LogLine::new(LogKind::User, "hello   world");
+        let items = log_to_items(&entry, 40, &theme, SkylineMode::None);
+        let area = Rect::new(0, 0, 40, items.len() as u16);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        Widget::render(List::new(items), area, &mut buffer);
+
+        assert_eq!(
+            buffer.cell((8, 1)).expect("first space").bg,
+            buffer.cell((3, 1)).expect("first letter").bg
+        );
+        assert_ne!(buffer.cell((8, 1)).expect("first space").bg, Color::Reset);
+    }
+
+    #[test]
+    fn assistant_output_has_symmetric_vertical_padding() {
+        let theme = Theme::zhipu(false);
+        let entry = LogLine::new(LogKind::Assistant, "answer");
+        let items = log_to_items(&entry, 40, &theme, SkylineMode::None);
+
+        assert_eq!(items.len(), 2);
+        let log = vec![entry, LogLine::new(LogKind::System, "next")];
+        assert!(!log_entry_needs_separator(&log, 1));
+    }
+
+    #[test]
+    fn suggestions_never_render_above_inline_viewport() {
+        let viewport = Rect::new(0, 50, 106, 10);
+        let composer = Rect::new(0, 55, 106, 3);
+        let area = suggestion_popup_area(viewport, composer, SUGGESTION_LIMIT)
+            .expect("suggestions fit above composer");
+
+        assert_eq!(area.y, viewport.y);
+        assert_eq!(area.height, 5);
+        assert!(viewport.contains(area.as_position()));
+    }
 
     #[test]
     fn enter_accepts_and_runs_partial_slash_command() {
