@@ -1,8 +1,0 @@
-{
-  "schema": "feature-review/v1",
-  "feature_id": "feat-tool-output-clarity",
-  "status": "passed",
-  "score": 92,
-  "reviewed_at": "2026-08-26T14:43:42Z",
-  "blocking_issues": []
-}

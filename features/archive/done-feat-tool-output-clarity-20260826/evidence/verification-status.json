@@ -9,5 +9,5 @@
   "scenarios": {"total": 5, "passed": 5, "failed": 0},
   "blocking_failures": [],
   "warnings": [],
-  "report": "features/active-feat-tool-output-clarity/evidence/verification-report.md"
+  "report": "features/archive/done-feat-tool-output-clarity-20260826/evidence/verification-report.md"
 }
