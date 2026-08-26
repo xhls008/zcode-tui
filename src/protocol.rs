@@ -776,6 +776,39 @@ pub fn app_subagents_params(session_id: &str) -> serde_json::Value {
     serde_json::json!({ "sessionId": session_id })
 }
 
+/// `session/cancelBackgroundTask` accepts only the parent session id and the
+/// exact kernel task id. Its strict schema rejects display/child/agent ids.
+pub fn app_cancel_background_task_params(session_id: &str, task_id: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id, "taskId": task_id })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelBackgroundTaskOutcome {
+    pub task_id: String,
+    pub cancelled: bool,
+    pub status: Option<String>,
+    pub reason: Option<String>,
+}
+
+pub fn parse_cancel_background_task_result(
+    result: &serde_json::Value,
+) -> Option<CancelBackgroundTaskOutcome> {
+    Some(CancelBackgroundTaskOutcome {
+        task_id: result.get("taskId")?.as_str()?.to_string(),
+        cancelled: result
+            .get("cancelled")
+            .and_then(serde_json::Value::as_bool)?,
+        status: result
+            .get("status")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        reason: result
+            .get("reason")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+    })
+}
+
 /// One normalized row from either `session/subagents` or the V4 state plane.
 /// Identifiers deliberately remain separate: kernels use each one for a
 /// different control/correlation domain and they are not interchangeable.

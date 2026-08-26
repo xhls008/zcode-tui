@@ -92,10 +92,17 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
         parts[0],
         &mut ListState::default().with_selected(state.agents.selected()),
     );
+    let cancel_hint = if state.agents.selected_cancel_eligible() {
+        " · x cancels selected task"
+    } else {
+        ""
+    };
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
-                "Enter details · ↑↓ select · Ctrl+X Y copies last reply · Esc closes",
+                format!(
+                    "Enter details · ↑↓ select{cancel_hint} · Ctrl+X Y copies last reply · Esc closes"
+                ),
                 t.dim(),
             )),
             Line::from(vec![
@@ -202,6 +209,14 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             "cancellable",
             if task.cancellable { "yes" } else { "no" },
         );
+        let cancel_state = match task.task_id.as_deref() {
+            Some(task_id) if state.agents.cancel_pending(task_id) => {
+                "request pending; waiting for kernel response"
+            }
+            Some(_) if state.agents.selected_cancel_eligible() => "press x to cancel this task",
+            _ => "unavailable for this record",
+        };
+        push_field(&mut lines, state, "cancel", cancel_state);
         if let Some(revision) = task.revision {
             push_field(&mut lines, state, "revision", &revision.to_string());
         }
