@@ -309,17 +309,17 @@ out = run_pty(
     [
         (2.0, b"/skills list"),
         (0.5, b"\r"),
-    ] + [(0.5, b"\x1b[5~")] * 32 + [   # PgUp back through the tall listing
+    ] + [
         (1.0, b"/exit"),
         (0.5, b"\r"),
     ],
     timeout=30,
 )
 plain = strip_ansi(out)
-# Tail is visible immediately; the head must be reachable by scrolling.
+# The full listing is emitted to native terminal scrollback.
 check("s7b: last listed skill visible without expanding",
       "zcode-configuration-guide" in plain)
-check("s7b: first listed skill reachable via PgUp", "diagnosing-commands" in plain)
+check("s7b: first listed skill emitted", "diagnosing-commands" in plain)
 check("s7b: listing not folded", "lines · Ctrl+O)" not in plain)
 
 # ---- scenario 8: ui config color override (user story: 换掉强调色) ----

@@ -1597,7 +1597,7 @@ launch options:
 
 keys:
   Ctrl+P                       command palette
-  Ctrl+X then p/h/e/x/u/y/q    leader shortcuts (y copies the last reply)
+  Ctrl+X then p/h/e/x/u/y/q    leader shortcuts (y copies last reply)
   Tab / Up / Down              navigate and accept suggestions
   Shift+Tab                    cycle permission mode
   Enter                        accept selected suggestion or send; plain text
@@ -1609,10 +1609,9 @@ keys:
   Ctrl+J                       insert newline
   Ctrl+R                       reverse-search input history
   Ctrl+O                       expand / fold the last long output
-  PageUp / PageDown            scroll the transcript
-  Mouse drag                   terminal-native text selection (default)
-  Mouse wheel                  scroll when config sets mouse = on; hold Shift
-                               to select (ZCODE_TUI_NO_MOUSE=1 overrides it)
+  Mouse drag                   terminal-native text selection
+  Mouse wheel                  scroll terminal history
+  Cmd+C / Ctrl+C               system terminal copy
   Esc                          close popups / cancel running job
 "#
 }
@@ -1777,6 +1776,15 @@ pub fn markdown_lines(input: &str, width: usize) -> Vec<StyledLine> {
     let mut list_stack: Vec<Option<u64>> = Vec::new();
     let mut pending_marker: Option<String> = None;
 
+    fn separate(out: &mut Vec<StyledLine>) {
+        if out.last().is_some_and(|line| !line.spans.is_empty()) {
+            out.push(StyledLine {
+                spans: Vec::new(),
+                kind: MdLineKind::Text,
+            });
+        }
+    }
+
     fn flush(
         out: &mut Vec<StyledLine>,
         current: &mut Vec<StyledSpan>,
@@ -1820,6 +1828,7 @@ pub fn markdown_lines(input: &str, width: usize) -> Vec<StyledLine> {
             Event::End(TagEnd::Table) => {
                 emit_table(&table_rows, &mut out);
                 in_table = false;
+                separate(&mut out);
             }
             Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
                 table_row.clear();
@@ -1836,6 +1845,7 @@ pub fn markdown_lines(input: &str, width: usize) -> Vec<StyledLine> {
             Event::End(TagEnd::Heading(_)) => {
                 flush(&mut out, &mut current, kind, quote, width);
                 kind = MdLineKind::Text;
+                separate(&mut out);
             }
             Event::Start(Tag::Strong) => strong += 1,
             Event::End(TagEnd::Strong) => strong = strong.saturating_sub(1),
@@ -1844,7 +1854,10 @@ pub fn markdown_lines(input: &str, width: usize) -> Vec<StyledLine> {
             Event::Start(Tag::Link { .. }) => link += 1,
             Event::End(TagEnd::Link) => link = link.saturating_sub(1),
             Event::Start(Tag::BlockQuote(_)) => quote += 1,
-            Event::End(TagEnd::BlockQuote(_)) => quote = quote.saturating_sub(1),
+            Event::End(TagEnd::BlockQuote(_)) => {
+                quote = quote.saturating_sub(1);
+                separate(&mut out);
+            }
             Event::Start(Tag::CodeBlock(block)) => {
                 flush(&mut out, &mut current, kind, quote, width);
                 in_code_block = true;
@@ -1867,6 +1880,7 @@ pub fn markdown_lines(input: &str, width: usize) -> Vec<StyledLine> {
             Event::End(TagEnd::CodeBlock) => {
                 render_code_block(&code_lang, &code_buffer, &mut out);
                 in_code_block = false;
+                separate(&mut out);
             }
             Event::Start(Tag::List(start)) => list_stack.push(start),
             Event::End(TagEnd::List(_)) => {
@@ -1887,8 +1901,12 @@ pub fn markdown_lines(input: &str, width: usize) -> Vec<StyledLine> {
             Event::End(TagEnd::Item) => {
                 flush(&mut out, &mut current, kind, quote, width);
             }
-            Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => {
+            Event::Start(Tag::Paragraph) => {
                 flush(&mut out, &mut current, kind, quote, width);
+            }
+            Event::End(TagEnd::Paragraph) => {
+                flush(&mut out, &mut current, kind, quote, width);
+                separate(&mut out);
             }
             Event::Rule => {
                 flush(&mut out, &mut current, kind, quote, width);
@@ -1899,6 +1917,7 @@ pub fn markdown_lines(input: &str, width: usize) -> Vec<StyledLine> {
                     )],
                     kind: MdLineKind::Rule,
                 });
+                separate(&mut out);
             }
             Event::Text(text) => {
                 if in_table {
@@ -1932,6 +1951,9 @@ pub fn markdown_lines(input: &str, width: usize) -> Vec<StyledLine> {
         }
     }
     flush(&mut out, &mut current, kind, quote, width);
+    while out.last().is_some_and(|line| line.spans.is_empty()) {
+        out.pop();
+    }
     out
 }
 

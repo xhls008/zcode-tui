@@ -46,8 +46,8 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 
 **视觉与渲染**
 
-- Codex 风布局：无边框流式 transcript，用户消息和输入框用浅色底横条 +
-  `›` 提示符，助手回复 `•` 开头平铺，会话信息横幅进 transcript，
+- Codex 风布局：无边框流式 transcript，用户消息使用背景横条和 `›` 提示符，
+  助手回复 `•` 开头平铺，会话信息横幅进 transcript，
   底部一行 dim 快捷键提示（运行任务时变 spinner 工作行）。
 - 智谱风配色：GLM 蓝单一强调色 + 冷灰中性色阶，行内代码蓝色文字、
   引用绿色，语义绿/红只用于 diff 与错误；
@@ -55,11 +55,12 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 - **语法高亮**：围栏代码块按语言用 syntect 着色（Codex 同款方案，
   base16-ocean 主题）+ dim 行号 gutter；` ```diff ` 围栏按
   +绿/−红/@@蓝 渲染（+/- 是 diff 专属语义，普通代码块只有行号）。
-- **启动欢迎框**：Codex 风圆角信息框，显示内核/TUI 版本、目录、
-  mode、auth 及对应的切换命令提示。
+- **启动欢迎框**：圆角信息框内同时保留最初的 Z 图标与官方 SVG 字标重制的
+  黑白纯文本 ZCODE Logo，显示内核/TUI 版本、目录、mode、auth 及对应提示；
+  终端宽度不足时自动隐藏大字标，不缩放成模糊点阵。
 - **官方更新检测**：启动时后台读取 `/opt/ZCode` 的 electron-updater
   配置并拉取官方 `latest-linux.yml`（与桌面端同一发布渠道），发现新版
-  时显示天坛/鸟巢/长城/清华校门元素的 ZCODE ASCII logo 和 Tip 提示
+  时显示官方 ZCODE 纯文本字标；SVG 保留为品牌参考源码，并显示 Tip 提示
   （含 changelog 链接与 deb 直链）；`ZCODE_TUI_NO_UPDATE_CHECK=1` 关闭。
 - **Markdown 渲染**：助手回复按 markdown 渲染——标题、粗斜体、行内代码、
   围栏代码块、列表、引用、**表格（按显示宽度对齐列）**、分隔线
@@ -92,12 +93,13 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   spinner 显示耗时，`Esc`/`Ctrl+C` 取消，忙时新输入自动排队。
 - **实时进度**：prompt 运行期间只读轮询内核会话库（`~/.zcode/cli/db/db.sqlite`，
   内核边跑边写），工作区实时显示工具 chip（运行中 spinner → 完成 ✓ + 耗时 /
-  失败 ✗）、最新 reasoning、以及**正在成形的助手正文**（多步回合里逐步落库）；
-  仅运行时显示、结束即清场；schema 不识别或库缺失时整组自动降级。
-- **真流式（默认开启）**：接内核 `zcode app-server`
+  失败 ✗）和最新 reasoning；仅运行时显示、结束即清场；schema 不识别或库缺失
+  时整组自动降级。
+- **阶段流式（默认开启）**：接内核 `zcode app-server`
   协议（`session/create → subscribe → send`），助手正文经 `session/event`
-  的 `text_delta` 逐 token 增量渲染进 transcript——**单轮纯问答也真流式**，
-  补齐上面 db 轮询对单轮无中间态的空缺。任一环节失败（起不动 /
+  的 `text_delta` 累积；工具开始时冻结并追加前一段正文，工具完成时追加结果，
+  回合完成时追加尾段。已经进入终端 scrollback 的行永不回写或重排。任一环节
+  失败（起不动 /
   握手超时 / schema 不符 / 断连）→ 本进程永久无缝降级回 `--prompt` + 一条
   dim 提示，当前 prompt 用 `--prompt` 重试一次，用户永不卡死；需要经典
   `--prompt` 路径时设 `ZCODE_TUI_APP_SERVER=0`。ZCode 3.5.3 上会在 legacy
@@ -147,11 +149,17 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   `session/send` 的 `attachments[]`（图片扩展名走 image、其余按扩展名给
   mimeType，`localPath` 直引本机文件）——两条路径都能让模型读到文件。
 - readline 式光标编辑：Left/Right、Home/End、`Ctrl+A/E`、`Ctrl+W`、Delete。
+- 输入框按终端显示宽度自动换行（中文按双宽字符计算）；超过五行时输入视口
+  自动跟随光标，不再把持续输入截断在右边缘。
 - **持久输入历史**：启动时读入内核 `input_history`（内核记录每条 --prompt），
   Up/Down 跨进程可用；`Ctrl+R` 反向搜索（子串过滤、新→旧、Enter 取回）。
-- 默认不捕获鼠标，可直接拖选用户消息、思考过程与助手回复并使用终端复制；
-  `PageUp/PageDown` 回看 transcript。需要鼠标滚轮回看时可配置 `mouse = on`，
-  此时按住 Shift 仍可使用终端原生选择；`ZCODE_TUI_NO_MOUSE=1` 强制关闭捕获。
+- 使用普通屏幕的 Ratatui inline viewport：完成的对话写入终端 scrollback，底部
+  只重绘流式状态和输入框。应用不捕获鼠标，滚轮、普通拖选以及 macOS
+  `Cmd+C` / Windows、Linux `Ctrl+C` 全部由系统终端原生处理；scrolling-region
+  稀疏写入不会把行尾空格固化到历史中，窗口缩放时由终端正常重排。
+- 对话按产生顺序持续追加：完成的用户、正文阶段、工具结果和助手尾段进入系统
+  scrollback，底部只显示尚未完成的 thinking 状态与输入框；不固定轮数，也不按
+  可用高度重新排列历史。
 - **长输出折叠**：工具/系统/diff/错误单元超过 24 行默认折叠为头 8 行 +
   `… (+N lines · Ctrl+O)`，`Ctrl+O` 展开/收起；助手回复永不折叠。
 - **OSC52 复制**：`Ctrl+X` 后 `y` 或 `/copy` 把最后一条助手回复写进系统
@@ -166,7 +174,7 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 - bracketed paste：多行粘贴不会误触发提交。
 - `Ctrl+P` 命令面板；OpenCode 风格 leader key：`Ctrl+X` 后接 `p/h/e/x/u/q`。
 - `Ctrl+G` 或 `/editor` 调 `$VISUAL`/`$EDITOR` 编辑长 prompt；`Ctrl+J` 多行输入。
-- Up/Down 输入历史；PgUp/PgDn 回看滚动（自动跟随最新输出）。
+- Up/Down 输入历史；历史回看使用终端原生滚轮或系统 scrollback 快捷键。
 
 **认证**
 
@@ -407,7 +415,7 @@ Ctrl+G                       用 $VISUAL 或 $EDITOR 编辑当前输入
 Ctrl+J                       插入换行
 Ctrl+R                       反向搜索输入历史
 Ctrl+O                       展开 / 折叠最近的长输出
-PgUp / PgDn / 鼠标滚轮       回看滚动 / 跟随最新输出
+鼠标滚轮 / 普通拖选          浏览终端历史 / 系统原生选择
 ?                            空输入时打开帮助
 ```
 
@@ -429,13 +437,8 @@ ZCODE_TUI_APP_SERVER         默认启用真流式（走 zcode app-server，逐 
                              协商 V4。设 0/off/false/no 关闭；1/true/on 继续
                              兼容旧 wrapper
 ZCODE_API_KEY 等             /auth 检测的 API key 环境变量链
-ZCODE_TUI_NO_MOUSE           置 1 关闭鼠标捕获
-ZCODE_TUI_SKYLINE            欢迎页 ZCODE logo 渲染：默认探测终端图形协议
-                             （Sixel/Kitty/iTerm2），支持则贴真图（清华紫矢量
-                             logo）；不支持自动降级为文本天际线——UTF-8 环境走
-                             braille 盲文点阵（曲线更平滑），否则 wire 线框。
-                             braille / wire 可强制走文本天际线（跳过图形探测），
-                             off 关闭天际线。若点阵显示成方块/发虚，设 wire
+ZCODE_TUI_SKYLINE            欢迎页 ZCODE 纯文本 Logo；off/none/0 可关闭。
+                             终端尺寸不足时自动隐藏，不进行图片缩放
 ZCODE_TUI_CONFIG             配置文件路径（默认 ~/.config/zcode-tui/config）
 ZCODE_TUI_LOG                设为文件路径开启协议调试日志（追加式：入站
                              摘要、出站只记方法名；V4 额外记录 command type、
@@ -455,10 +458,8 @@ ZCODE_FORCE_SYSTEM_NODE      wrapper：置 1 强制用系统 Node 运行内核
 ```text
 # 主题 token 覆盖。默认是 GLM 蓝 + 冷灰终端风；官方不提供 TUI 主题，
 # 这里就把颜色控制权留给终端用户。
-# 可配置 token：accent accent_dim text dim good bad frame code_bg band_bg brand brand_dim
+# 可配置 token：accent accent_dim text dim good bad frame code_bg band_bg
 accent = #6088ff
-# 可选：捕获鼠标以启用滚轮回看；默认 off，方便直接拖选复制
-mouse = on
 # 关闭 >30s 回合完成铃（默认开启）
 notify = off
 ```

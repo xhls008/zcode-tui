@@ -68,10 +68,13 @@ for details.
 - Optional official update check using the same Linux update feed as the
   desktop app.
 
-**True streaming (default on)**
+**Phased streaming (default on)**
 
 - Prompts run through the kernel's `zcode app-server` protocol and the answer
-  streams into the transcript token by token — single-turn Q&A included.
+  accumulates from text deltas. A tool start commits the preceding text phase,
+  a tool result appends when complete, and turn completion appends the final
+  text phase. Rows already in terminal scrollback are never rewritten or
+  reordered.
 - On ZCode 3.5.3, the proven legacy create/resume/subscribe/send/event body
   stream is retained while `v4/conversation/subscribe` provides the new
   control plane. Older kernels that do not expose V4 keep their legacy
@@ -139,7 +142,8 @@ for details.
 
 - Rust + Ratatui + Crossterm, shipped as a single static Linux binary in
   GitHub Releases.
-- CJK-aware wrapping and cursor placement.
+- CJK-aware transcript and composer wrapping; long input grows to five rows,
+  then keeps the cursor visible in a scrolling composer viewport.
 - Non-blocking streaming jobs for prompts, shell commands, and diffs.
 - Esc/Ctrl+C cancellation with process-group kill on Unix.
 - Busy input queueing.
@@ -148,9 +152,13 @@ for details.
   path traversal and symlink escapes.
 - Persistent prompt history from the ZCode kernel database, plus Ctrl+R reverse
   search.
-- Mouse capture is off by default for native drag selection and copying;
-  PageUp/PageDown scroll the transcript. Set `mouse = on` for wheel scrolling
-  (hold Shift to select), or force capture off with `ZCODE_TUI_NO_MOUSE=1`.
+- The TUI uses a normal-screen Ratatui inline viewport. Completed phases append
+  to terminal scrollback in chronological order; only unfinished thinking
+  state and the composer remain in the viewport. Mouse capture is
+  never enabled, so wheel scrolling,
+  ordinary drag selection, and system Cmd+C/Ctrl+C work natively. Sparse
+  scrolling-region writes keep trailing spaces out of history so terminal
+  reflow remains stable after a window resize.
 - Long output folding via Ctrl+O.
 - Bracketed paste support.
 - Ctrl+P command palette, Ctrl+X leader shortcuts, Ctrl+G external editor.
@@ -341,12 +349,8 @@ Line format:
 
 ```text
 # Theme token overrides. The default theme is GLM blue plus cool terminal gray.
-# Tokens: accent accent_dim text dim good bad frame code_bg band_bg brand brand_dim
+# Tokens: accent accent_dim text dim good bad frame code_bg band_bg
 accent = #6088ff
-
-# Optional: capture the mouse for wheel scrolling. Off by default so text can
-# be selected and copied directly.
-mouse = on
 
 # Disable the >30s turn-complete terminal bell.
 notify = off
@@ -368,8 +372,8 @@ ZCODE_TUI_APP_SERVER        (set 0/off/false to force the classic --prompt path)
 ZCODE_TUI_LOG               (file path: append-only protocol debug log;
                              outbound entries are method names only — request
                              params, runtimeModel, and apiKey never touch disk)
-ZCODE_TUI_NO_MOUSE
-ZCODE_TUI_SKYLINE
+ZCODE_TUI_SKYLINE           (ASCII ZCODE logo; off/none/0 disables it; hidden
+                             automatically when the terminal is too small)
 ZCODE_TUI_CONFIG
 ZCODE_APP
 ZCODE_FALLBACK_TUI
