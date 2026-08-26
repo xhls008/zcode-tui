@@ -1,0 +1,47 @@
+{
+  "schema": "feature-workflow/v1",
+  "project": {
+    "name": "zcode-tui",
+    "main_branch": "main",
+    "repo_path": "."
+  },
+  "parallelism": {
+    "max_concurrent": 1
+  },
+  "workflow": {
+    "routing": {
+      "default": "lite",
+      "deep_signals": [
+        "multi_module",
+        "public_api",
+        "database_migration",
+        "parallel_split",
+        "external_dependency",
+        "authorization",
+        "data_consistency",
+        "compatibility"
+      ],
+      "allow_manual_override": true
+    },
+    "review": {
+      "required_for": [
+        "deep"
+      ],
+      "min_score": 70
+    },
+    "require_checklist": true,
+    "require_verification": true
+  },
+  "git": {
+    "remote": "origin",
+    "auto_push": false,
+    "push_tags": false,
+    "branch_prefix": "feature",
+    "worktree_base": ".."
+  },
+  "completion": {
+    "create_tag": true,
+    "delete_worktree": true,
+    "delete_branch": true
+  }
+}

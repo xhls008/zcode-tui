@@ -5,3 +5,4 @@
 ZCode-*.deb
 ZCode-*.deb.part
 .DS_Store
+/feature-workflow/.state.lock

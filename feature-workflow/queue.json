@@ -1,0 +1,137 @@
+{
+  "schema": "feature-workflow/v1",
+  "meta": {
+    "last_updated": "2026-08-26T14:43:37Z"
+  },
+  "parents": [],
+  "active": [],
+  "pending": [
+    {
+      "id": "feat-tool-output-clarity",
+      "name": "Clear tool output without manual folding",
+      "description": "Keep the parent transcript concise with structured tool summaries while preserving diagnostics and all user-requested output.",
+      "priority": 100,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "multi_module",
+        "compatibility",
+        "parallel_split"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "created_at": "2026-08-26T14:43:35Z"
+    },
+    {
+      "id": "feat-tui-module-boundaries",
+      "name": "Stable TUI module boundaries",
+      "description": "Preserve existing TUI behavior while separating app, protocol, transcript, agents, and rendering responsibilities into testable modules.",
+      "priority": 90,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "multi_module",
+        "compatibility",
+        "parallel_split"
+      ],
+      "dependencies": [
+        "feat-tool-output-clarity"
+      ],
+      "status": "pending",
+      "created_at": "2026-08-26T14:43:35Z"
+    },
+    {
+      "id": "feat-subagent-state-sync",
+      "name": "Reliable official Subagent state",
+      "description": "Restore and continuously reconcile Subagent and background-work state from official app-server and V4 sources without confusing Bash tasks with Subagents.",
+      "priority": 80,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "public_api",
+        "external_dependency",
+        "data_consistency",
+        "compatibility",
+        "parallel_split"
+      ],
+      "dependencies": [
+        "feat-tui-module-boundaries"
+      ],
+      "status": "pending",
+      "created_at": "2026-08-26T14:43:36Z"
+    },
+    {
+      "id": "feat-agent-inspector",
+      "name": "Read-only Agent Inspector",
+      "description": "Let users inspect parent, Subagent, and background-work status and details in a dedicated read-only interface without changing the input target.",
+      "priority": 70,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "multi_module",
+        "compatibility",
+        "parallel_split"
+      ],
+      "dependencies": [
+        "feat-subagent-state-sync"
+      ],
+      "status": "pending",
+      "created_at": "2026-08-26T14:43:36Z"
+    },
+    {
+      "id": "feat-child-transcript-capability",
+      "name": "Child session transcript capability decision",
+      "description": "Determine with reproducible protocol evidence whether inactive child-session transcripts can be read safely, and either define the supported detail path or record the safe exclusion.",
+      "priority": 65,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "public_api",
+        "external_dependency",
+        "compatibility",
+        "parallel_split"
+      ],
+      "dependencies": [
+        "feat-subagent-state-sync"
+      ],
+      "status": "pending",
+      "created_at": "2026-08-26T14:43:36Z"
+    },
+    {
+      "id": "feat-background-task-cancel",
+      "name": "Safe background task cancellation",
+      "description": "Allow users to cancel only officially cancellable background work using the exact kernel-provided task ID, with safe failure handling.",
+      "priority": 60,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "public_api",
+        "external_dependency",
+        "compatibility",
+        "parallel_split"
+      ],
+      "dependencies": [
+        "feat-agent-inspector"
+      ],
+      "status": "pending",
+      "created_at": "2026-08-26T14:43:36Z"
+    },
+    {
+      "id": "feat-subagent-tui-plan",
+      "name": "Complete Subagent TUI experience",
+      "description": "Deliver and verify the complete planned tool-output and Subagent experience as one coherent, backward-compatible TUI outcome.",
+      "priority": 50,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "multi_module",
+        "public_api",
+        "external_dependency",
+        "data_consistency",
+        "compatibility",
+        "parallel_split"
+      ],
+      "dependencies": [
+        "feat-background-task-cancel",
+        "feat-child-transcript-capability"
+      ],
+      "status": "pending",
+      "created_at": "2026-08-26T14:43:37Z"
+    }
+  ],
+  "blocked": [],
+  "completed": []
+}

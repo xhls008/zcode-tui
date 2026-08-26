@@ -1,0 +1,8 @@
+{
+  "schema": "feature-review/v1",
+  "feature_id": "feat-subagent-tui-plan",
+  "status": "passed",
+  "score": 90,
+  "reviewed_at": "2026-08-26T14:43:42Z",
+  "blocking_issues": []
+}
