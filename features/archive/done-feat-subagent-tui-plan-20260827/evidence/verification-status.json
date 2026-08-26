@@ -1,0 +1,13 @@
+{
+  "schema": "feature-verification/v1",
+  "feature_id": "feat-subagent-tui-plan",
+  "status": "passed",
+  "verified_at": "2026-08-27T00:10:00+08:00",
+  "tasks": {"total": 5, "completed": 5, "incomplete": 0},
+  "quality": {"status": "passed", "passed": 4, "failed": 0},
+  "tests": {"status": "passed", "passed": 136, "failed": 0, "skipped": 0},
+  "scenarios": {"total": 7, "passed": 7, "failed": 0},
+  "blocking_failures": [],
+  "warnings": [],
+  "report": "features/archive/done-feat-subagent-tui-plan-20260827/evidence/verification-report.md"
+}

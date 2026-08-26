@@ -1,33 +1,11 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-26T15:57:41Z"
+    "last_updated": "2026-08-26T16:11:21Z"
   },
   "parents": [],
   "active": [],
-  "pending": [
-    {
-      "id": "feat-subagent-tui-plan",
-      "name": "Complete Subagent TUI experience",
-      "description": "Deliver and verify the complete planned tool-output and Subagent experience as one coherent, backward-compatible TUI outcome.",
-      "priority": 50,
-      "workflow_mode": "deep",
-      "risk_signals": [
-        "multi_module",
-        "public_api",
-        "external_dependency",
-        "data_consistency",
-        "compatibility",
-        "parallel_split"
-      ],
-      "dependencies": [
-        "feat-background-task-cancel",
-        "feat-child-transcript-capability"
-      ],
-      "status": "pending",
-      "created_at": "2026-08-26T14:43:37Z"
-    }
-  ],
+  "pending": [],
   "blocked": [],
   "completed": [
     {
@@ -268,6 +246,46 @@
         "blocking_failures": [],
         "warnings": [],
         "report": "features/active-feat-background-task-cancel/evidence/verification-report.md"
+      }
+    },
+    {
+      "id": "feat-subagent-tui-plan",
+      "name": "Complete Subagent TUI experience",
+      "status": "completed",
+      "completed_at": "2026-08-26T16:11:21Z",
+      "archive_path": "features/archive/done-feat-subagent-tui-plan-20260827",
+      "tag": "feat-subagent-tui-plan-20260827",
+      "merge_commit": "a98a9751f25f325e729407574fc14bd5b5b679b9",
+      "workflow_mode": "deep",
+      "verification": {
+        "schema": "feature-verification/v1",
+        "feature_id": "feat-subagent-tui-plan",
+        "status": "passed",
+        "verified_at": "2026-08-27T00:10:00+08:00",
+        "tasks": {
+          "total": 5,
+          "completed": 5,
+          "incomplete": 0
+        },
+        "quality": {
+          "status": "passed",
+          "passed": 4,
+          "failed": 0
+        },
+        "tests": {
+          "status": "passed",
+          "passed": 136,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scenarios": {
+          "total": 7,
+          "passed": 7,
+          "failed": 0
+        },
+        "blocking_failures": [],
+        "warnings": [],
+        "report": "features/archive/done-feat-subagent-tui-plan-20260827/evidence/verification-report.md"
       }
     }
   ]
