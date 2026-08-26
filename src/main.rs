@@ -56,6 +56,10 @@ use zcode_tui::{
     ToolChipStatus, TurnDelta, UiConfig, UpdateFeed, V4CommandBase, V4ConversationState,
 };
 
+mod agents;
+
+use agents::AgentInspectorState;
+
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -697,16 +701,6 @@ struct AppTurn {
     send_id: u64,
 }
 
-/// A background task observed through the kernel's lifecycle-only events.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BackgroundTask {
-    id: String,
-    tool: String,
-    status: String,
-    pid: Option<u64>,
-    command: Option<String>,
-}
-
 /// A non-blocking `session/create` → `session/subscribe` handshake in flight.
 /// Driven off the main loop so the UI keeps rendering (and Esc keeps working)
 /// instead of freezing on two synchronous 20s blocking calls.
@@ -777,8 +771,7 @@ struct UiState {
     /// /sessions picker overlay: rows + selected index.
     session_picker: Option<(Vec<SessionRow>, usize)>,
     /// Background tasks observed in the current session + /agents selection.
-    background_tasks: Vec<BackgroundTask>,
-    background_task_picker: Option<usize>,
+    agents: AgentInspectorState,
     /// /model picker overlay: selected index into `controls.models`.
     model_picker: Option<usize>,
     /// Model selected before the first app-server session exists. Applied
@@ -966,8 +959,7 @@ impl UiState {
             queued: VecDeque::new(),
             tick: 0,
             session_picker: None,
-            background_tasks: Vec::new(),
-            background_task_picker: None,
+            agents: AgentInspectorState::default(),
             model_picker: None,
             pending_model: None,
             model_provider: None,
@@ -1304,7 +1296,7 @@ impl UiState {
         if self.interaction.is_some() {
             return self.handle_interaction_key(key);
         }
-        if self.background_task_picker.is_some() {
+        if self.agents.is_open() {
             self.handle_background_task_key(key);
             return None;
         }
@@ -2803,55 +2795,7 @@ fi"#
 
     /// Cache the latest lifecycle state for the read-only /agents overlay.
     fn capture_background_task_event(&mut self, event: &AppServerEvent) {
-        if !matches!(
-            event.kind.as_str(),
-            "background_task_started" | "background_task_updated" | "background_task_completed"
-        ) {
-            return;
-        }
-        let Some(id) = event.task_id.as_ref().or(event.tool_call_id.as_ref()) else {
-            return;
-        };
-        let fallback_status = match event.kind.as_str() {
-            "background_task_started" => "running",
-            "background_task_completed" => "completed",
-            _ => "updated",
-        };
-        if let Some(task) = self.background_tasks.iter_mut().find(|task| task.id == *id) {
-            task.status = event
-                .status
-                .clone()
-                .unwrap_or_else(|| fallback_status.to_string());
-            if let Some(tool) = &event.tool_name {
-                task.tool.clone_from(tool);
-            }
-            if event.pid.is_some() {
-                task.pid = event.pid;
-            }
-            if event.command.is_some() {
-                task.command.clone_from(&event.command);
-            }
-        } else {
-            self.background_tasks.insert(
-                0,
-                BackgroundTask {
-                    id: id.clone(),
-                    tool: event
-                        .tool_name
-                        .clone()
-                        .unwrap_or_else(|| "task".to_string()),
-                    status: event
-                        .status
-                        .clone()
-                        .unwrap_or_else(|| fallback_status.to_string()),
-                    pid: event.pid,
-                    command: event.command.clone(),
-                },
-            );
-        }
-        if let Some(index) = &mut self.background_task_picker {
-            *index = (*index).min(self.background_tasks.len().saturating_sub(1));
-        }
+        self.agents.ingest(event);
     }
 
     /// Merge a control-surface push into the cache, echoing actual changes in
@@ -4071,16 +4015,14 @@ fi"#
         self.v4_mode = V4Mode::Unknown;
         self.v4_state = V4ConversationState::default();
         self.pending_v4_steers.clear();
-        self.background_tasks.clear();
-        self.background_task_picker = None;
+        self.agents.reset();
     }
 
     fn open_background_tasks(&mut self) {
-        if self.background_tasks.is_empty() {
+        if !self.agents.open() {
             self.push_system("no background tasks observed in this session");
             return;
         }
-        self.background_task_picker = Some(0);
         self.show_palette = false;
         self.show_help = false;
         self.status = "background tasks: ↑↓ select · Esc close (read-only)".to_string();
@@ -4089,23 +4031,13 @@ fi"#
     fn handle_background_task_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.background_task_picker = None;
+                self.agents.close();
                 self.status = "background task list closed".to_string();
             }
-            KeyCode::Up => {
-                if let Some(index) = &mut self.background_task_picker {
-                    *index = index.saturating_sub(1);
-                }
-            }
-            KeyCode::Down => {
-                if let Some(index) = &mut self.background_task_picker {
-                    *index = (*index + 1).min(self.background_tasks.len().saturating_sub(1));
-                }
-            }
-            KeyCode::Home => self.background_task_picker = Some(0),
-            KeyCode::End => {
-                self.background_task_picker = Some(self.background_tasks.len().saturating_sub(1));
-            }
+            KeyCode::Up => self.agents.select_previous(),
+            KeyCode::Down => self.agents.select_next(),
+            KeyCode::Home => self.agents.select_first(),
+            KeyCode::End => self.agents.select_last(),
             _ => {}
         }
     }
@@ -4918,7 +4850,7 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     if state.session_picker.is_some() {
         render_session_picker(frame, centered_rect(84, 60, root), state);
     }
-    if state.background_task_picker.is_some() {
+    if state.agents.is_open() {
         render_background_tasks(frame, centered_rect(92, 90, root), state);
     }
     if state.model_picker.is_some() {
@@ -6278,7 +6210,7 @@ fn render_session_picker(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
 }
 
 fn render_background_tasks(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
-    let Some(selected) = state.background_task_picker else {
+    let Some(selected) = state.agents.selected() else {
         return;
     };
     let t = &state.theme;
@@ -6296,7 +6228,8 @@ fn render_background_tasks(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
         .constraints([Constraint::Min(1), Constraint::Length(3)])
         .split(inner);
     let items = state
-        .background_tasks
+        .agents
+        .tasks()
         .iter()
         .map(|task| {
             let status = task.status.to_ascii_lowercase();
@@ -6319,7 +6252,7 @@ fn render_background_tasks(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             ]))
         })
         .collect::<Vec<_>>();
-    let selected = selected.min(state.background_tasks.len().saturating_sub(1));
+    let selected = selected.min(state.agents.tasks().len().saturating_sub(1));
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
     frame.render_stateful_widget(
@@ -6330,7 +6263,7 @@ fn render_background_tasks(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
         &mut ListState::default().with_selected(Some(selected)),
     );
 
-    if let Some(task) = state.background_tasks.get(selected) {
+    if let Some(task) = state.agents.tasks().get(selected) {
         let command = task
             .command
             .as_deref()
@@ -6571,19 +6504,16 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(state.background_tasks.len(), 1);
-        assert_eq!(state.background_tasks[0].status, "completed");
-        assert_eq!(state.background_tasks[0].pid, Some(4242));
-        assert_eq!(
-            state.background_tasks[0].command.as_deref(),
-            Some("sleep 12")
-        );
+        assert_eq!(state.agents.tasks().len(), 1);
+        assert_eq!(state.agents.tasks()[0].status, "completed");
+        assert_eq!(state.agents.tasks()[0].pid, Some(4242));
+        assert_eq!(state.agents.tasks()[0].command.as_deref(), Some("sleep 12"));
 
         state.open_background_tasks();
-        assert_eq!(state.background_task_picker, Some(0));
+        assert_eq!(state.agents.selected(), Some(0));
         state.reset_rewind_state();
-        assert!(state.background_tasks.is_empty());
-        assert_eq!(state.background_task_picker, None);
+        assert!(state.agents.tasks().is_empty());
+        assert_eq!(state.agents.selected(), None);
     }
 
     #[test]
