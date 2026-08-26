@@ -1367,7 +1367,14 @@ fn failed_internal_tools_keep_a_bounded_diagnostic_tail() {
 
 #[test]
 fn help_no_longer_advertises_output_folding() {
-    assert!(!zcode_tui::help_text().contains("Ctrl+O"));
+    let help = zcode_tui::help_text();
+    assert!(!help.contains("Ctrl+O"));
+    assert!(help.contains("keyboard shortcuts:"));
+    assert!(help.contains("Ctrl+J"));
+    assert!(help.contains("Ctrl+P"));
+    assert!(help.contains("Ctrl+X, then h"));
+    assert!(help.contains("PgUp/PgDn"));
+    assert!(help.find("keyboard shortcuts:") < help.find("launch options:"));
 }
 
 #[test]

@@ -613,6 +613,7 @@ struct UiState {
     status: String,
     auth_label: String,
     show_help: bool,
+    help_scroll: u16,
     show_palette: bool,
     leader_pending: bool,
     suggestions: Vec<Suggestion>,
@@ -813,6 +814,7 @@ impl UiState {
             status: "ready".to_string(),
             auth_label,
             show_help: false,
+            help_scroll: 0,
             show_palette: false,
             leader_pending: false,
             suggestions: Vec::new(),
@@ -1176,6 +1178,23 @@ impl UiState {
         if self.history_query.is_some() {
             return self.handle_history_search_key(key);
         }
+        if self.show_help {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') => self.show_help = false,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.help_scroll = self.help_scroll.saturating_add(1)
+                }
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(8),
+                KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(8),
+                KeyCode::Home => self.help_scroll = 0,
+                KeyCode::End => self.help_scroll = u16::MAX,
+                _ => {}
+            }
+            return None;
+        }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
@@ -1221,6 +1240,7 @@ impl UiState {
             }
             KeyCode::Char('?') if self.input.is_empty() => {
                 self.show_help = !self.show_help;
+                self.help_scroll = 0;
                 self.show_palette = false;
                 self.status = "help toggled".to_string();
             }
@@ -1311,6 +1331,7 @@ impl UiState {
             }
             Some(LeaderAction::Help) => {
                 self.show_help = !self.show_help;
+                self.help_scroll = 0;
                 self.show_palette = false;
                 self.status = "help toggled".to_string();
             }
@@ -1435,6 +1456,7 @@ impl UiState {
         match command.first().map(String::as_str) {
             Some("help") => {
                 self.show_help = !self.show_help;
+                self.help_scroll = 0;
                 self.show_palette = false;
                 self.status = "help toggled".to_string();
                 return None;
@@ -4725,7 +4747,7 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
         render_suggestions(frame, vertical[2], state);
     }
     if state.show_help {
-        render_help_modal(frame, centered_rect(74, 70, root), &state.theme);
+        render_help_modal(frame, centered_rect(82, 86, root), state);
     }
     if state.show_palette {
         render_command_palette(frame, centered_rect(82, 68, root), state);
@@ -5962,15 +5984,38 @@ fn render_history_search(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     );
 }
 
-fn render_help_modal(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+fn render_help_modal(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
+    let theme = &state.theme;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.frame())
-        .title(Line::from(Span::styled(" help ".to_string(), theme.dim())));
+        .title(Line::from(Span::styled(
+            " help · ↑/↓ scroll · PgUp/PgDn · Home/End · Esc close ".to_string(),
+            theme.dim(),
+        )));
+    let content_width = area.width.saturating_sub(2);
+    let viewport_height = area.height.saturating_sub(2) as usize;
+    let wrapped_lines = help_text()
+        .lines()
+        .map(|line| {
+            UnicodeWidthStr::width(line)
+                .max(1)
+                .div_ceil(content_width.max(1) as usize)
+        })
+        .sum::<usize>();
+    let max_scroll = wrapped_lines
+        .saturating_sub(viewport_height)
+        .min(u16::MAX as usize) as u16;
+    if state.help_scroll == u16::MAX {
+        state.help_scroll = max_scroll;
+    } else {
+        state.help_scroll = state.help_scroll.min(max_scroll);
+    }
     let help = Paragraph::new(Text::styled(help_text(), theme.text()))
         .block(block)
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((state.help_scroll, 0));
     frame.render_widget(Clear, area);
     frame.render_widget(help, area);
 }
@@ -6043,6 +6088,41 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn render_help_text(state: &mut UiState, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render_help_modal(frame, frame.area(), state))
+            .expect("render help");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer.cell((x, y)).expect("cell").symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn help_prioritizes_shortcuts_and_captures_scroll_keys() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.show_help = true;
+        state.input = "unchanged".to_string();
+
+        let first_page = render_help_text(&mut state, 80, 20);
+        assert!(first_page.contains("keyboard shortcuts:"));
+        assert!(first_page.contains("Ctrl+J"));
+        assert!(first_page.contains("Ctrl+P"));
+
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(state.help_scroll, 1);
+        assert_eq!(state.input, "unchanged");
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!state.show_help);
     }
 
     #[test]

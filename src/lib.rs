@@ -1552,7 +1552,34 @@ fn handle_mcp_command(command: &[String], config: &AppConfig) -> Result<String> 
 }
 
 pub fn help_text() -> &'static str {
-    r#"zcode-tui fallback commands:
+    r#"zcode-tui help
+
+keyboard shortcuts:
+  Enter                        accept a suggestion or send the prompt
+                               while thinking: plain text steers the answer
+  Ctrl+J                       insert a newline without sending
+  Ctrl+P                       open the command palette
+  Tab / Up / Down              navigate and accept suggestions
+  Shift+Tab                    cycle permission mode
+  Left/Right Home/End          move the input cursor
+  Ctrl+A / Ctrl+E              jump to start / end of input
+  Ctrl+G                       edit the prompt in $VISUAL or $EDITOR
+  Ctrl+R                       reverse-search input history
+  Ctrl+X, then p               command palette
+  Ctrl+X, then h               help
+  Ctrl+X, then e               external editor
+  Ctrl+X, then x               clear conversation
+  Ctrl+X, then u               clear input
+  Ctrl+X, then y               copy last assistant reply
+  Ctrl+X, then q               quit
+  Mouse drag                   terminal-native text selection
+  Mouse wheel                  scroll terminal history
+  Cmd+C / Ctrl+Shift+C         system terminal copy
+  Esc                          close popup or cancel running job
+  ?                            open/close this help when input is empty
+  Help: ↑/↓, j/k             scroll one line
+        PgUp/PgDn, Home/End    scroll by page or jump to edge
+
 launch options:
   --allowed-tools <tools...>   allow only these tools for the session
   --disallowed-tools <tools...>
@@ -1607,23 +1634,6 @@ launch options:
   /clear                       clear this screen
   /exit                        quit
 
-keys:
-  Ctrl+P                       command palette
-  Ctrl+X then p/h/e/x/u/y/q    leader shortcuts (y copies last reply)
-  Tab / Up / Down              navigate and accept suggestions
-  Shift+Tab                    cycle permission mode
-  Enter                        accept selected suggestion or send; plain text
-                               sent mid-turn steers the running answer
-                               (/agents and /usage stay live; other commands queue)
-  Left/Right Home/End          move the input cursor
-  Ctrl+A / Ctrl+E              jump to start / end of input
-  Ctrl+G                       edit prompt externally
-  Ctrl+J                       insert newline
-  Ctrl+R                       reverse-search input history
-  Mouse drag                   terminal-native text selection
-  Mouse wheel                  scroll terminal history
-  Cmd+C / Ctrl+Shift+C         system terminal copy
-  Esc                          close popups / cancel running job
 "#
 }
 
