@@ -711,6 +711,8 @@ struct PendingInteraction {
 /// carries its input so a failure can requeue it instead of losing it.
 enum ControlReq {
     Command(&'static str),
+    /// Optional authoritative child-agent/background-work refresh.
+    SubagentsRefresh,
     Steer(String),
     /// V4 steer is two commands: first switch followup mode, then send text.
     V4SetGuide {
@@ -869,6 +871,8 @@ impl UiState {
     /// delivery has become visible. A command response alone is not enough:
     /// live 3.5.3 reports guide/queue in the subsequent queue frame.
     fn apply_v4_frame(&mut self, params: serde_json::Value) {
+        self.agents
+            .merge_snapshots(zcode_tui::parse_v4_agent_snapshots(&params));
         let previous_revision = self.v4_state.revision;
         let effect = self.v4_state.apply_frame(&params);
         if self.v4_state.revision != previous_revision {
@@ -1885,6 +1889,7 @@ impl UiState {
                         Ok(sub_id) => {
                             self.app_session = Some(session_id);
                             self.reset_rewind_state();
+                            self.refresh_subagents();
                             if let Some(connect) = &mut self.app_connect {
                                 connect.phase = ConnectPhase::Subscribe(sub_id);
                             }
@@ -2787,6 +2792,15 @@ fi"#
                 self.push_error(&format!("usage {tag} failed: {message}"));
                 true
             }
+            Some(ControlReq::SubagentsRefresh) => {
+                if message.contains("Method not found") {
+                    self.log_debug("agents: session/subagents unavailable (legacy kernel)");
+                    self.status = "agents: lifecycle events only".to_string();
+                } else {
+                    self.push_error(&format!("agents refresh failed: {message}"));
+                }
+                true
+            }
             // A rewind leg erroring never harms the session — report, close
             // the overlay so the user is not stuck on a dead preview.
             Some(ControlReq::RewindPreview(target)) => {
@@ -2846,6 +2860,14 @@ fi"#
                     };
                     self.log.push(LogLine::new(LogKind::System, &text));
                     self.status = "usage".to_string();
+                }
+            }
+            Some(ControlReq::SubagentsRefresh) => {
+                if let Some(result) = result {
+                    self.agents
+                        .merge_snapshots(zcode_tui::parse_subagents_result(result));
+                    self.status =
+                        format!("agents refreshed: {} work items", self.agents.tasks().len());
                 }
             }
             Some(ControlReq::RewindPreview(target)) => self.on_rewind_preview(target, result),
@@ -3834,13 +3856,25 @@ fi"#
     }
 
     fn open_background_tasks(&mut self) {
+        self.refresh_subagents();
         if !self.agents.open() {
-            self.push_system("no background tasks observed in this session");
+            self.push_system("no agent work observed yet; requested a kernel refresh");
             return;
         }
         self.show_palette = false;
         self.show_help = false;
         self.status = "background tasks: ↑↓ select · Esc close (read-only)".to_string();
+    }
+
+    fn refresh_subagents(&mut self) {
+        let Some(session_id) = self.app_session.clone() else {
+            return;
+        };
+        self.send_control(
+            "session/subagents",
+            zcode_tui::app_subagents_params(&session_id),
+            ControlReq::SubagentsRefresh,
+        );
     }
 
     fn handle_background_task_key(&mut self, key: KeyEvent) {

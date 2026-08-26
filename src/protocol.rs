@@ -769,6 +769,141 @@ pub fn app_usage_params(session_id: &str) -> serde_json::Value {
     serde_json::json!({ "sessionId": session_id })
 }
 
+/// `session/subagents` — authoritative snapshot of child agents and shell
+/// work running in the session. Older kernels may reject this method; callers
+/// should treat that as an optional capability rather than a session failure.
+pub fn app_subagents_params(session_id: &str) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session_id })
+}
+
+/// One normalized row from either `session/subagents` or the V4 state plane.
+/// Identifiers deliberately remain separate: kernels use each one for a
+/// different control/correlation domain and they are not interchangeable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentSnapshot {
+    pub kind: String,
+    pub task_id: Option<String>,
+    pub child_session_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub status: Option<String>,
+    pub command: Option<String>,
+    pub pid: Option<u64>,
+    pub cancellable: Option<bool>,
+    pub revision: Option<u64>,
+}
+
+fn string_alias(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|v| v.as_str()))
+        .map(str::to_string)
+}
+
+fn parse_agent_snapshot(value: &serde_json::Value, kind: &str) -> Option<AgentSnapshot> {
+    let snapshot = AgentSnapshot {
+        kind: kind.to_string(),
+        task_id: string_alias(value, &["taskId", "task_id"]),
+        child_session_id: string_alias(value, &["childSessionId", "child_session_id", "sessionId"]),
+        agent_id: string_alias(value, &["agentId", "agent_id"]),
+        tool_call_id: string_alias(value, &["toolCallId", "tool_call_id"]),
+        title: string_alias(value, &["title", "name", "toolName"]),
+        summary: string_alias(value, &["summary", "description", "message"]),
+        status: string_alias(value, &["status", "state"]),
+        command: string_alias(value, &["command"]),
+        pid: value.get("pid").and_then(serde_json::Value::as_u64),
+        cancellable: value
+            .get("cancellable")
+            .or_else(|| value.get("canCancel"))
+            .and_then(serde_json::Value::as_bool),
+        revision: value
+            .get("revision")
+            .or_else(|| value.get("updatedRevision"))
+            .and_then(serde_json::Value::as_u64),
+    };
+    (snapshot.task_id.is_some()
+        || snapshot.child_session_id.is_some()
+        || snapshot.agent_id.is_some()
+        || snapshot.tool_call_id.is_some())
+    .then_some(snapshot)
+}
+
+fn append_agent_array(
+    output: &mut Vec<AgentSnapshot>,
+    value: Option<&serde_json::Value>,
+    kind: &str,
+) {
+    let Some(rows) = value.and_then(|value| value.as_array()) else {
+        return;
+    };
+    output.extend(
+        rows.iter()
+            .filter_map(|row| parse_agent_snapshot(row, kind)),
+    );
+}
+
+fn append_agent_container(output: &mut Vec<AgentSnapshot>, value: &serde_json::Value) {
+    append_agent_array(output, value.get("subagents"), "subagent");
+    append_agent_array(
+        output,
+        value
+            .get("backgroundWorks")
+            .or_else(|| value.get("background_works")),
+        "background",
+    );
+}
+
+/// Normalize an authoritative `session/subagents` response. Both the direct
+/// result and the observed `{session:{...}}` envelope are accepted.
+pub fn parse_subagents_result(result: &serde_json::Value) -> Vec<AgentSnapshot> {
+    let mut output = Vec::new();
+    append_agent_container(&mut output, result);
+    if let Some(session) = result.get("session") {
+        append_agent_container(&mut output, session);
+    }
+    output
+}
+
+/// Extract agent/background-work state carried by a V4 snapshot or delta.
+pub fn parse_v4_agent_snapshots(params: &serde_json::Value) -> Vec<AgentSnapshot> {
+    let mut output = Vec::new();
+    let Some(payload) = params.pointer("/frame/payload") else {
+        return output;
+    };
+    match payload.get("kind").and_then(|value| value.as_str()) {
+        Some("snapshot") => {
+            if let Some(snapshot) = payload.get("snapshot") {
+                append_agent_container(&mut output, snapshot);
+            }
+        }
+        Some("deltas") => {
+            if let Some(deltas) = payload.get("deltas").and_then(|value| value.as_array()) {
+                for delta in deltas {
+                    if let Some(patch) = delta.get("patch") {
+                        append_agent_container(&mut output, patch);
+                    }
+                    if let Some(row) = delta.get("subagent") {
+                        if let Some(snapshot) = parse_agent_snapshot(row, "subagent") {
+                            output.push(snapshot);
+                        }
+                    }
+                    if let Some(row) = delta
+                        .get("backgroundWork")
+                        .or_else(|| delta.get("background_work"))
+                    {
+                        if let Some(snapshot) = parse_agent_snapshot(row, "background") {
+                            output.push(snapshot);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    output
+}
+
 /// `usage/stats` — period aggregate; kernel zod enum pins range to 7d|30d.
 pub fn usage_stats_params(range: &str) -> serde_json::Value {
     serde_json::json!({ "range": range })
@@ -1569,12 +1704,20 @@ pub struct AppServerEvent {
     /// subagent/bash backgrounding. Decoded so future app-server deliveries are
     /// never silently dropped.
     pub task_id: Option<String>,
+    /// Child session id for a subagent. Never conflated with task/tool ids.
+    pub child_session_id: Option<String>,
+    /// Stable agent identity when supplied by the kernel.
+    pub agent_id: Option<String>,
     /// `payload.command` — the backgrounded shell command.
     pub command: Option<String>,
     /// `payload.status` — background task status (running|completed|lost…).
     pub status: Option<String>,
     /// `payload.pid` — background task process id.
     pub pid: Option<u64>,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub cancellable: Option<bool>,
+    pub revision: Option<u64>,
 }
 
 /// Decode a single inbound protocol line. Unparseable lines -> None (skip).
@@ -1655,9 +1798,18 @@ pub fn decode_app_message(line: &str) -> Option<AppServerMessage> {
                 strategy: str_field("strategy"),
                 reason: str_field("reason"),
                 task_id: str_field("taskId"),
+                child_session_id: str_field("childSessionId"),
+                agent_id: str_field("agentId"),
                 command: str_field("command"),
                 status: str_field("status"),
                 pid: payload.get("pid").and_then(serde_json::Value::as_u64),
+                title: str_field("title").or_else(|| str_field("name")),
+                summary: str_field("summary").or_else(|| str_field("message")),
+                cancellable: payload
+                    .get("cancellable")
+                    .or_else(|| payload.get("canCancel"))
+                    .and_then(serde_json::Value::as_bool),
+                revision: payload.get("revision").and_then(serde_json::Value::as_u64),
             }))
         }
         Some("state.updated") => Some(AppServerMessage::StateUpdated(
