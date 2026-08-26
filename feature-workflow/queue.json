@@ -1,28 +1,11 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-26T15:26:19Z"
+    "last_updated": "2026-08-26T15:34:23Z"
   },
   "parents": [],
   "active": [],
   "pending": [
-    {
-      "id": "feat-agent-inspector",
-      "name": "Read-only Agent Inspector",
-      "description": "Let users inspect parent, Subagent, and background-work status and details in a dedicated read-only interface without changing the input target.",
-      "priority": 70,
-      "workflow_mode": "deep",
-      "risk_signals": [
-        "multi_module",
-        "compatibility",
-        "parallel_split"
-      ],
-      "dependencies": [
-        "feat-subagent-state-sync"
-      ],
-      "status": "pending",
-      "created_at": "2026-08-26T14:43:36Z"
-    },
     {
       "id": "feat-child-transcript-capability",
       "name": "Child session transcript capability decision",
@@ -201,6 +184,46 @@
         "blocking_failures": [],
         "warnings": [],
         "report": "features/active-feat-subagent-state-sync/evidence/verification-report.md"
+      }
+    },
+    {
+      "id": "feat-agent-inspector",
+      "name": "Read-only Agent Inspector",
+      "status": "completed",
+      "completed_at": "2026-08-26T15:34:23Z",
+      "archive_path": "features/archive/done-feat-agent-inspector-20260826",
+      "tag": "feat-agent-inspector-20260826",
+      "merge_commit": "5161686e26850920774c053a4c3026c9c6d5b69f",
+      "workflow_mode": "deep",
+      "verification": {
+        "schema": "feature-verification/v1",
+        "feature_id": "feat-agent-inspector",
+        "status": "passed",
+        "verified_at": "2026-08-26T16:45:00+08:00",
+        "tasks": {
+          "total": 5,
+          "completed": 5,
+          "incomplete": 0
+        },
+        "quality": {
+          "status": "passed",
+          "passed": 3,
+          "failed": 0
+        },
+        "tests": {
+          "status": "passed",
+          "passed": 127,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scenarios": {
+          "total": 5,
+          "passed": 5,
+          "failed": 0
+        },
+        "blocking_failures": [],
+        "warnings": [],
+        "report": "features/active-feat-agent-inspector/evidence/verification-report.md"
       }
     }
   ]

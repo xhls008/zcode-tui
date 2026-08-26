@@ -1,0 +1,13 @@
+{
+  "schema": "feature-verification/v1",
+  "feature_id": "feat-agent-inspector",
+  "status": "passed",
+  "verified_at": "2026-08-26T16:45:00+08:00",
+  "tasks": {"total": 5, "completed": 5, "incomplete": 0},
+  "quality": {"status": "passed", "passed": 3, "failed": 0},
+  "tests": {"status": "passed", "passed": 127, "failed": 0, "skipped": 0},
+  "scenarios": {"total": 5, "passed": 5, "failed": 0},
+  "blocking_failures": [],
+  "warnings": [],
+  "report": "features/archive/done-feat-agent-inspector-20260826/evidence/verification-report.md"
+}
