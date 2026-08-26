@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-26
+
 ### 优化
 
 - **对话阅读与复制**：改用普通屏幕的 Ratatui inline viewport，完成的对话写入

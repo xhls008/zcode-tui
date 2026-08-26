@@ -4,8 +4,9 @@
 
 ![Current zcode-tui interface with ASCII branding, native scrollback, and phased output](assets/zcode-tui-auenger.png)
 
-> Current development build captured with ZCode CLI kernel 0.16.3 and
-> zcode-tui 0.5.6 on macOS. It shows the adaptive ASCII brand panel, native
+> The v0.6.0 interface captured with ZCode CLI kernel 0.16.3 on macOS (the
+> screenshot was taken while the build number still read 0.5.6). It shows the
+> adaptive ASCII brand panel, native
 > terminal scrollback, user message bands, and phased app-server output. The
 > current source is also verified against ZCode Linux 3.8.1.
 
@@ -30,7 +31,7 @@ palette, and editor workflows are handled locally.
 |---|---|
 | ZCode Linux x64 desktop | **3.8.1** (official feed) |
 | Official CLI kernel | **0.16.3** (bundled with ZCode 3.8.1) |
-| zcode-tui | **0.5.6** |
+| zcode-tui | **0.6.0** |
 | Protocol compatibility | 3.8.1/3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
 | Current source verification | 116/116 Rust tests; zero-warning Clippy; native release build; verified 3.8.1 app-server handshake and TUI lifecycle |
 

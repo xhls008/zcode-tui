@@ -4,7 +4,8 @@
 
 ![zcode-tui 当前界面：ASCII ZCODE 欢迎面板、原生 scrollback 与阶段追加](assets/zcode-tui-auenger.png)
 
-> 当前开发版实机截图：ZCode CLI kernel 0.16.3 / zcode-tui 0.5.6，macOS。
+> v0.6.0 界面实机截图：ZCode CLI kernel 0.16.3，macOS（截图拍摄时构建号仍为
+> 0.5.6）。
 > 展示自适应 ASCII 品牌面板、终端原生 scrollback、用户消息横条和 app-server
 > 阶段追加；当前源码另已实测适配 ZCode Linux 3.8.1。
 
@@ -25,7 +26,7 @@
 |---|---|
 | ZCode Linux x64 桌面包 | **3.8.1**（官方 feed） |
 | 官方 CLI kernel | **0.16.3**（随 ZCode 3.8.1，版本未变） |
-| zcode-tui | **0.5.6** |
+| zcode-tui | **0.6.0** |
 | 协议兼容 | 3.8.1/3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
 | 当前源码验证 | Rust 测试 116/116；Clippy 零告警；原生 release 构建通过；3.8.1 app-server 握手和 TUI 启停正常 |
 
