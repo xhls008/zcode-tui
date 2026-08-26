@@ -45,7 +45,7 @@
         },
         "blocking_failures": [],
         "warnings": [],
-        "report": "features/active-feat-tool-output-clarity/evidence/verification-report.md"
+        "report": "features/archive/done-feat-tool-output-clarity-20260826/evidence/verification-report.md"
       }
     },
     {
@@ -85,7 +85,7 @@
         },
         "blocking_failures": [],
         "warnings": [],
-        "report": "features/active-feat-tui-module-boundaries/evidence/verification-report.md"
+        "report": "features/archive/done-feat-tui-module-boundaries-20260826/evidence/verification-report.md"
       }
     },
     {
@@ -125,7 +125,7 @@
         },
         "blocking_failures": [],
         "warnings": [],
-        "report": "features/active-feat-subagent-state-sync/evidence/verification-report.md"
+        "report": "features/archive/done-feat-subagent-state-sync-20260826/evidence/verification-report.md"
       }
     },
     {
@@ -165,7 +165,7 @@
         },
         "blocking_failures": [],
         "warnings": [],
-        "report": "features/active-feat-agent-inspector/evidence/verification-report.md"
+        "report": "features/archive/done-feat-agent-inspector-20260826/evidence/verification-report.md"
       }
     },
     {
@@ -205,7 +205,7 @@
         },
         "blocking_failures": [],
         "warnings": [],
-        "report": "features/active-feat-child-transcript-capability/evidence/verification-report.md"
+        "report": "features/archive/done-feat-child-transcript-capability-20260826/evidence/verification-report.md"
       }
     },
     {
@@ -245,7 +245,7 @@
         },
         "blocking_failures": [],
         "warnings": [],
-        "report": "features/active-feat-background-task-cancel/evidence/verification-report.md"
+        "report": "features/archive/done-feat-background-task-cancel-20260826/evidence/verification-report.md"
       }
     },
     {
