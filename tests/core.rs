@@ -1855,6 +1855,130 @@ fn state_controls_extracted_from_mode_changed_patch() {
 }
 
 #[test]
+fn session_controls_prefer_complete_result_settings() {
+    use zcode_tui::app_session_controls;
+    let model = |id: &str| {
+        serde_json::json!({
+            "label": id,
+            "providerLabel": "BigModel",
+            "ref": {"modelId": id, "providerId": "bigmodel"}
+        })
+    };
+    let result = serde_json::json!({
+        "settings": {
+            "model": {
+                "available": [model("glm-5.1"), model("glm-5.3")],
+                "current": {"modelId": "glm-5.1", "providerId": "bigmodel"}
+            }
+        },
+        "snapshot": {
+            "settings": {
+                "model": {
+                    "available": [model("glm-5.1")],
+                    "current": {"modelId": "glm-5.1", "providerId": "bigmodel"}
+                }
+            }
+        }
+    });
+    let controls = app_session_controls(&result).unwrap();
+    assert_eq!(controls.models.len(), 2);
+    assert_eq!(controls.models[1].reference["modelId"], "glm-5.3");
+
+    let fallback = serde_json::json!({"snapshot": result["snapshot"].clone()});
+    assert_eq!(app_session_controls(&fallback).unwrap().models.len(), 1);
+}
+
+#[test]
+fn runtime_model_controls_seed_pre_session_picker() {
+    use zcode_tui::{app_runtime_model_controls, build_runtime_model};
+    let config = r#"{
+        "provider": {"bigmodel": {"kind": "anthropic", "name": "BigModel Coding Plan",
+            "options": {"baseURL": "https://open.bigmodel.cn/api/anthropic", "apiKey": "test-key"},
+            "models": {"glm-5.1": {"name": "GLM-5.1"}, "glm-5.3": {"name": "GLM-5.3"}}}},
+        "model": {"main": "bigmodel/glm-5.1", "lite": "bigmodel/glm-5.1"}
+    }"#;
+    let runtime = build_runtime_model(config, 1234).unwrap();
+    let controls = app_runtime_model_controls(&runtime).unwrap();
+    assert_eq!(controls.models.len(), 2);
+    assert_eq!(controls.models[0].label, "GLM-5.1");
+    assert_eq!(controls.models[0].provider, "BigModel Coding Plan");
+    assert_eq!(controls.models[1].reference["modelId"], "glm-5.3");
+    assert_eq!(controls.model_current.as_deref(), Some("glm-5.1"));
+}
+
+#[test]
+fn model_discovery_uses_only_the_active_provider() {
+    use zcode_tui::model_discovery_request;
+    let config = r#"{
+        "provider": {
+            "zai": {"kind": "anthropic", "name": "Z.AI", "options": {
+                "baseURL": "https://api.z.ai/api/anthropic", "apiKey": "zai-key"},
+                "models": {"glm-5": {"name": "GLM-5"}}},
+            "bigmodel": {"kind": "anthropic", "name": "BigModel Coding Plan", "options": {
+                "baseURL": "https://open.bigmodel.cn/api/anthropic", "apiKey": "cn-key"},
+                "models": {"glm-5.3": {"name": "GLM-5.3"}}}
+        },
+        "model": {"main": "bigmodel/glm-5.3", "lite": "bigmodel/glm-4.7"}
+    }"#;
+    let request = model_discovery_request(config).unwrap();
+    assert_eq!(request.provider_id, "bigmodel");
+    assert_eq!(request.provider_label, "BigModel Coding Plan");
+    assert_eq!(
+        request.endpoint,
+        "https://open.bigmodel.cn/api/anthropic/v1/models"
+    );
+    assert_eq!(request.api_key, "cn-key");
+
+    let root_model = config.replace(
+        r#""model": {"main": "bigmodel/glm-5.3", "lite": "bigmodel/glm-4.7"}"#,
+        r#""model": "bigmodel/glm-5.3""#,
+    );
+    assert_eq!(
+        model_discovery_request(&root_model).unwrap().provider_id,
+        "bigmodel"
+    );
+}
+
+#[test]
+fn remote_catalog_replaces_only_active_provider_models() {
+    use zcode_tui::{parse_model_catalog, replace_provider_models};
+    let config = r#"{
+        "provider": {
+            "zai": {"kind": "anthropic", "options": {"apiKey": "keep-zai"},
+                "models": {"glm-zai": {"name": "Z.AI model"}}},
+            "bigmodel": {"kind": "anthropic", "options": {"apiKey": "keep-cn"},
+                "models": {"old": {"name": "Old"}}}
+        },
+        "model": {"main": "bigmodel/glm-5.3", "lite": "bigmodel/glm-4.7"}
+    }"#;
+    let response = r#"{"data":[{"id":"glm-5.3"},{"id":"glm-4.7","name":"GLM-4.7"}]}"#;
+    let models = parse_model_catalog(response, "bigmodel", "BigModel").unwrap();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].reference["modelId"], "glm-4.7");
+    let updated = replace_provider_models(config, "bigmodel", &models).unwrap();
+    let updated: serde_json::Value = serde_json::from_str(&updated).unwrap();
+    assert_eq!(
+        updated["provider"]["bigmodel"]["options"]["apiKey"],
+        "keep-cn"
+    );
+    assert_eq!(
+        updated["provider"]["bigmodel"]["models"]
+            .as_object()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(updated["provider"]["zai"]["options"]["apiKey"], "keep-zai");
+    assert_eq!(
+        updated["provider"]["zai"]["models"]
+            .as_object()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn turn_accumulates_text_deltas_and_ignores_unknown() {
     use zcode_tui::{AppServerEvent, AppServerTurn, TurnDelta};
     let mut turn = AppServerTurn::default();

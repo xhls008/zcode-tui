@@ -12,6 +12,14 @@
   Release 三阶段；新增 Windows x86_64、macOS Intel 与 macOS Apple Silicon
   二进制，保留 Linux x86_64-musl 静态版本，并为所有产物统一生成 SHA256SUMS。
 
+### 新增
+
+- **动态模型目录与首轮模型选择**：启动时按 `model.main` 所属 provider
+  鉴权请求 `/models`，无密钥缓存远端目录并只刷新该 provider 的模型注册；
+  网络失败依次回退缓存与本地配置，其他已配置 provider 不再混入选择器。
+  `/model` 在首次 prompt 前即可选择，建会话后先应用选择再发送消息；完整
+  `session/create|resume` 设置也会被吸收，不再只保留当前模型。
+
 ### 修复
 
 - **恢复会话模型配置兼容**：兼容 `model.main` 对象字段和根级 `model` 字符串

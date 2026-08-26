@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Stdout, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, ExitStatus};
+use std::process::{self, Command, ExitStatus, Stdio};
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
@@ -31,7 +31,8 @@ use ratatui_image::StatefulImage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zcode_tui::{
     app_close_params, app_compact_params, app_create_params, app_file_rewind_params,
-    app_resume_params, app_rewind_params, app_send_params_with_attachments, app_server_enabled,
+    app_resume_params, app_rewind_params, app_runtime_model_controls,
+    app_send_params_with_attachments, app_server_enabled, app_session_controls,
     app_session_id_from_result, app_set_mode_params, app_set_model_params, app_set_thought_params,
     app_state_controls, app_state_is_turn_end, app_state_turn_error, app_state_watermark,
     app_steer_params, app_stop_params, app_subscribe_params, app_usage_params, build_runtime_model,
@@ -43,22 +44,23 @@ use zcode_tui::{
     history_search, is_newer_version, kernel_config_path_from, kernel_db_path_from,
     latest_assistant_text, latest_reasoning, latest_session_for_dir, leader_action_for_key,
     list_recent_sessions, live_tool_chips, load_mcp_config, load_ui_config, login_command,
-    markdown_lines, mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence,
-    parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
-    parse_kernel_slash_commands, parse_prompt_summary, parse_resume_messages, parse_rewind_preview,
-    parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
-    parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age,
-    resolve_update_download_url, rewind_failure, run_command, select_update_feed_url, shorten_home,
-    skyline_braille, skyline_graphics_wanted, skyline_lines, skyline_mode,
-    slash_suggestions_merged, spawn_streaming_command, tool_input_summary, usage_stats_params,
-    user_mcp_config_path, v4_command_params, v4_conversation_subscribe_params,
-    v4_file_rewind_preview_params, v4_rewind_target, with_mcp_servers, with_tool_policy,
-    wrap_display, zcode_app_version_from_path, AppConfig, AppServerConn, AppServerEvent,
-    AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, CheckpointEntry, DbBaseline,
-    DebugLog, DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction,
-    LiveToolChip, MdLineKind, RewindPreview, RewindTarget, SessionControls, SessionRow,
-    SkylineMode, SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem, ToolChipStatus,
-    TurnDelta, UiConfig, UpdateFeed, V4CommandBase, V4ConversationState, SKYLINE_LOGO_W,
+    markdown_lines, mcp_config_path, mcp_servers_param, model_discovery_request, open_kernel_db_ro,
+    osc52_copy_sequence, parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
+    parse_kernel_slash_commands, parse_model_catalog, parse_prompt_summary, parse_resume_messages,
+    parse_rewind_preview, parse_session_list, parse_steer_result, parse_stream_event, parse_todos,
+    parse_update_feed, parse_v4_command_ack, prompt_command_for, recent_input_history,
+    relative_age, replace_provider_models, resolve_update_download_url, rewind_failure,
+    run_command, select_update_feed_url, shorten_home, skyline_braille, skyline_graphics_wanted,
+    skyline_lines, skyline_mode, slash_suggestions_merged, spawn_streaming_command,
+    tool_input_summary, usage_stats_params, user_mcp_config_path, v4_command_params,
+    v4_conversation_subscribe_params, v4_file_rewind_preview_params, v4_rewind_target,
+    with_mcp_servers, with_tool_policy, wrap_display, zcode_app_version_from_path, AppConfig,
+    AppServerConn, AppServerEvent, AppServerMessage, AppServerTurn, AppServerUnavailable,
+    AuthStatus, CheckpointEntry, DbBaseline, DebugLog, DiffRole, InputAction, InteractionRequest,
+    JobEvent, KernelCommand, LeaderAction, LiveToolChip, MdLineKind, ModelChoice,
+    ModelDiscoveryRequest, RewindPreview, RewindTarget, SessionControls, SessionRow, SkylineMode,
+    SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem, ToolChipStatus, TurnDelta,
+    UiConfig, UpdateFeed, V4CommandBase, V4ConversationState, SKYLINE_LOGO_W,
 };
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -246,6 +248,12 @@ struct StartupReport {
     feed: Option<UpdateFeed>,
     feed_base: Option<String>,
     db: DbProbe,
+    model_catalog: Option<ModelCatalogReport>,
+}
+
+struct ModelCatalogReport {
+    provider_id: String,
+    controls: SessionControls,
 }
 
 fn active_zcode_app_dir() -> Option<PathBuf> {
@@ -303,6 +311,130 @@ fn probe_kernel_db() -> DbProbe {
     }
 }
 
+fn model_cache_path() -> Option<PathBuf> {
+    if let Some(root) = env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(root).join("zcode-tui").join("models.json"));
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".cache").join("zcode-tui").join("models.json"))
+}
+
+fn fetch_model_catalog(request: &ModelDiscoveryRequest) -> Option<(String, Vec<ModelChoice>)> {
+    let mut child = Command::new("curl")
+        .args(["-fsSL", "--max-time", "5", "--header", "@-"])
+        .arg(&request.endpoint)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take()?;
+    writeln!(stdin, "Authorization: Bearer {}", request.api_key).ok()?;
+    drop(stdin);
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let body = String::from_utf8(output.stdout).ok()?;
+    let models = parse_model_catalog(&body, &request.provider_id, &request.provider_label)?;
+    Some((body, models))
+}
+
+fn cached_model_catalog(request: &ModelDiscoveryRequest) -> Option<Vec<ModelChoice>> {
+    let cache: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(model_cache_path()?).ok()?).ok()?;
+    if cache.get("providerId")?.as_str()? != request.provider_id
+        || cache.get("endpoint")?.as_str()? != request.endpoint
+    {
+        return None;
+    }
+    parse_model_catalog(
+        &cache.get("response")?.to_string(),
+        &request.provider_id,
+        &request.provider_label,
+    )
+}
+
+fn write_atomic(path: &Path, content: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)?;
+    let temporary = path.with_extension(format!("tmp.{}", process::id()));
+    fs::write(&temporary, content)?;
+    if let Ok(metadata) = fs::metadata(path) {
+        fs::set_permissions(&temporary, metadata.permissions())?;
+    }
+    fs::rename(&temporary, path)?;
+    Ok(())
+}
+
+fn cache_model_catalog(request: &ModelDiscoveryRequest, body: &str) -> Result<()> {
+    let response: serde_json::Value = serde_json::from_str(body)?;
+    let cache = serde_json::json!({
+        "providerId": request.provider_id,
+        "endpoint": request.endpoint,
+        "fetchedAt": unix_time_ms(),
+        "response": response,
+    });
+    write_atomic(
+        &model_cache_path().ok_or_else(|| anyhow::anyhow!("cache directory unavailable"))?,
+        &format!("{}\n", serde_json::to_string_pretty(&cache)?),
+    )
+}
+
+fn sync_kernel_model_registry(
+    config_path: &Path,
+    request: &ModelDiscoveryRequest,
+    models: &[ModelChoice],
+) -> Result<()> {
+    let latest = fs::read_to_string(config_path)?;
+    let Some(latest_request) = model_discovery_request(&latest) else {
+        return Ok(());
+    };
+    if latest_request.provider_id != request.provider_id
+        || latest_request.endpoint != request.endpoint
+        || latest_request.api_key != request.api_key
+    {
+        return Ok(());
+    }
+    let updated = replace_provider_models(&latest, &request.provider_id, models)
+        .ok_or_else(|| anyhow::anyhow!("cannot update active provider models"))?;
+    if updated == latest {
+        return Ok(());
+    }
+    write_atomic(config_path, &updated)
+}
+
+fn refresh_model_catalog() -> Option<ModelCatalogReport> {
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    let config_path = kernel_config_path_from(&home);
+    let config = fs::read_to_string(&config_path).ok()?;
+    let request = model_discovery_request(&config)?;
+    let local_controls = build_runtime_model(&config, unix_time_ms())
+        .as_ref()
+        .and_then(app_runtime_model_controls)?;
+    let current = local_controls.model_current;
+    let local_models = local_controls.models;
+    let (models, remote_body) = match fetch_model_catalog(&request) {
+        Some((body, models)) => (models, Some(body)),
+        None => (cached_model_catalog(&request).unwrap_or(local_models), None),
+    };
+    if let Some(body) = remote_body {
+        let _ = cache_model_catalog(&request, &body);
+    }
+    let _ = sync_kernel_model_registry(&config_path, &request, &models);
+    Some(ModelCatalogReport {
+        provider_id: request.provider_id,
+        controls: SessionControls {
+            models,
+            model_current: current,
+            ..SessionControls::default()
+        },
+    })
+}
+
 /// Probe, off the UI thread: the CLI kernel version, the installed desktop
 /// package version, and the official electron-updater feed (the same
 /// latest-linux.yml the ZCode desktop app polls, so the notice matches the
@@ -310,6 +442,7 @@ fn probe_kernel_db() -> DbProbe {
 fn spawn_startup_probe(zcode_bin: String) -> std::sync::mpsc::Receiver<StartupReport> {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
+        let model_catalog = refresh_model_catalog();
         let kernel = run_command(&[zcode_bin, "version".to_string()])
             .ok()
             .and_then(|output| {
@@ -344,6 +477,7 @@ fn spawn_startup_probe(zcode_bin: String) -> std::sync::mpsc::Receiver<StartupRe
             feed,
             feed_base,
             db: probe_kernel_db(),
+            model_catalog,
         });
     });
     receiver
@@ -678,6 +812,12 @@ struct UiState {
     session_picker: Option<(Vec<SessionRow>, usize)>,
     /// /model picker overlay: selected index into `controls.models`.
     model_picker: Option<usize>,
+    /// Model selected before the first app-server session exists. Applied
+    /// after create/resume and before the queued first prompt is sent.
+    pending_model: Option<ModelChoice>,
+    /// Provider selected by `model.main`; model catalogs and kernel pushes
+    /// from other configured providers are excluded from this TUI.
+    model_provider: Option<String>,
     /// Ctrl+R reverse search overlay: query + selected index.
     history_query: Option<(String, usize)>,
     /// Log indices the user expanded with Ctrl+O (folding is the default
@@ -833,6 +973,12 @@ impl UiState {
         } else {
             AppMode::Off
         };
+        let model_provider = load_runtime_model().and_then(|runtime| {
+            runtime
+                .pointer("/model/providerId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
         Self {
             config,
             zcode_bin,
@@ -862,6 +1008,8 @@ impl UiState {
             tick: 0,
             session_picker: None,
             model_picker: None,
+            pending_model: None,
+            model_provider,
             history_query: None,
             unfolded: HashSet::new(),
             mouse_enabled,
@@ -1732,6 +1880,9 @@ impl UiState {
         if let Some(todos) = parse_todos(result) {
             self.todos = todos;
         }
+        if let Some(controls) = app_session_controls(result) {
+            self.merge_controls(controls);
+        }
     }
 
     /// The canonical workspace path handed to `session/create`.
@@ -2038,6 +2189,13 @@ impl UiState {
                 "session/setMode",
                 app_set_mode_params(&session_id, &mode),
                 ControlReq::Command("/mode"),
+            );
+        }
+        if let Some(choice) = self.pending_model.take() {
+            self.send_control(
+                "session/setModel",
+                app_set_model_params(&session_id, &choice.reference),
+                ControlReq::Command("/model"),
             );
         }
         let attachments = self.app_attachments_for(&connect.prompt);
@@ -2706,8 +2864,26 @@ fi"#
             }
             self.controls.mode = Some(mode);
         }
-        if !update.models.is_empty() {
-            self.controls.models = update.models;
+        let model_provider = self.model_provider.clone();
+        for model in update.models.into_iter().filter(|model| {
+            model_provider.as_deref().is_none_or(|provider_id| {
+                model
+                    .reference
+                    .get("providerId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(provider_id)
+            })
+        }) {
+            if let Some(index) = self
+                .controls
+                .models
+                .iter()
+                .position(|existing| existing.reference == model.reference)
+            {
+                self.controls.models[index] = model;
+            } else {
+                self.controls.models.push(model);
+            }
         }
         if let Some(current) = update.model_current {
             if self.controls.model_current.as_deref() != Some(current.as_str())
@@ -3255,18 +3431,19 @@ fi"#
         None
     }
 
-    /// /model — list the kernel-reported models for selection. Needs a live
-    /// app-server session: the choices come from its state pushes.
+    /// /model — list kernel-reported models, or seed the first-session picker
+    /// from the same runtime model configuration the kernel will consume.
     fn open_model_picker(&mut self) {
-        if self.app_session.is_none() {
-            self.push_system(
-                "/model needs an active app-server session \
-                 (complete one streaming prompt first; ZCODE_TUI_APP_SERVER=0 disables it)",
-            );
-            return;
+        if self.controls.models.is_empty() && self.app_session.is_none() {
+            if let Some(controls) = load_runtime_model()
+                .as_ref()
+                .and_then(app_runtime_model_controls)
+            {
+                self.merge_controls(controls);
+            }
         }
         if self.controls.models.is_empty() {
-            self.push_system("no models reported by the kernel yet (complete one prompt first)");
+            self.push_system("no models found in the ZCode configuration");
             return;
         }
         let current =
@@ -3286,16 +3463,29 @@ fi"#
         let Some(index) = self.model_picker.take() else {
             return;
         };
-        let Some(session_id) = self.app_session.clone() else {
-            return;
-        };
         if let Some(choice) = self.controls.models.get(index).cloned() {
-            self.push_system(&format!("model → {} ({})", choice.label, choice.provider));
-            self.send_control(
-                "session/setModel",
-                app_set_model_params(&session_id, &choice.reference),
-                ControlReq::Command("/model"),
-            );
+            self.controls.model_current = choice
+                .reference
+                .get("modelId")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            match self.app_session.clone() {
+                Some(session_id) => {
+                    self.push_system(&format!("model → {} ({})", choice.label, choice.provider));
+                    self.send_control(
+                        "session/setModel",
+                        app_set_model_params(&session_id, &choice.reference),
+                        ControlReq::Command("/model"),
+                    );
+                }
+                None => {
+                    self.push_system(&format!(
+                        "model → {} ({}) for the next session",
+                        choice.label, choice.provider
+                    ));
+                    self.pending_model = Some(choice);
+                }
+            }
         }
     }
 
@@ -4297,6 +4487,11 @@ fi"#
 
     fn apply_startup_report(&mut self, report: StartupReport) {
         self.kernel_version = report.kernel;
+        if let Some(catalog) = report.model_catalog {
+            self.model_provider = Some(catalog.provider_id);
+            self.controls.models.clear();
+            self.merge_controls(catalog.controls);
+        }
         self.db_state = match report.db {
             DbProbe::Supported(path) => {
                 // The kernel already persists every prompt input; merge it in
