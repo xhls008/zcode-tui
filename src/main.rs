@@ -713,6 +713,10 @@ enum ControlReq {
     Command(&'static str),
     /// Optional authoritative child-agent/background-work refresh.
     SubagentsRefresh,
+    /// Official background-work cancellation, correlated by exact taskId.
+    CancelBackgroundTask {
+        task_id: String,
+    },
     Steer(String),
     /// V4 steer is two commands: first switch followup mode, then send text.
     V4SetGuide {
@@ -2756,6 +2760,9 @@ fi"#
                     | ControlReq::V4RewindApply(_) => {
                         self.close_rewind_overlay();
                     }
+                    ControlReq::CancelBackgroundTask { task_id } => {
+                        self.agents.finish_cancel(&task_id);
+                    }
                     _ => {}
                 }
             }
@@ -2798,6 +2805,16 @@ fi"#
                     self.status = "agents: lifecycle events only".to_string();
                 } else {
                     self.push_error(&format!("agents refresh failed: {message}"));
+                }
+                true
+            }
+            Some(ControlReq::CancelBackgroundTask { task_id }) => {
+                self.agents.finish_cancel(&task_id);
+                if message.contains("Method not found") {
+                    self.status =
+                        "background cancellation is unavailable in this kernel".to_string();
+                } else {
+                    self.push_error(&format!("cancel task {task_id} failed: {message}"));
                 }
                 true
             }
@@ -2868,6 +2885,39 @@ fi"#
                         .merge_snapshots(zcode_tui::parse_subagents_result(result));
                     self.status =
                         format!("agents refreshed: {} work items", self.agents.tasks().len());
+                }
+            }
+            Some(ControlReq::CancelBackgroundTask { task_id }) => {
+                let completion_won = self.agents.task_is_terminal(&task_id);
+                if completion_won {
+                    self.agents.finish_cancel(&task_id);
+                    self.status =
+                        format!("task {task_id} already finished while cancel was pending");
+                } else if let Some(outcome) =
+                    result.and_then(zcode_tui::parse_cancel_background_task_result)
+                {
+                    if outcome.task_id != task_id {
+                        self.agents.finish_cancel(&task_id);
+                        self.push_error("cancel response taskId did not match the request");
+                    } else if outcome.cancelled {
+                        self.status = format!(
+                            "cancel accepted for {task_id}; waiting for authoritative state"
+                        );
+                        self.refresh_subagents();
+                    } else {
+                        self.agents.finish_cancel(&task_id);
+                        let reason = outcome
+                            .reason
+                            .as_deref()
+                            .or(outcome.status.as_deref())
+                            .unwrap_or("not cancelled");
+                        self.status = format!("task {task_id} was not cancelled: {reason}");
+                    }
+                } else {
+                    self.status = format!(
+                        "cancel acknowledged for {task_id}; waiting for authoritative state"
+                    );
+                    self.refresh_subagents();
                 }
             }
             Some(ControlReq::RewindPreview(target)) => self.on_rewind_preview(target, result),
@@ -3874,6 +3924,24 @@ fi"#
         );
     }
 
+    fn cancel_selected_background_task(&mut self) {
+        let Some(session_id) = self.app_session.clone() else {
+            self.status = "cancel unavailable: no active parent session".to_string();
+            return;
+        };
+        let Some(task_id) = self.agents.begin_cancel_selected() else {
+            self.status = "cancel unavailable: select a cancellable background item with a taskId"
+                .to_string();
+            return;
+        };
+        self.status = format!("cancelling task {task_id}…");
+        self.send_control(
+            "session/cancelBackgroundTask",
+            zcode_tui::app_cancel_background_task_params(&session_id, &task_id),
+            ControlReq::CancelBackgroundTask { task_id },
+        );
+    }
+
     fn handle_background_task_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
@@ -3898,6 +3966,7 @@ fi"#
                 self.refresh_subagents();
                 self.status = "refreshing agent state…".to_string();
             }
+            KeyCode::Char('x') => self.cancel_selected_background_task(),
             KeyCode::Up => {
                 if self.agents.view() == agents::InspectorView::Detail {
                     self.agents.scroll_detail(-1);

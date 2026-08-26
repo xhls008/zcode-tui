@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use zcode_tui::{AgentSnapshot, AppServerEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,6 +193,7 @@ pub(crate) struct AgentInspectorState {
     view: InspectorView,
     selected_key: Option<String>,
     detail_scroll: u16,
+    cancel_in_flight: HashSet<String>,
 }
 
 impl AgentInspectorState {
@@ -227,6 +230,7 @@ impl AgentInspectorState {
 
     pub(crate) fn reset(&mut self) {
         self.tasks.clear();
+        self.cancel_in_flight.clear();
         self.close();
     }
 
@@ -272,6 +276,41 @@ impl AgentInspectorState {
                 task.kind == AgentWorkKind::Background && task.agent_id.as_ref() == Some(agent_id)
             })
             .collect()
+    }
+
+    pub(crate) fn cancel_pending(&self, task_id: &str) -> bool {
+        self.cancel_in_flight.contains(task_id)
+    }
+
+    pub(crate) fn selected_cancel_eligible(&self) -> bool {
+        self.selected_task().is_some_and(|task| {
+            task.kind == AgentWorkKind::Background
+                && task.cancellable
+                && task.task_id.is_some()
+                && !terminal_status(&task.status)
+                && !self
+                    .cancel_in_flight
+                    .contains(task.task_id.as_deref().unwrap_or_default())
+        })
+    }
+
+    pub(crate) fn begin_cancel_selected(&mut self) -> Option<String> {
+        if !self.selected_cancel_eligible() {
+            return None;
+        }
+        let task_id = self.selected_task()?.task_id.clone()?;
+        self.cancel_in_flight.insert(task_id.clone());
+        Some(task_id)
+    }
+
+    pub(crate) fn finish_cancel(&mut self, task_id: &str) {
+        self.cancel_in_flight.remove(task_id);
+    }
+
+    pub(crate) fn task_is_terminal(&self, task_id: &str) -> bool {
+        self.tasks
+            .iter()
+            .any(|task| task.task_id.as_deref() == Some(task_id) && terminal_status(&task.status))
     }
 
     fn visible_keys(&self) -> Vec<String> {
@@ -359,6 +398,7 @@ impl AgentInspectorState {
     }
 
     fn merge_task(&mut self, incoming: BackgroundTask) {
+        let mut settled_task_id = None;
         if let Some(existing) = self
             .tasks
             .iter_mut()
@@ -369,8 +409,17 @@ impl AgentInspectorState {
             if self.selected_key.as_deref() == Some(old_key.as_str()) {
                 self.selected_key = Some(existing.inspector_key());
             }
+            if terminal_status(&existing.status) {
+                settled_task_id.clone_from(&existing.task_id);
+            }
         } else {
+            if terminal_status(&incoming.status) {
+                settled_task_id.clone_from(&incoming.task_id);
+            }
             self.tasks.insert(0, incoming);
+        }
+        if let Some(task_id) = settled_task_id {
+            self.cancel_in_flight.remove(&task_id);
         }
         if self.open && self.selected().is_none() {
             self.selected_key = self.visible_keys().into_iter().next();
@@ -503,5 +552,36 @@ mod tests {
         );
         assert_eq!(state.view(), InspectorView::Detail);
         assert_eq!(state.detail_scroll(), 7);
+    }
+
+    #[test]
+    fn cancel_uses_only_eligible_task_id_and_completion_wins_race() {
+        let mut state = AgentInspectorState::default();
+        state.merge_snapshots(vec![AgentSnapshot {
+            kind: "background".to_string(),
+            task_id: Some("task-exact".to_string()),
+            child_session_id: Some("child-wrong".to_string()),
+            agent_id: Some("agent-wrong".to_string()),
+            tool_call_id: Some("call-wrong".to_string()),
+            status: Some("running".to_string()),
+            cancellable: Some(true),
+            ..Default::default()
+        }]);
+        state.open();
+        state.toggle_tab();
+        assert!(state.selected_cancel_eligible());
+        assert_eq!(state.begin_cancel_selected().as_deref(), Some("task-exact"));
+        assert_eq!(state.begin_cancel_selected(), None);
+        assert_eq!(state.selected_task().unwrap().status, "running");
+
+        state.ingest(&AppServerEvent {
+            kind: "background_task_completed".to_string(),
+            task_id: Some("task-exact".to_string()),
+            status: Some("completed".to_string()),
+            ..Default::default()
+        });
+        assert!(!state.cancel_pending("task-exact"));
+        assert!(state.task_is_terminal("task-exact"));
+        assert!(!state.selected_cancel_eligible());
     }
 }

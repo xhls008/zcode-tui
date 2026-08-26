@@ -2958,6 +2958,24 @@ fn parses_pinned_zcode_0163_running_and_ended_subagent_shape() {
 }
 
 #[test]
+fn background_cancel_uses_strict_task_id_shape_and_parses_outcome() {
+    assert_eq!(
+        zcode_tui::app_cancel_background_task_params("parent-1", "task-exact"),
+        serde_json::json!({"sessionId": "parent-1", "taskId": "task-exact"})
+    );
+    let outcome = zcode_tui::parse_cancel_background_task_result(&serde_json::json!({
+        "cancelled": false,
+        "reason": "background_task_not_found",
+        "status": "lost",
+        "taskId": "task-exact"
+    }))
+    .unwrap();
+    assert_eq!(outcome.task_id, "task-exact");
+    assert!(!outcome.cancelled);
+    assert_eq!(outcome.reason.as_deref(), Some("background_task_not_found"));
+}
+
+#[test]
 fn v4_snapshot_and_subagent_lifecycle_event_are_decoded() {
     let rows = zcode_tui::parse_v4_agent_snapshots(&serde_json::json!({
         "frame": {"payload": {
