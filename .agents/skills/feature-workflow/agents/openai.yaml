@@ -1,0 +1,6 @@
+interface:
+  display_name: "Feature Workflow"
+  short_description: "Deliver features with adaptive, gated workflows"
+  default_prompt: "Use $feature-workflow to create and deliver this feature safely."
+policy:
+  allow_implicit_invocation: true
