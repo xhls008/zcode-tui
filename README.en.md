@@ -2,11 +2,12 @@
 
 [Chinese](README.md) | [English](README.en.md) | [Releases](https://github.com/xhls008/zcode-tui/releases) | [Design](docs/2026-07-04-design.md)
 
-![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
+![Current zcode-tui interface with ASCII branding, native scrollback, and phased output](assets/zcode-tui-auenger.png)
 
-> v0.5.4 captured from the real TUI on ZCode 3.5.3 / CLI kernel 0.15.2,
-> Linux x86_64.
-> The current source is also verified against ZCode 3.8.1 / CLI kernel 0.16.3.
+> Current development build captured with ZCode CLI kernel 0.16.3 and
+> zcode-tui 0.5.6 on macOS. It shows the adaptive ASCII brand panel, native
+> terminal scrollback, user message bands, and phased app-server output. The
+> current source is also verified against ZCode Linux 3.8.1.
 
 > **Unofficial notice**: `zcode-tui` is not an official ZCode / Zhipu project
 > and is not endorsed by ZCode or Zhipu. It is a community/personal Linux
@@ -18,10 +19,10 @@ for the gap where the official Linux package exposes a `tui` command, but does
 not ship the terminal UI runtime (`@zcode/tui`).
 
 It does not pretend to be an official implementation. It is a practical
-terminal shell around the official ZCode CLI path: normal prompts go
-through `zcode --prompt`, while slash commands, MCP config, shell escapes,
-session selection, streaming output, command palette, and editor workflows are
-handled locally.
+terminal shell around the official ZCode CLI path: normal prompts prefer
+`zcode app-server` and automatically fall back to `zcode --prompt`, while slash
+commands, MCP config, shell escapes, session selection, phased output, command
+palette, and editor workflows are handled locally.
 
 ## Current compatibility baseline
 
@@ -31,7 +32,7 @@ handled locally.
 | Official CLI kernel | **0.16.3** (bundled with ZCode 3.8.1) |
 | zcode-tui | **0.5.6** |
 | Protocol compatibility | 3.8.1/3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 108/108 Rust tests; zero-warning Clippy; native release build; verified 3.8.1 app-server handshake and TUI lifecycle |
+| Current source verification | 116/116 Rust tests; zero-warning Clippy; native release build; verified 3.8.1 app-server handshake and TUI lifecycle |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -303,7 +304,7 @@ ZCode kernel.
 ## Common Commands
 
 ```text
-text                         send a prompt through zcode --prompt
+text                         send through app-server (fallback: --prompt)
 @<path>                      mention a file and auto-attach it
 ! <cmd>                      run a local shell command
 /goal <text>                 forward goal handling to ZCode

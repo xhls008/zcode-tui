@@ -2,18 +2,20 @@
 
 [中文](README.md) | [English](README.en.md) | [Releases](https://github.com/xhls008/zcode-tui/releases) | [Design](docs/2026-07-04-design.md)
 
-![zcode-tui effect preview](assets/zcode-tui-effect-preview.png)
+![zcode-tui 当前界面：ASCII ZCODE 欢迎面板、原生 scrollback 与阶段追加](assets/zcode-tui-auenger.png)
 
-> v0.5.4 实机截图：ZCode 3.5.3 / CLI kernel 0.15.2，Linux x86_64。
-> 当前源码另已实测适配 ZCode 3.8.1 / CLI kernel 0.16.3。
+> 当前开发版实机截图：ZCode CLI kernel 0.16.3 / zcode-tui 0.5.6，macOS。
+> 展示自适应 ASCII 品牌面板、终端原生 scrollback、用户消息横条和 app-server
+> 阶段追加；当前源码另已实测适配 ZCode Linux 3.8.1。
 
 > **非官方声明**：`zcode-tui` 不是 ZCode / 智谱官方项目，也未获得官方背书。
 > 它是社区/个人维护的 Linux 终端 fallback，用来补齐官方包当前缺失的 TUI 体验。
 
 `zcode-tui` 是一个 **Rust 写的 ZCode 终端 TUI fallback**，专门兜住官方 Linux
 包缺少 `@zcode/tui` 的尴尬空洞。它面向 SSH、tmux、无桌面服务器和纯键盘
-工作流：普通输入走官方 `zcode --prompt`，常用 slash 命令、MCP 配置、
-shell escape、命令面板、会话选择、流式输出和编辑器工作流在本地补齐。
+工作流：普通输入优先走官方 `zcode app-server`，不可用时自动回退到
+`zcode --prompt`；常用 slash 命令、MCP 配置、shell escape、命令面板、会话
+选择、阶段流式输出和编辑器工作流在本地补齐。
 
 它不伪装成官方实现，只是一个实用的终端壳。
 
@@ -25,7 +27,7 @@ shell escape、命令面板、会话选择、流式输出和编辑器工作流�
 | 官方 CLI kernel | **0.16.3**（随 ZCode 3.8.1，版本未变） |
 | zcode-tui | **0.5.6** |
 | 协议兼容 | 3.8.1/3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 108/108；Clippy 零告警；原生 release 构建通过；3.8.1 app-server 握手和 TUI 启停正常 |
+| 当前源码验证 | Rust 测试 116/116；Clippy 零告警；原生 release 构建通过；3.8.1 app-server 握手和 TUI 启停正常 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -341,7 +343,7 @@ Cannot find package '@zcode/tui'
 ## 命令
 
 ```text
-text                         通过 zcode --prompt 发送 prompt
+text                         通过 app-server 发送 prompt（不可用时回退 --prompt）
 @<path>                      提及 cwd 内的文件，自动 --attach（越界/符号链接逃逸会被拒绝）
 ! <cmd>                      执行本地 shell 命令
 /goal <text>                 转发给 ZCode goal 处理
