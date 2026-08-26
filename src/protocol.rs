@@ -2356,6 +2356,80 @@ pub fn app_state_watermark(params: &serde_json::Value) -> Option<(u64, u64)> {
     walk(params)
 }
 
+/// Context fields carried by an incremental `state.updated` patch.
+///
+/// Unlike a full session snapshot, a patch is allowed to contain only
+/// `contextUsed` (the model window is normally unchanged). Keep the two
+/// values independent so a live used-token update is not discarded merely
+/// because its stable window was omitted.
+pub fn app_state_context_values(params: &serde_json::Value) -> (Option<u64>, Option<u64>) {
+    fn walk(value: &serde_json::Value, used: &mut Option<u64>, window: &mut Option<u64>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if used.is_none() {
+                    *used = ["contextUsed", "contextTokens"]
+                        .iter()
+                        .find_map(|key| map.get(*key).and_then(serde_json::Value::as_u64));
+                }
+                if window.is_none() {
+                    *window = ["contextWindow", "maxTokens"]
+                        .iter()
+                        .find_map(|key| map.get(*key).and_then(serde_json::Value::as_u64))
+                        .filter(|value| *value > 0);
+                }
+                // Older kernels used the generic pair in one object. Never
+                // accept either generic key alone because unrelated usage
+                // objects commonly contain `total`.
+                if used.is_none() || window.is_none() {
+                    let generic_used = map
+                        .get("used")
+                        .or_else(|| map.get("tokensUsed"))
+                        .and_then(serde_json::Value::as_u64);
+                    let generic_window = map
+                        .get("window")
+                        .or_else(|| map.get("total"))
+                        .and_then(serde_json::Value::as_u64)
+                        .filter(|value| *value > 0);
+                    if let (Some(generic_used), Some(generic_window)) =
+                        (generic_used, generic_window)
+                    {
+                        used.get_or_insert(generic_used);
+                        window.get_or_insert(generic_window);
+                    }
+                }
+                for child in map.values() {
+                    walk(child, used, window);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    walk(child, used, window);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut used = None;
+    let mut window = None;
+    walk(params, &mut used, &mut window);
+    (used, window)
+}
+
+/// Exact cumulative token count from a session projection/state patch.
+/// Deliberately accepts only the protocol's `totalTokenCount` field so period
+/// usage totals or generic nested `total` values cannot leak into the footer.
+pub fn app_state_total_tokens(params: &serde_json::Value) -> Option<u64> {
+    match params {
+        serde_json::Value::Object(map) => map
+            .get("totalTokenCount")
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| map.values().find_map(app_state_total_tokens)),
+        serde_json::Value::Array(items) => items.iter().find_map(app_state_total_tokens),
+        _ => None,
+    }
+}
+
 /// One tool invocation within a turn, correlated across its start/input/result
 /// events by `call_id`. `finished` flips when the `result` event lands.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -2204,13 +2204,34 @@ fn state_update_flags_abnormal_turn_end() {
 
 #[test]
 fn state_watermark_found_anywhere_in_tree() {
-    use zcode_tui::app_state_watermark;
+    use zcode_tui::{app_state_context_values, app_state_total_tokens, app_state_watermark};
     // Nested under an arbitrary path — the walk should still find the pair.
     let params = serde_json::json!({
         "patch": { "context": { "contextUsed": 1234, "contextWindow": 200000 } },
         "reason": "turn",
     });
     assert_eq!(app_state_watermark(&params), Some((1234, 200000)));
+
+    // Incremental patches commonly update only the used side. The stable
+    // model window must not be required for this live update to survive.
+    let partial = serde_json::json!({
+        "patch": {"projection": {"contextUsed": 4321}}
+    });
+    assert_eq!(app_state_context_values(&partial), (Some(4321), None));
+
+    let live_projection = serde_json::json!({
+        "snapshot": {"projection": {"contextUsed": 4321, "totalTokenCount": 9876}}
+    });
+    assert_eq!(app_state_total_tokens(&live_projection), Some(9876));
+    assert_eq!(
+        app_state_total_tokens(&serde_json::json!({"usage": {"total": 999999}})),
+        None
+    );
+
+    let window_only = serde_json::json!({
+        "snapshot": {"projection": {"contextWindow": 200000}}
+    });
+    assert_eq!(app_state_context_values(&window_only), (None, Some(200000)));
     // Alternate key names are accepted too.
     let alt = serde_json::json!({ "usage": { "used": 10, "total": 100 } });
     assert_eq!(app_state_watermark(&alt), Some((10, 100)));

@@ -19,18 +19,25 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-B]")
 
 FAKE_ZCODE = r'''#!/usr/bin/env python3
 import json
+import os
 import sys
 
 if len(sys.argv) < 2 or sys.argv[1] != "app-server":
     print("0.16.3")
     raise SystemExit(0)
 
+cancel_scenario = os.environ.get("ZCODE_TUI_TEST_CANCEL") == "1"
+create_count = 0
+send_count = 0
+
 for line in sys.stdin:
     request = json.loads(line)
     ident = request.get("id")
     method = request.get("method")
     if method == "session/create":
-        result = {"session": {"sessionId": "parent-pty", "status": "idle"},
+        create_count += 1
+        session_id = "parent-pty" if create_count == 1 else "new-pty"
+        result = {"session": {"sessionId": session_id, "status": "idle"},
                   "slashCommands": [], "todos": []}
     elif method == "session/subscribe":
         result = {"sessionId": "parent-pty", "eventSeq": 0, "events": []}
@@ -50,11 +57,31 @@ for line in sys.stdin:
                   "outputTokens": 8000, "reasoningTokens": 4000,
                   "cacheReadTokens": 18000, "modelRequestCount": 12}
     elif method == "session/read":
+        context_used = 12000 if send_count <= 1 else (
+            13000 if create_count == 1 else 14000
+        )
+        total_tokens = 16000 if send_count <= 1 else 17000
         result = {"snapshot": {"projection": {
-            "contextUsed": 12000, "contextWindow": 200000}}}
+            "contextUsed": context_used, "contextWindow": 200000,
+            "totalTokenCount": total_tokens}}}
     elif method == "session/send":
+        send_count += 1
         result = {"accepted": True, "sessionId": "parent-pty", "stateRevision": 1}
         print(json.dumps({"id": ident, "result": result}), flush=True)
+        if cancel_scenario:
+            delta = "partial-before-esc" if send_count == 1 else (
+                "continued-parent-session" if create_count == 1 else "wrong-new-session"
+            )
+            print(json.dumps({"method": "session/event", "params": {
+                "type": "model.streaming", "payload": {
+                    "kind": "text_delta", "delta": delta, "done": False}}}), flush=True)
+            if send_count > 1:
+                context_used = 13000 if create_count == 1 else 14000
+                print(json.dumps({"method": "state.updated", "params": {
+                    "sessionId": "parent-pty", "reason": "prompt_completed",
+                    "patch": {"status": "idle", "projection": {
+                        "contextUsed": context_used}}}}), flush=True)
+            continue
         print(json.dumps({"method": "session/event", "params": {
             "type": "background_task_started", "payload": {
                 "taskId": "task-pty-exact", "toolCallId": "call-bash",
@@ -68,13 +95,21 @@ for line in sys.stdin:
             "patch": {"status": "idle", "context": {
                 "contextUsed": 12000, "contextWindow": 200000}}}}), flush=True)
         continue
+    elif method == "session/stop":
+        result = {"stopped": True, "sessionId": "parent-pty"}
+        print(json.dumps({"id": ident, "result": result}), flush=True)
+        print(json.dumps({"method": "session/event", "params": {
+            "type": "turn.completed", "payload": {
+                "response": "", "tokenCount": 0, "toolCallCount": 0,
+                "duration": 0, "resultType": "cancelled"}}}), flush=True)
+        continue
     else:
         result = {}
     print(json.dumps({"id": ident, "result": result}), flush=True)
 '''
 
 
-def run(width, switch_background=False):
+def run(width, switch_background=False, cancel_scenario=False):
     temp = tempfile.mkdtemp(prefix="zcode-agents-pty-")
     fake = os.path.join(temp, "zcode")
     with open(fake, "w", encoding="utf-8") as handle:
@@ -88,6 +123,8 @@ def run(width, switch_background=False):
         "ZCODE_TUI_SKYLINE": "off",
         "NO_COLOR": "1",
     })
+    if cancel_scenario:
+        env["ZCODE_TUI_TEST_CANCEL"] = "1"
     master, slave = pty.openpty()
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 28, width, 0, 0))
     process = subprocess.Popen(
@@ -99,6 +136,8 @@ def run(width, switch_background=False):
     sent_hello = False
     sent_agents = False
     sent_tab = False
+    sent_escape = False
+    sent_second = False
     dsr_tail = b""
     while time.time() < deadline:
         ready, _, _ = select.select([master], [], [], 0.1)
@@ -117,13 +156,22 @@ def run(width, switch_background=False):
             visible = ANSI.sub("", raw.decode("utf-8", errors="replace")).replace("\r", "")
             screen = re.sub(r"\s+", "", visible)
             if not sent_hello and "ctx--·tok--" in screen:
-                os.write(master, b"hello\r")
+                os.write(master, b"interrupt me\r" if cancel_scenario else b"hello\r")
                 sent_hello = True
-            elif sent_hello and not sent_agents and "tok42k" in screen:
+            elif cancel_scenario and not sent_escape and "ctx12k/200k" in screen:
+                os.write(master, b"\x1b")
+                sent_escape = True
+            elif cancel_scenario and sent_escape and not sent_second and "sessionpreserved" in screen:
+                os.write(master, b"continue here\r")
+                sent_second = True
+            elif cancel_scenario and sent_second and "continued-parent-session" in screen:
+                break
+            elif not cancel_scenario and sent_hello and not sent_agents and "tok42k" in screen:
                 os.write(master, b"/agents\r")
                 sent_agents = True
             elif (
-                switch_background
+                not cancel_scenario
+                and switch_background
                 and sent_agents
                 and not sent_tab
                 and "ParentAgent" in screen
@@ -165,4 +213,13 @@ require(
 )
 require("120-column Inspector keeps parent input target", "inputtarget:parent" in wide)
 
-print("8/8 Agent Inspector and usage PTY checks passed", flush=True)
+cancelled = run(100, cancel_scenario=True)
+require("Esc reports preserved parent session", "sessionpreserved" in cancelled, cancelled)
+require("ctx and tok refresh before thinking ends", "tok16k" in cancelled, cancelled)
+require(
+    "prompt after Esc continues the same session",
+    "continued-parent-session" in cancelled and "wrong-new-session" not in cancelled,
+    cancelled,
+)
+
+print("11/11 Agent Inspector, live usage, and cancel-continuity PTY checks passed", flush=True)

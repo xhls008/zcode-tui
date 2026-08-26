@@ -28,9 +28,9 @@ use zcode_tui::{
     app_close_params, app_compact_params, app_create_params, app_file_rewind_params,
     app_resume_params, app_rewind_params, app_send_params_with_attachments, app_server_enabled,
     app_session_controls, app_session_id_from_result, app_session_read_params, app_set_mode_params,
-    app_set_model_params, app_set_thought_params, app_state_controls, app_state_is_turn_end,
-    app_state_turn_error, app_state_watermark, app_steer_params, app_stop_params,
-    app_subscribe_params, app_usage_params, app_workspace_model_controls,
+    app_set_model_params, app_set_thought_params, app_state_context_values, app_state_controls,
+    app_state_is_turn_end, app_state_total_tokens, app_state_turn_error, app_steer_params,
+    app_stop_params, app_subscribe_params, app_usage_params, app_workspace_model_controls,
     app_workspace_read_params, build_runtime_model, build_send_attachments, checkpoint_short_id,
     classify_input, command_palette_rows, context_watermark_warn, conversation_target, db_baseline,
     db_schema_supported, detect_auth_status, diff_line_role, discover_zcode_app_dir,
@@ -663,8 +663,13 @@ struct UiState {
     /// tail (its own `prompt_completed` included). While `Some`, those events
     /// are swallowed until the terminator lands, so they cannot bleed into —
     /// and prematurely finalize — the next prompt. Carries the start time for a
-    /// timeout that forces a fresh session if the kernel never terminates it.
+    /// timeout that releases the UI without discarding the parent session.
     app_draining: Option<Instant>,
+    /// Coalesced live `session/read` refresh. Streaming deltas may arrive much
+    /// faster than the server can answer, so keep at most one read in flight
+    /// and remember whether another semantic update landed meanwhile.
+    context_refresh_in_flight: bool,
+    context_refresh_pending: bool,
     /// Pending kernel interaction (permission) request; renders the approval
     /// overlay. The kernel re-sends the same requestId under fresh envelope
     /// ids until answered — re-sends only refresh `envelope_id` here.
@@ -739,6 +744,9 @@ enum ControlReq {
     Usage(&'static str),
     /// Silent `session/read` snapshot used to refresh parent context.
     ContextSnapshot,
+    /// Esc cancellation barrier. Its response means the stopped turn has
+    /// settled and the same session can safely accept the next prompt.
+    StopTurn,
     /// /rewind: previewFileRewind in flight; the result feeds the preview
     /// stage of the overlay (dropped if the overlay was closed meanwhile).
     RewindPreview(RewindTarget),
@@ -844,6 +852,8 @@ impl UiState {
             skyline_mode: skyline_mode(|key| env::var(key).ok()),
             app_connect: None,
             app_draining: None,
+            context_refresh_in_flight: false,
+            context_refresh_pending: false,
             interaction: None,
             interaction_done: HashSet::new(),
             controls: SessionControls::default(),
@@ -1616,9 +1626,20 @@ impl UiState {
     /// into. Any protocol/IO failure returns an `AppServerUnavailable` for the
     /// caller to downgrade on.
     fn start_app_prompt(&mut self, prompt: &str) -> Result<(), AppServerUnavailable> {
-        // A connection that died between turns is not reusable.
+        // A transport that died between turns is replaceable: resume the
+        // existing kernel session on a fresh app-server process instead of
+        // silently creating a different conversation.
         if self.app_conn.as_ref().is_some_and(|conn| !conn.is_alive()) {
-            return Err(AppServerUnavailable::Disconnected);
+            if let Some(session_id) = self.app_session.take() {
+                self.config.resume = Some(session_id);
+                self.config.continue_session = false;
+            }
+            self.app_conn = None;
+            self.app_draining = None;
+            self.control_requests.clear();
+            self.context_refresh_in_flight = false;
+            self.context_refresh_pending = false;
+            self.v4_mode = V4Mode::Unknown;
         }
         if self.app_conn.is_none() {
             self.app_conn = Some(AppServerConn::spawn(&self.zcode_bin)?);
@@ -1951,8 +1972,8 @@ impl UiState {
                     }
                 }
                 ConnectStage::Subscribe => {
-                    if let Some(watermark) = result.as_ref().and_then(app_state_watermark) {
-                        self.usage.update_context(watermark.0, watermark.1);
+                    if let Some(result) = result.as_ref() {
+                        self.absorb_context_state(result);
                     }
                     // Layer the optional V4 control subscription over the
                     // working legacy body stream before the first prompt.
@@ -2278,11 +2299,13 @@ fi"#
             return;
         }
         if self.app_turn.is_some() {
-            if let (Some(conn), Some(session_id)) =
-                (self.app_conn.as_mut(), self.app_session.clone())
-            {
-                let _ = conn.send("session/stop", app_stop_params(&session_id));
-            }
+            let stop_sent = self.app_session.clone().is_some_and(|session_id| {
+                self.send_control(
+                    "session/stop",
+                    app_stop_params(&session_id),
+                    ControlReq::StopTurn,
+                )
+            });
             if let Some(turn) = &mut self.app_turn {
                 turn.cancel_requested = true;
             }
@@ -2291,7 +2314,7 @@ fi"#
             // `prompt_completed` included). Swallow it before the next prompt
             // reuses the session, or it would bleed into — and prematurely
             // finalize — the next turn.
-            if self.app_conn.is_some() {
+            if stop_sent {
                 self.app_draining = Some(Instant::now());
             }
         } else {
@@ -2342,7 +2365,11 @@ fi"#
                     let Some(turn) = &mut self.app_turn else {
                         return;
                     };
-                    match turn.turn.apply(&event) {
+                    let delta = turn.turn.apply(&event);
+                    if !matches!(delta, TurnDelta::None) {
+                        self.request_context_refresh();
+                    }
+                    match delta {
                         TurnDelta::Text => self.app_append_text(),
                         TurnDelta::ToolFinished(idx) => self.app_push_tool_entry(idx),
                         TurnDelta::Done => {
@@ -2355,9 +2382,7 @@ fi"#
                     }
                 }
                 AppServerMessage::StateUpdated(params) => {
-                    if let Some(watermark) = app_state_watermark(&params) {
-                        self.usage.update_context(watermark.0, watermark.1);
-                    }
+                    self.absorb_context_state(&params);
                     if let Some(controls) = app_state_controls(&params) {
                         self.merge_controls(controls);
                     }
@@ -2521,8 +2546,8 @@ fi"#
     /// Swallow a cancelled turn's trailing events until its terminator lands, so
     /// nothing bleeds into the next prompt on the reused session. Context
     /// watermarks are still worth keeping; everything else is discarded. If the
-    /// kernel never sends a clean terminator, give up after a ceiling and force
-    /// a fresh session next prompt so no straggler can leak in.
+    /// kernel never sends a clean terminator, the stop response acts as the
+    /// barrier. A final timeout releases the UI but never discards sessionId.
     fn drain_cancelled_turn(&mut self) {
         if !self.app_conn.as_ref().is_some_and(AppServerConn::is_alive) {
             self.app_draining = None;
@@ -2530,16 +2555,44 @@ fi"#
         }
         while let Some(message) = self.app_conn.as_mut().and_then(AppServerConn::poll) {
             match message {
+                AppServerMessage::Event(event)
+                    if matches!(
+                        event.kind.as_str(),
+                        "turn.completed" | "turn.failed" | "finish"
+                    ) || (event.kind == "text_end" && event.done) =>
+                {
+                    self.app_draining = None;
+                    self.request_context_refresh();
+                    return;
+                }
                 AppServerMessage::StateUpdated(params) => {
-                    if let Some(watermark) = app_state_watermark(&params) {
-                        self.usage.update_context(watermark.0, watermark.1);
-                    }
+                    self.absorb_context_state(&params);
                     if app_state_is_turn_end(&params) || app_state_turn_error(&params).is_some() {
                         self.app_draining = None;
+                        self.request_context_refresh();
                         return;
                     }
                 }
                 AppServerMessage::V4Frame(params) => self.apply_v4_frame(params),
+                AppServerMessage::ServerRequest { id, method, params } => {
+                    self.on_server_request(id, &method, &params);
+                }
+                AppServerMessage::Response {
+                    id,
+                    error: Some(message),
+                    ..
+                } => {
+                    self.on_control_error(id, &message);
+                    if self.app_draining.is_none() {
+                        return;
+                    }
+                }
+                AppServerMessage::Response { id, result, .. } => {
+                    self.on_control_ok(id, result.as_ref());
+                    if self.app_draining.is_none() {
+                        return;
+                    }
+                }
                 _ => {}
             }
         }
@@ -2548,8 +2601,9 @@ fi"#
             .is_some_and(|started| started.elapsed() > Duration::from_secs(10))
         {
             self.app_draining = None;
-            self.app_session = None; // recreate → guaranteed clean next prompt
-            self.reset_rewind_state();
+            self.status = "cancelled · session preserved".to_string();
+            self.log_debug("cancel drain timed out; preserving session for reconnect/reuse");
+            self.request_context_refresh();
         }
     }
 
@@ -2601,9 +2655,7 @@ fi"#
         while let Some(message) = self.app_conn.as_mut().and_then(AppServerConn::poll) {
             match message {
                 AppServerMessage::StateUpdated(params) => {
-                    if let Some(watermark) = app_state_watermark(&params) {
-                        self.usage.update_context(watermark.0, watermark.1);
-                    }
+                    self.absorb_context_state(&params);
                     if let Some(controls) = app_state_controls(&params) {
                         self.merge_controls(controls);
                     }
@@ -2801,7 +2853,7 @@ fi"#
     /// Send a fire-and-forget control request, remembering its id so a later
     /// error response can name the command. A steer that cannot be sent falls
     /// back to the queue (spec: steer failure must not lose the input).
-    fn send_control(&mut self, method: &str, params: serde_json::Value, req: ControlReq) {
+    fn send_control(&mut self, method: &str, params: serde_json::Value, req: ControlReq) -> bool {
         let result = match self.app_conn.as_mut() {
             Some(conn) => conn.send(method, params),
             None => Err(AppServerUnavailable::Disconnected),
@@ -2809,6 +2861,7 @@ fi"#
         match result {
             Ok(id) => {
                 self.control_requests.insert(id, req);
+                true
             }
             Err(reason) => {
                 self.push_error(&format!("{method} failed: {reason}"));
@@ -2832,6 +2885,7 @@ fi"#
                     }
                     _ => {}
                 }
+                false
             }
         }
     }
@@ -2868,6 +2922,14 @@ fi"#
             }
             Some(ControlReq::ContextSnapshot) => {
                 self.log_debug(&format!("context snapshot refresh failed: {message}"));
+                self.context_refresh_in_flight = false;
+                self.pump_context_refresh();
+                true
+            }
+            Some(ControlReq::StopTurn) => {
+                self.app_draining = None;
+                self.status = "cancel request failed; session preserved".to_string();
+                self.log_debug(&format!("session/stop failed: {message}"));
                 true
             }
             Some(ControlReq::Usage(tag)) => {
@@ -2937,9 +2999,16 @@ fi"#
                 }
             }
             Some(ControlReq::ContextSnapshot) => {
-                if let Some(watermark) = result.and_then(app_state_watermark) {
-                    self.usage.update_context(watermark.0, watermark.1);
+                self.context_refresh_in_flight = false;
+                if let Some(result) = result {
+                    self.absorb_context_state(result);
                 }
+                self.pump_context_refresh();
+            }
+            Some(ControlReq::StopTurn) => {
+                self.app_draining = None;
+                self.status = "cancelled · session preserved".to_string();
+                self.request_context_refresh();
             }
             Some(ControlReq::V4SetGuide {
                 content,
@@ -3159,11 +3228,51 @@ fi"#
             app_usage_params(&session_id),
             ControlReq::Usage("snapshot"),
         );
-        self.send_control(
-            "session/read",
-            app_session_read_params(&session_id),
-            ControlReq::ContextSnapshot,
-        );
+        self.request_context_refresh();
+    }
+
+    fn absorb_context_state(&mut self, value: &serde_json::Value) {
+        let (used, window) = app_state_context_values(value);
+        if let Some(window) = window {
+            self.usage.update_context_window(window);
+        }
+        if let Some(used) = used {
+            self.usage.update_context_used(used);
+        }
+        if let Some(total_tokens) = app_state_total_tokens(value) {
+            self.usage.total_tokens = Some(total_tokens);
+        }
+    }
+
+    /// Schedule an exact parent-context snapshot without building an
+    /// unbounded request backlog when token deltas arrive rapidly.
+    fn request_context_refresh(&mut self) {
+        self.context_refresh_pending = true;
+        self.pump_context_refresh();
+    }
+
+    fn pump_context_refresh(&mut self) {
+        if self.context_refresh_in_flight || !self.context_refresh_pending {
+            return;
+        }
+        let Some(session_id) = self.app_session.clone() else {
+            self.context_refresh_pending = false;
+            return;
+        };
+        let Some(conn) = self.app_conn.as_mut() else {
+            return;
+        };
+        self.context_refresh_pending = false;
+        match conn.send("session/read", app_session_read_params(&session_id)) {
+            Ok(id) => {
+                self.context_refresh_in_flight = true;
+                self.control_requests
+                    .insert(id, ControlReq::ContextSnapshot);
+            }
+            Err(reason) => {
+                self.log_debug(&format!("context snapshot refresh failed: {reason}"));
+            }
+        }
     }
 
     fn pump_job(&mut self) {
@@ -3703,11 +3812,13 @@ fi"#
                     ControlReq::RewindPreview(target),
                 );
             }
-            _ => self.send_control(
-                "session/previewFileRewind",
-                app_file_rewind_params(&session_id, &target),
-                ControlReq::RewindPreview(target),
-            ),
+            _ => {
+                self.send_control(
+                    "session/previewFileRewind",
+                    app_file_rewind_params(&session_id, &target),
+                    ControlReq::RewindPreview(target),
+                );
+            }
         }
     }
 
@@ -3814,18 +3925,20 @@ fi"#
                     ControlReq::RewindConversation(target),
                 );
             }
-            both_or_workspace => self.send_control(
-                "session/applyFileRewind",
-                app_file_rewind_params(&session_id, &target),
-                ControlReq::RewindApplyFiles {
-                    target,
-                    then_conversation: if both_or_workspace == "both" {
-                        conversation
-                    } else {
-                        None
+            both_or_workspace => {
+                self.send_control(
+                    "session/applyFileRewind",
+                    app_file_rewind_params(&session_id, &target),
+                    ControlReq::RewindApplyFiles {
+                        target,
+                        then_conversation: if both_or_workspace == "both" {
+                            conversation
+                        } else {
+                            None
+                        },
                     },
-                },
-            ),
+                );
+            }
         }
     }
 
@@ -4011,6 +4124,8 @@ fi"#
         self.pending_v4_steers.clear();
         self.agents.reset();
         self.usage = UsageSnapshot::default();
+        self.context_refresh_in_flight = false;
+        self.context_refresh_pending = false;
     }
 
     fn open_background_tasks(&mut self) {
@@ -6247,6 +6362,43 @@ mod tests {
             state.log.is_empty(),
             "automatic snapshots stay out of transcript"
         );
+    }
+
+    #[test]
+    fn incremental_context_patch_updates_used_without_repeating_window() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.usage.update_context_window(200_000);
+
+        state.absorb_context_state(&serde_json::json!({
+            "patch": {"projection": {
+                "contextUsed": 12_345,
+                "totalTokenCount": 18_765
+            }}
+        }));
+
+        assert_eq!(state.usage.context_used, Some(12_345));
+        assert_eq!(state.usage.context_window, Some(200_000));
+        assert_eq!(state.usage.total_tokens, Some(18_765));
+    }
+
+    #[test]
+    fn cancelled_turn_barrier_and_disconnect_preserve_session() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.app_session = Some("sess_keep".to_string());
+        state.app_draining = Some(Instant::now());
+        state.control_requests.insert(77, ControlReq::StopTurn);
+
+        state.on_control_ok(77, Some(&serde_json::json!({"stopped": true})));
+        assert!(state.app_draining.is_none());
+        assert_eq!(state.app_session.as_deref(), Some("sess_keep"));
+        assert_eq!(state.status, "cancelled · session preserved");
+
+        // Even if the transport disappears before a terminal event, draining
+        // releases without erasing the resumable kernel session id.
+        state.app_draining = Some(Instant::now());
+        state.drain_cancelled_turn();
+        assert!(state.app_draining.is_none());
+        assert_eq!(state.app_session.as_deref(), Some("sess_keep"));
     }
 
     #[test]

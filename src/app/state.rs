@@ -56,6 +56,10 @@ impl UsageSnapshot {
         self.context_window = Some(window);
     }
 
+    pub(crate) fn update_context_used(&mut self, used: u64) {
+        self.context_used = Some(used);
+    }
+
     pub(crate) fn update_context_window(&mut self, window: u64) {
         if window > 0 {
             self.context_window = Some(window);
