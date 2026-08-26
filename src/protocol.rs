@@ -790,6 +790,7 @@ pub struct AgentSnapshot {
     pub summary: Option<String>,
     pub status: Option<String>,
     pub command: Option<String>,
+    pub output_tail: Option<String>,
     pub pid: Option<u64>,
     pub cancellable: Option<bool>,
     pub revision: Option<u64>,
@@ -812,6 +813,7 @@ fn parse_agent_snapshot(value: &serde_json::Value, kind: &str) -> Option<AgentSn
         summary: string_alias(value, &["summary", "description", "message"]),
         status: string_alias(value, &["status", "state"]),
         command: string_alias(value, &["command"]),
+        output_tail: string_alias(value, &["outputTail", "lastOutput", "output"]),
         pid: value.get("pid").and_then(serde_json::Value::as_u64),
         cancellable: value
             .get("cancellable")

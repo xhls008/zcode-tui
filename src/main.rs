@@ -65,7 +65,7 @@ use agents::AgentInspectorState;
 use app::input::{composer_layout, suggestion_popup_area};
 use app::state::{AppMode, ConnectStage, DbState, V4Mode};
 use transcript::{log_entry_needs_separator, EntryId, LogKind, LogLine};
-use ui::{render_background_tasks, render_composer, render_conversation, Theme};
+use ui::{render_agent_inspector, render_composer, render_conversation, Theme};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -3857,13 +3857,10 @@ fi"#
 
     fn open_background_tasks(&mut self) {
         self.refresh_subagents();
-        if !self.agents.open() {
-            self.push_system("no agent work observed yet; requested a kernel refresh");
-            return;
-        }
+        self.agents.open();
         self.show_palette = false;
         self.show_help = false;
-        self.status = "background tasks: ↑↓ select · Esc close (read-only)".to_string();
+        self.status = "agent inspector: read-only · input target parent".to_string();
     }
 
     fn refresh_subagents(&mut self) {
@@ -3878,15 +3875,51 @@ fi"#
     }
 
     fn handle_background_task_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.agents.close();
-                self.status = "background task list closed".to_string();
+            KeyCode::Char('x') if ctrl => {
+                self.leader_pending = true;
+                self.status = "leader: next key (Y copies last reply)".to_string();
             }
-            KeyCode::Up => self.agents.select_previous(),
-            KeyCode::Down => self.agents.select_next(),
-            KeyCode::Home => self.agents.select_first(),
-            KeyCode::End => self.agents.select_last(),
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if self.agents.back_to_list() {
+                    self.status = "agent inspector list · input target parent".to_string();
+                } else {
+                    self.agents.close();
+                    self.status = "agent inspector closed".to_string();
+                }
+            }
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                self.agents.toggle_tab();
+                self.status = "inspector tab switched · input target parent".to_string();
+            }
+            KeyCode::Enter => self.agents.open_detail(),
+            KeyCode::Char('r') => {
+                self.refresh_subagents();
+                self.status = "refreshing agent state…".to_string();
+            }
+            KeyCode::Up => {
+                if self.agents.view() == agents::InspectorView::Detail {
+                    self.agents.scroll_detail(-1);
+                } else {
+                    self.agents.select_previous();
+                }
+            }
+            KeyCode::Down => {
+                if self.agents.view() == agents::InspectorView::Detail {
+                    self.agents.scroll_detail(1);
+                } else {
+                    self.agents.select_next();
+                }
+            }
+            KeyCode::PageUp => self.agents.scroll_detail(-8),
+            KeyCode::PageDown => self.agents.scroll_detail(8),
+            KeyCode::Home if self.agents.view() == agents::InspectorView::List => {
+                self.agents.select_first();
+            }
+            KeyCode::End if self.agents.view() == agents::InspectorView::List => {
+                self.agents.select_last();
+            }
             _ => {}
         }
     }
@@ -4546,7 +4579,7 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
         render_session_picker(frame, centered_rect(84, 60, root), state);
     }
     if state.agents.is_open() {
-        render_background_tasks(frame, centered_rect(92, 90, root), state);
+        render_agent_inspector(frame, centered_rect(92, 90, root), state);
     }
     if state.model_picker.is_some() {
         render_model_picker(frame, centered_rect(64, 46, root), state);
@@ -5815,11 +5848,53 @@ fn display_cwd(config: &AppConfig) -> String {
 mod tests {
     use super::*;
 
+    fn render_inspector_text(state: &UiState, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render_agent_inspector(frame, frame.area(), state))
+            .expect("render inspector");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer.cell((x, y)).expect("cell").symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn transcript_does_not_wait_for_startup_probe() {
         let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
         state.log.push(LogLine::new(LogKind::User, "hello"));
         assert_eq!(state.committable_log_end(), 1);
+    }
+
+    #[test]
+    fn agent_inspector_renders_parent_target_in_wide_and_narrow_views() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.agents.merge_snapshots(vec![zcode_tui::AgentSnapshot {
+            kind: "subagent".to_string(),
+            child_session_id: Some("child-render".to_string()),
+            title: Some("reviewer".to_string()),
+            summary: Some("inspect state reconciliation".to_string()),
+            status: Some("running".to_string()),
+            ..Default::default()
+        }]);
+        state.agents.open();
+        let wide = render_inspector_text(&state, 100, 24);
+        assert!(wide.contains("Parent Agent"));
+        assert!(wide.contains("reviewer"));
+        assert!(wide.contains("input target: parent"));
+
+        state.agents.select_next();
+        state.agents.open_detail();
+        let narrow = render_inspector_text(&state, 56, 18);
+        assert!(narrow.contains("viewing: read-only"));
+        assert!(narrow.contains("input target: parent"));
+        assert!(narrow.contains("child-render"));
     }
 
     #[test]
