@@ -856,13 +856,40 @@ fn append_agent_container(output: &mut Vec<AgentSnapshot>, value: &serde_json::V
     );
 }
 
+fn append_official_subagents(output: &mut Vec<AgentSnapshot>, value: &serde_json::Value) {
+    let revision = value.get("revision").and_then(serde_json::Value::as_u64);
+    let start = output.len();
+    append_agent_array(output, value.get("running"), "subagent");
+    append_agent_array(output, value.pointer("/ended/items"), "subagent");
+    for snapshot in &mut output[start..] {
+        snapshot.revision = snapshot.revision.or(revision);
+    }
+    if let Some(ids) = value.get("childSessionIds").and_then(|ids| ids.as_array()) {
+        for id in ids.iter().filter_map(|id| id.as_str()) {
+            if !output
+                .iter()
+                .any(|snapshot| snapshot.child_session_id.as_deref() == Some(id))
+            {
+                output.push(AgentSnapshot {
+                    kind: "subagent".to_string(),
+                    child_session_id: Some(id.to_string()),
+                    revision,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+}
+
 /// Normalize an authoritative `session/subagents` response. Both the direct
 /// result and the observed `{session:{...}}` envelope are accepted.
 pub fn parse_subagents_result(result: &serde_json::Value) -> Vec<AgentSnapshot> {
     let mut output = Vec::new();
     append_agent_container(&mut output, result);
+    append_official_subagents(&mut output, result);
     if let Some(session) = result.get("session") {
         append_agent_container(&mut output, session);
+        append_official_subagents(&mut output, session);
     }
     output
 }

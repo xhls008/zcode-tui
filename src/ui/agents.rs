@@ -167,6 +167,14 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
                 AgentWorkKind::Background => "Background Bash",
             },
         );
+        if task.kind == AgentWorkKind::Subagent {
+            push_field(
+                &mut lines,
+                state,
+                "transcript",
+                "unavailable without stateful child resume; showing official summary only",
+            );
+        }
         push_field(&mut lines, state, "status", &task.status);
         push_optional(&mut lines, state, "title", task.title.as_deref());
         push_optional(&mut lines, state, "summary", task.summary.as_deref());
