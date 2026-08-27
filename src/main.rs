@@ -115,10 +115,10 @@ const MINI_Z_ICON: [&str; 8] = [
 ];
 /// Bottom live viewport; completed transcript lives above in scrollback.
 const INLINE_VIEWPORT_ROWS: u16 = 24;
-/// The configured startup banner renders eight content rows plus two borders.
-/// Keeping this many terminal rows outside the inline viewport prevents the
-/// initial `insert_before` from scrolling the top of the banner off-screen.
-const STARTUP_BANNER_ROWS: u16 = 10;
+/// The startup banner renders ten rows. Two more rows cover the terminal's
+/// current cursor line and the inline viewport boundary; without that margin
+/// ratatui scrolls the first couple of banner rows off-screen on launch.
+const STARTUP_BANNER_ROWS: u16 = 12;
 /// Preserve the pre-overlay-expansion live area on compact terminals.
 const MIN_INLINE_VIEWPORT_ROWS: u16 = 10;
 
@@ -332,6 +332,103 @@ fn model_cache_path() -> Option<PathBuf> {
     env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| home.join(".cache").join("zcode-tui").join("models.json"))
+}
+
+fn model_preference_path() -> Option<PathBuf> {
+    if let Some(root) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(root).join("zcode-tui").join("model.json"));
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".config").join("zcode-tui").join("model.json"))
+}
+
+fn parse_model_preference(raw: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let provider_id = value.get("providerId")?.as_str()?;
+    let model_id = value.get("modelId")?.as_str()?;
+    Some(serde_json::json!({
+        "providerId": provider_id,
+        "modelId": model_id,
+    }))
+}
+
+fn load_model_preference() -> Option<serde_json::Value> {
+    parse_model_preference(&fs::read_to_string(model_preference_path()?).ok()?)
+}
+
+fn model_reference_matches(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    ["providerId", "modelId"].into_iter().all(|key| {
+        matches!(
+            (
+                left.get(key).and_then(serde_json::Value::as_str),
+                right.get(key).and_then(serde_json::Value::as_str),
+            ),
+            (Some(left), Some(right)) if left == right
+        )
+    })
+}
+
+fn apply_model_preference_to_runtime(
+    runtime: &mut serde_json::Value,
+    preferred: &serde_json::Value,
+) -> bool {
+    let provider_id = runtime
+        .pointer("/provider/providerId")
+        .and_then(serde_json::Value::as_str);
+    let preferred_provider = preferred
+        .get("providerId")
+        .and_then(serde_json::Value::as_str);
+    if provider_id != preferred_provider {
+        return false;
+    }
+    let preferred_model = preferred.get("modelId").and_then(serde_json::Value::as_str);
+    let available = runtime
+        .pointer("/provider/models")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|models| {
+            models.iter().any(|model| {
+                model.get("modelId").and_then(serde_json::Value::as_str) == preferred_model
+            })
+        });
+    if !available {
+        return false;
+    }
+    runtime["model"] = preferred.clone();
+    true
+}
+
+fn save_model_preference(reference: &serde_json::Value) -> Result<()> {
+    let path = model_preference_path()
+        .ok_or_else(|| anyhow::anyhow!("model preference directory unavailable"))?;
+    save_model_preference_to(&path, reference)
+}
+
+fn save_model_preference_to(path: &Path, reference: &serde_json::Value) -> Result<()> {
+    let provider_id = reference
+        .get("providerId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("model reference has no providerId"))?;
+    let model_id = reference
+        .get("modelId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("model reference has no modelId"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("model preference path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    fs::write(
+        path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1,
+                "providerId": provider_id,
+                "modelId": model_id,
+            }))?
+        ),
+    )?;
+    Ok(())
 }
 
 fn cached_model_catalog() -> Option<ModelCatalogReport> {
@@ -3616,6 +3713,9 @@ fi"#
             return;
         };
         if let Some(choice) = self.controls.models.get(index).cloned() {
+            if let Err(error) = save_model_preference(&choice.reference) {
+                self.log_debug(&format!("model preference save failed: {error}"));
+            }
             self.controls.model_current = choice
                 .reference
                 .get("modelId")
@@ -4772,7 +4872,24 @@ fi"#
         self.status = format!("update available: ZCode {}", feed.version);
     }
 
-    fn apply_model_catalog(&mut self, catalog: ModelCatalogReport) {
+    fn apply_model_catalog(&mut self, mut catalog: ModelCatalogReport) {
+        if self.app_session.is_none() {
+            if let Some(preferred) = load_model_preference() {
+                if let Some(choice) = catalog
+                    .controls
+                    .models
+                    .iter()
+                    .find(|choice| model_reference_matches(&choice.reference, &preferred))
+                    .cloned()
+                {
+                    catalog.controls.model_current = preferred
+                        .get("modelId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    self.pending_model = Some(choice);
+                }
+            }
+        }
         self.model_provider = Some(catalog.provider_id);
         self.controls.models.clear();
         self.merge_controls(catalog.controls);
@@ -5159,7 +5276,11 @@ fn load_runtime_model() -> Option<serde_json::Value> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_millis() as u64;
-    build_runtime_model_with_desktop(&config, desktop.as_deref(), now)
+    let mut runtime = build_runtime_model_with_desktop(&config, desktop.as_deref(), now)?;
+    if let Some(preferred) = load_model_preference() {
+        apply_model_preference_to_runtime(&mut runtime, &preferred);
+    }
+    Some(runtime)
 }
 
 /// `session/usage` result → readable summary (shape pinned live 2026-07-07).
@@ -6384,16 +6505,60 @@ mod tests {
 
     #[test]
     fn inline_viewport_reserves_the_startup_banner_without_shrinking_large_terminals() {
-        // A standard 24-row terminal keeps all ten banner rows visible and
-        // still has a 14-row live area (far taller than the old viewport).
-        assert_eq!(inline_viewport_rows(24), 14);
-        assert_eq!(inline_viewport_rows(30), 20);
+        // A standard 24-row terminal keeps the banner plus terminal boundary
+        // visible and still has a 12-row live area.
+        assert_eq!(inline_viewport_rows(24), 12);
+        assert_eq!(inline_viewport_rows(30), 18);
         // Larger terminals retain the expanded Help/Model capacity.
         assert_eq!(inline_viewport_rows(40), 24);
         // Compact terminals never become less usable than the old 10-row UI,
         // except where the physical terminal itself has fewer rows.
         assert_eq!(inline_viewport_rows(16), 10);
         assert_eq!(inline_viewport_rows(8), 7);
+    }
+
+    #[test]
+    fn model_preference_keeps_only_the_selectable_reference() {
+        let parsed = parse_model_preference(
+            r#"{"version":1,"providerId":"bigmodel","modelId":"glm-5.3-flash","secret":"ignored"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "providerId": "bigmodel",
+                "modelId": "glm-5.3-flash",
+            })
+        );
+        assert!(model_reference_matches(
+            &serde_json::json!({
+                "providerId": "bigmodel",
+                "modelId": "glm-5.3-flash",
+                "runtimeOnly": true,
+            }),
+            &parsed,
+        ));
+        let mut runtime = serde_json::json!({
+            "model": {"providerId": "bigmodel", "modelId": "glm-5.3"},
+            "provider": {
+                "providerId": "bigmodel",
+                "models": [
+                    {"modelId": "glm-5.3"},
+                    {"modelId": "glm-5.3-flash"}
+                ]
+            }
+        });
+        assert!(apply_model_preference_to_runtime(&mut runtime, &parsed));
+        assert_eq!(runtime["model"]["modelId"], "glm-5.3-flash");
+        assert!(parse_model_preference("not json").is_none());
+        assert!(parse_model_preference(r#"{"providerId":"bigmodel"}"#).is_none());
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested/model.json");
+        save_model_preference_to(&path, &parsed).unwrap();
+        let saved = fs::read_to_string(path).unwrap();
+        assert_eq!(parse_model_preference(&saved), Some(parsed));
+        assert!(!saved.contains("secret"));
     }
 
     #[test]
