@@ -1,0 +1,8 @@
+{
+  "schema": "feature-review/v1",
+  "feature_id": "feat-glm-53-flash",
+  "status": "passed",
+  "score": 91,
+  "reviewed_at": "2026-08-27T01:30:00Z",
+  "blocking_issues": []
+}
