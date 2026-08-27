@@ -2,12 +2,11 @@
 
 [Chinese](README.md) | [English](README.en.md) | [Releases](https://github.com/xhls008/zcode-tui/releases) | [Design](docs/2026-07-04-design.md)
 
-![Current zcode-tui interface with ASCII branding, native scrollback, and phased output](assets/zcode-tui-auenger.png)
+![Current zcode-tui interface with ASCII branding, phased output, and the Agent Inspector](assets/zcode-tui-auenger.png)
 
-> The v0.6.0 interface captured with ZCode CLI kernel 0.16.3 on macOS (the
-> screenshot was taken while the build number still read 0.5.6). It shows the
-> adaptive ASCII brand panel, native
-> terminal scrollback, user message bands, and phased app-server output. The
+> The v0.6.0 interface captured with ZCode CLI kernel 0.16.3 on macOS. It shows
+> the adaptive ASCII brand panel, native terminal scrollback, phased app-server
+> output, and the read-only parent Agent / Subagent / Background Inspector. The
 > current source is also verified against ZCode Linux 3.8.1.
 
 > **Unofficial notice**: `zcode-tui` is not an official ZCode / Zhipu project
@@ -33,7 +32,7 @@ palette, and editor workflows are handled locally.
 | Official CLI kernel | **0.16.3** (bundled with ZCode 3.8.1) |
 | zcode-tui | **0.6.0** |
 | Protocol compatibility | 3.8.1/3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 116/116 Rust tests; zero-warning Clippy; native release build; verified 3.8.1 app-server handshake and TUI lifecycle |
+| Current source verification | 140/140 Rust tests; zero-warning Clippy; native release build; verified 3.8.1 app-server handshake and TUI lifecycle |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -96,10 +95,17 @@ for details.
   level, `/compact` in-place context compaction; `/mode` and Shift+Tab apply
   immediately via `session/setMode`.
 - Dynamic model catalog: at startup, the TUI reads ZCode's resolved catalog
-  through the app-server `workspace/readState` method. This catalog path never
-  reads the API key, contacts the provider directly, or rewrites ZCode's config.
-  Public model metadata is cached for app-server outages. `/model` works before
-  the first prompt and excludes models from inactive providers.
+  through `workspace/readState`, merges matching Desktop metadata from
+  `~/.zcode/v2/config.json` into the active CLI provider, and registers it with
+  `workspace/updateProviderRegistry`. This exposes Desktop-provided entries such
+  as `GLM-5.3-Flash` even when the standalone CLI catalog has not listed them.
+  Authentication and endpoints still come from `~/.zcode/cli/config.json`;
+  credentials are handed only in memory to the same local app-server, never
+  logged, persisted, or used by the TUI to contact the provider directly.
+  Public metadata is cached for outages. `/model` works before the first prompt,
+  excludes inactive providers, and stores only `{providerId, modelId}` in
+  `~/.config/zcode-tui/model.json` so the selection survives a restart and is
+  applied to created or resumed sessions.
 - Steering: on ZCode 3.5.3, plain text typed during a turn uses V4
   `setFollowupMode:guide` followed by `sendText`; success is shown only after
   the subsequent frame admits `delivery=guide`. Older kernels retain

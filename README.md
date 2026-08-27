@@ -2,12 +2,11 @@
 
 [中文](README.md) | [English](README.en.md) | [Releases](https://github.com/xhls008/zcode-tui/releases) | [Design](docs/2026-07-04-design.md)
 
-![zcode-tui 当前界面：ASCII ZCODE 欢迎面板、原生 scrollback 与阶段追加](assets/zcode-tui-auenger.png)
+![zcode-tui 当前界面：ASCII ZCODE 欢迎面板、阶段流式输出与 Agent Inspector](assets/zcode-tui-auenger.png)
 
-> v0.6.0 界面实机截图：ZCode CLI kernel 0.16.3，macOS（截图拍摄时构建号仍为
-> 0.5.6）。
-> 展示自适应 ASCII 品牌面板、终端原生 scrollback、用户消息横条和 app-server
-> 阶段追加；当前源码另已实测适配 ZCode Linux 3.8.1。
+> v0.6.0 界面实机截图：ZCode CLI kernel 0.16.3，macOS。展示自适应 ASCII
+> 品牌面板、终端原生 scrollback、app-server 阶段追加，以及只读的父 Agent /
+> Subagent / Background Inspector；当前源码另已实测适配 ZCode Linux 3.8.1。
 
 > **非官方声明**：`zcode-tui` 不是 ZCode / 智谱官方项目，也未获得官方背书。
 > 它是社区/个人维护的 Linux 终端 fallback，用来补齐官方包当前缺失的 TUI 体验。
@@ -28,7 +27,7 @@
 | 官方 CLI kernel | **0.16.3**（随 ZCode 3.8.1，版本未变） |
 | zcode-tui | **0.6.0** |
 | 协议兼容 | 3.8.1/3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 116/116；Clippy 零告警；原生 release 构建通过；3.8.1 app-server 握手和 TUI 启停正常 |
+| 当前源码验证 | Rust 测试 140/140；Clippy 零告警；原生 release 构建通过；3.8.1 app-server 握手和 TUI 启停正常 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -137,10 +136,15 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   frame 中 queue item 的 `delivery.admitted == guide` 才判成功；旧内核继续
   使用 `session/steer`。不再把本地“steering”提示误当成协议成功。
 - **动态模型目录**：启动时通过 ZCode app-server 的 `workspace/readState` 获取
-  内核已经解析好的模型目录；该流程不读取 API Key、不直连供应商接口，也不
-  改写 `~/.zcode/cli/config.json`。公开模型元数据缓存到
+  内核目录，并把桌面端 `~/.zcode/v2/config.json` 的匹配模型元数据合并到 CLI
+  当前 provider，再经 `workspace/updateProviderRegistry` 注册，因此可使用桌面端
+  已提供但独立 CLI 目录尚未列出的 `GLM-5.3-Flash`。认证与 endpoint 始终取自
+  `~/.zcode/cli/config.json`；凭据只在本机进程内存中交给同一 app-server，不写
+  日志、不回写配置，也不由 TUI 直连供应商。公开模型元数据缓存到
   `~/.cache/zcode-tui/models.json`，app-server 暂时不可用时用于回退。`/model`
-  在首次对话前可用，并只展示当前 provider（例如国内 BigModel）的模型。
+  在首次对话前可用，只展示当前 provider；选择结果以不含凭据的
+  `{providerId, modelId}` 保存到 `~/.config/zcode-tui/model.json`，下次启动自动
+  应用于新建或恢复的会话。
 - **检查点回滚（app-server 路径）**：内核每次放行的工具写盘都会产生检查点；
   3.3.6 的 `/rewind` 浮层列出本会话检查点（含 latestCheckpoint），Enter
   先预览将还原/删除的文件，选 scope 后应用；3.5.3 则从 V4 conversation
