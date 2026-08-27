@@ -28,5 +28,5 @@
   "warnings": [
     "The broad interactive PTY suite was deferred to user-run manual regression by explicit request; the focused Agent/usage/session-continuity PTY suite passed 11/11."
   ],
-  "report": "features/active-feat-glm-53-flash/evidence/verification-report.md"
+  "report": "features/archive/done-feat-glm-53-flash-20260827/evidence/verification-report.md"
 }

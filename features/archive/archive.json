@@ -1,8 +1,8 @@
 {
   "schema": "feature-archive/v1",
   "meta": {
-    "last_updated": "2026-08-26T16:11:21Z",
-    "total_completed": 7
+    "last_updated": "2026-08-27T01:50:01Z",
+    "total_completed": 8
   },
   "records": [
     {
@@ -283,6 +283,48 @@
         "blocking_failures": [],
         "warnings": [],
         "report": "features/archive/done-feat-subagent-tui-plan-20260827/evidence/verification-report.md"
+      }
+    },
+    {
+      "id": "feat-glm-53-flash",
+      "name": "GLM-5.3-Flash runtime support",
+      "status": "completed",
+      "completed_at": "2026-08-27T01:50:01Z",
+      "archive_path": "features/archive/done-feat-glm-53-flash-20260827",
+      "tag": "feat-glm-53-flash-20260827",
+      "merge_commit": "faaf0cf8e83a941438a9e8f3f359dc7de82e79f2",
+      "workflow_mode": "deep",
+      "verification": {
+        "schema": "feature-verification/v1",
+        "feature_id": "feat-glm-53-flash",
+        "status": "passed",
+        "verified_at": "2026-08-27T01:47:34Z",
+        "tasks": {
+          "total": 6,
+          "completed": 6,
+          "incomplete": 0
+        },
+        "quality": {
+          "status": "passed",
+          "passed": 4,
+          "failed": 0
+        },
+        "tests": {
+          "status": "passed",
+          "passed": 138,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scenarios": {
+          "total": 7,
+          "passed": 7,
+          "failed": 0
+        },
+        "blocking_failures": [],
+        "warnings": [
+          "The broad interactive PTY suite was deferred to user-run manual regression by explicit request; the focused Agent/usage/session-continuity PTY suite passed 11/11."
+        ],
+        "report": "features/archive/done-feat-glm-53-flash-20260827/evidence/verification-report.md"
       }
     }
   ]
