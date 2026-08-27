@@ -118,9 +118,9 @@ const INLINE_VIEWPORT_ROWS: u16 = 24;
 /// The startup banner renders ten rows. Four more rows cover the shell cursor,
 /// inline viewport boundary, and ratatui's initial cursor negotiation; without
 /// that margin the first couple of banner rows scroll off-screen on launch.
-const STARTUP_BANNER_ROWS: u16 = 14;
-/// Preserve the pre-overlay-expansion live area on compact terminals.
-const MIN_INLINE_VIEWPORT_ROWS: u16 = 10;
+const STARTUP_BANNER_ROWS: u16 = 15;
+/// Keep a compact but usable live area on short terminals.
+const MIN_INLINE_VIEWPORT_ROWS: u16 = 9;
 
 fn inline_viewport_rows(terminal_rows: u16) -> u16 {
     let available = terminal_rows.saturating_sub(1).max(1);
@@ -6505,15 +6505,15 @@ mod tests {
 
     #[test]
     fn inline_viewport_reserves_the_startup_banner_without_shrinking_large_terminals() {
-        // A standard 24-row terminal uses the original stable 10-row live
+        // A standard 24-row terminal uses a 9-row live
         // area; taller terminals progressively expand the overlays.
-        assert_eq!(inline_viewport_rows(24), 10);
-        assert_eq!(inline_viewport_rows(30), 16);
+        assert_eq!(inline_viewport_rows(24), 9);
+        assert_eq!(inline_viewport_rows(30), 15);
         // Larger terminals retain the expanded Help/Model capacity.
         assert_eq!(inline_viewport_rows(40), 24);
         // Compact terminals never become less usable than the old 10-row UI,
         // except where the physical terminal itself has fewer rows.
-        assert_eq!(inline_viewport_rows(16), 10);
+        assert_eq!(inline_viewport_rows(16), 9);
         assert_eq!(inline_viewport_rows(8), 7);
     }
 
