@@ -25,7 +25,7 @@
 |---|---|
 | ZCode Linux x64 桌面包 | **3.8.1**（官方 feed） |
 | 官方 CLI kernel | **0.16.3**（随 ZCode 3.8.1，版本未变） |
-| zcode-tui | **0.6.0** |
+| zcode-tui | **0.6.1** |
 | 协议兼容 | 3.8.1/3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
 | 当前源码验证 | Rust 测试 140/140；Clippy 零告警；原生 release 构建通过；3.8.1 app-server 握手和 TUI 启停正常 |
 
@@ -509,7 +509,9 @@ cargo clippy --all-targets --all-features
 [@auenger](https://github.com/auenger) 贡献动态模型目录与首轮模型切换
 ([PR #3](https://github.com/xhls008/zcode-tui/pull/3))，以及原生 scrollback、
 阶段追加和界面排版重构
-([PR #4](https://github.com/xhls008/zcode-tui/pull/4))，感谢对项目的持续支持。
+([PR #4](https://github.com/xhls008/zcode-tui/pull/4))；并在 v0.6.1 中以项目
+协作者身份持续完善 Agent Inspector、后台任务取消、GLM-5.3-Flash 支持、
+上下文状态和启动布局，感谢对项目的持续支持。
 
 ## 背景与吐槽
 

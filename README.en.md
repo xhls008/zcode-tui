@@ -30,7 +30,7 @@ palette, and editor workflows are handled locally.
 |---|---|
 | ZCode Linux x64 desktop | **3.8.1** (official feed) |
 | Official CLI kernel | **0.16.3** (bundled with ZCode 3.8.1) |
-| zcode-tui | **0.6.0** |
+| zcode-tui | **0.6.1** |
 | Protocol compatibility | 3.8.1/3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
 | Current source verification | 140/140 Rust tests; zero-warning Clippy; native release build; verified 3.8.1 app-server handshake and TUI lifecycle |
 
@@ -443,8 +443,10 @@ to [@auenger](https://github.com/auenger) for dynamic model discovery and
 pre-session model selection
 ([PR #3](https://github.com/xhls008/zcode-tui/pull/3)), plus the native
 scrollback, phased output, and layout refactor
-([PR #4](https://github.com/xhls008/zcode-tui/pull/4)). Thank you for the
-continued support of the project.
+([PR #4](https://github.com/xhls008/zcode-tui/pull/4)), and for continuing as
+a project collaborator in v0.6.1 with the Agent Inspector, background-task
+cancellation, GLM-5.3-Flash support, context status, and startup-layout work.
+Thank you for the continued support of the project.
 
 ## License
 

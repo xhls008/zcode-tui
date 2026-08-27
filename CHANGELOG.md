@@ -6,12 +6,47 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-27
+
 ### 新增
 
-- **只读 `/agents` 后台任务面板**：缓存当前 session 收到的
-  `background_task_started/updated/completed` 事件，展示状态、工具名、task ID、
-  PID 与内核提供的命令；支持上下选择查看详情，并明确标注内核尚未提供任务日志、
-  创建、定向消息或单任务控制接口。idle 阶段到达的后台任务事件也不再被忽略。
+- **Agent Inspector**：`/agents` 现在从官方 `session/subagents`、V4 状态与生命周期
+  事件归并父 Agent、Subagent 和 Background 工作，支持分页、列表/详情、刷新、
+  活跃回合访问与稳定选择；界面始终明确标注只读及输入目标仍为父 Agent。
+- **后台任务安全取消**：只有内核明确返回 `cancellable=true` 且带真实 `taskId` 的
+  Background 记录才开放 `x` 取消，其他记录继续保持只读。
+- **GLM-5.3-Flash**：把桌面端配置中的匹配模型元数据注册到当前 CLI provider，
+  支持选择内核尚未在独立 CLI 目录列出的 `GLM-5.3-Flash`；认证和 endpoint 仍由
+  ZCode CLI 管理，TUI 不记录或回写凭据。
+- **上下文与帮助状态**：composer/footer 常驻父会话 context 与 token 用量；帮助页
+  支持滚动，并扩大帮助和模型浮层以容纳完整内容。
+
+### 优化
+
+- **TUI 模块边界**：将 Agent 状态、协议、应用状态、UI 与 transcript 拆分到独立
+  模块，保持原有交互的同时降低后续协议和界面改动的耦合。
+- **工具输出清晰度**：内部 Read/Search/Bash/Edit/MCP 调用只展示文件、查询、
+  耗时和状态等有意义摘要；失败保留有界诊断尾部，显式用户输出仍完整显示。
+- **文档与预览**：更新 README 首页截图、Agent Inspector 说明、模型行为及架构文档，
+  并新增子会话 transcript fixture 与 Agent PTY 冒烟覆盖。
+
+### 修复
+
+- 中断当前回合后保留 session，不再意外丢失可继续使用的会话上下文。
+- 修复 Agent Inspector 在活跃回合中无法打开，以及父上下文在紧凑 footer 中缺失。
+- 修复启动横幅、模型选择和终端底部保留行在不同高度下被挤压或覆盖的问题。
+
+### 贡献
+
+- 本版本后续的 Agent Inspector 模块化与状态同步、后台任务取消、
+  GLM-5.3-Flash、上下文状态、帮助页和启动布局改进由
+  [@auenger](https://github.com/auenger) 以项目协作者身份持续完善，感谢支持。
+
+### 验证
+
+- Rust 测试 140/140、Agent PTY 冒烟 11/11、格式检查、Clippy 零告警及原生
+  release 构建通过；tag 发布继续由 GitHub Actions 构建 Linux musl、Windows
+  x86_64、macOS Intel 与 Apple Silicon 四个平台产物，并生成 SHA256SUMS。
 
 ## [0.6.0] - 2026-08-26
 
