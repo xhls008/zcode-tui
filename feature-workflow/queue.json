@@ -1,11 +1,10 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-27T01:28:37Z"
+    "last_updated": "2026-08-27T01:29:13Z"
   },
   "parents": [],
-  "active": [],
-  "pending": [
+  "active": [
     {
       "id": "feat-glm-53-flash",
       "name": "GLM-5.3-Flash runtime support",
@@ -17,10 +16,14 @@
         "external_dependency"
       ],
       "dependencies": [],
-      "status": "pending",
-      "created_at": "2026-08-27T01:28:37Z"
+      "status": "active",
+      "created_at": "2026-08-27T01:28:37Z",
+      "branch": "feature/feat-glm-53-flash",
+      "worktree": "../zcode-tui-feat-glm-53-flash",
+      "started_at": "2026-08-27T01:29:13Z"
     }
   ],
+  "pending": [],
   "blocked": [],
   "completed": [
     {
