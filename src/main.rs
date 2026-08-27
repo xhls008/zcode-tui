@@ -112,7 +112,7 @@ const MINI_Z_ICON: [&str; 8] = [
     "╰──────────────╯",
 ];
 /// Bottom live viewport; completed transcript lives above in scrollback.
-const INLINE_VIEWPORT_ROWS: u16 = 10;
+const INLINE_VIEWPORT_ROWS: u16 = 24;
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -4862,7 +4862,11 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
         render_suggestions(frame, vertical[2], state);
     }
     if state.show_help {
-        render_help_modal(frame, centered_rect(82, 86, root), state);
+        render_help_modal(
+            frame,
+            centered_rect_height(86, root.height.saturating_sub(2), root),
+            state,
+        );
     }
     if state.show_palette {
         render_command_palette(frame, centered_rect(82, 68, root), state);
@@ -4874,7 +4878,9 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
         render_agent_inspector(frame, centered_rect(92, 90, root), state);
     }
     if state.model_picker.is_some() {
-        render_model_picker(frame, centered_rect(64, 46, root), state);
+        let model_rows = u16::try_from(state.controls.models.len()).unwrap_or(u16::MAX);
+        let model_height = model_rows.saturating_add(2).clamp(8, 22);
+        render_model_picker(frame, centered_rect_height(72, model_height, root), state);
     }
     if state.rewind.is_some() {
         render_rewind(frame, centered_rect(78, 58, root), state);
@@ -6154,6 +6160,20 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+fn centered_rect_height(percent_x: u16, desired_height: u16, area: Rect) -> Rect {
+    let height = desired_height.clamp(1, area.height.max(1));
+    let top = area.height.saturating_sub(height) / 2;
+    let vertical = Rect::new(area.x, area.y.saturating_add(top), area.width, height);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical)[1]
+}
+
 fn display_mode(config: &AppConfig) -> &str {
     config.mode.as_deref().unwrap_or("default")
 }
@@ -6238,6 +6258,21 @@ mod tests {
         assert_eq!(state.input, "unchanged");
         state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!state.show_help);
+    }
+
+    #[test]
+    fn help_and_model_popups_use_the_expanded_inline_viewport() {
+        assert_eq!(INLINE_VIEWPORT_ROWS, 24);
+        let root = Rect::new(0, 0, 100, INLINE_VIEWPORT_ROWS);
+
+        let help = centered_rect_height(86, root.height.saturating_sub(2), root);
+        assert_eq!(help.height, 22);
+        assert_eq!(help.width, 86);
+
+        // Nine models need nine body rows plus the two border rows.
+        let model = centered_rect_height(72, 9_u16.saturating_add(2).clamp(8, 22), root);
+        assert_eq!(model.height, 11);
+        assert_eq!(model.width, 72);
     }
 
     #[test]

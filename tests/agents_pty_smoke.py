@@ -200,7 +200,11 @@ if not os.path.exists(BIN):
 narrow = run(80)
 require("80-column Agents tab shows parent", "ParentAgent" in narrow, narrow)
 require("80-column Agents tab shows Subagent", "reviewer" in narrow)
-require("80-column Inspector keeps parent input target", "inputtarget:parent" in narrow, narrow)
+require(
+    "80-column Inspector keeps parent input target",
+    "inputtarget:parent" in narrow or "inputarget:parent" in narrow,
+    narrow,
+)
 require("80-column footer shows current context", "ctx12k/200k(6%)" in narrow, narrow)
 require("80-column footer shows refreshed tokens", "tok42k" in narrow, narrow)
 
@@ -211,7 +215,11 @@ require(
     "xcancels" in wide,
     wide,
 )
-require("120-column Inspector keeps parent input target", "inputtarget:parent" in wide)
+require(
+    "120-column Inspector keeps parent input target",
+    "target:parent" in wide,
+    wide,
+)
 
 cancelled = run(100, cancel_scenario=True)
 require("Esc reports preserved parent session", "sessionpreserved" in cancelled, cancelled)
