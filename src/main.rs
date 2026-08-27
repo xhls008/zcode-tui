@@ -115,6 +115,20 @@ const MINI_Z_ICON: [&str; 8] = [
 ];
 /// Bottom live viewport; completed transcript lives above in scrollback.
 const INLINE_VIEWPORT_ROWS: u16 = 24;
+/// The configured startup banner renders eight content rows plus two borders.
+/// Keeping this many terminal rows outside the inline viewport prevents the
+/// initial `insert_before` from scrolling the top of the banner off-screen.
+const STARTUP_BANNER_ROWS: u16 = 10;
+/// Preserve the pre-overlay-expansion live area on compact terminals.
+const MIN_INLINE_VIEWPORT_ROWS: u16 = 10;
+
+fn inline_viewport_rows(terminal_rows: u16) -> u16 {
+    let available = terminal_rows.saturating_sub(1).max(1);
+    let preferred = terminal_rows
+        .saturating_sub(STARTUP_BANNER_ROWS)
+        .max(MIN_INLINE_VIEWPORT_ROWS);
+    available.min(preferred).min(INLINE_VIEWPORT_ROWS)
+}
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -4830,9 +4844,7 @@ impl TerminalGuard {
             Ok(Terminal::with_options(
                 backend,
                 TerminalOptions {
-                    viewport: Viewport::Inline(
-                        rows.saturating_sub(1).clamp(1, INLINE_VIEWPORT_ROWS),
-                    ),
+                    viewport: Viewport::Inline(inline_viewport_rows(rows)),
                 },
             )?)
         })();
@@ -6368,6 +6380,20 @@ mod tests {
         let model = centered_rect_height(72, 9_u16.saturating_add(2).clamp(8, 22), root);
         assert_eq!(model.height, 11);
         assert_eq!(model.width, 72);
+    }
+
+    #[test]
+    fn inline_viewport_reserves_the_startup_banner_without_shrinking_large_terminals() {
+        // A standard 24-row terminal keeps all ten banner rows visible and
+        // still has a 14-row live area (far taller than the old viewport).
+        assert_eq!(inline_viewport_rows(24), 14);
+        assert_eq!(inline_viewport_rows(30), 20);
+        // Larger terminals retain the expanded Help/Model capacity.
+        assert_eq!(inline_viewport_rows(40), 24);
+        // Compact terminals never become less usable than the old 10-row UI,
+        // except where the physical terminal itself has fewer rows.
+        assert_eq!(inline_viewport_rows(16), 10);
+        assert_eq!(inline_viewport_rows(8), 7);
     }
 
     #[test]
