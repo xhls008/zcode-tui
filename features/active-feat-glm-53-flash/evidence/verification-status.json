@@ -1,0 +1,32 @@
+{
+  "schema": "feature-verification/v1",
+  "feature_id": "feat-glm-53-flash",
+  "status": "passed",
+  "verified_at": "2026-08-27T01:47:34Z",
+  "tasks": {
+    "total": 6,
+    "completed": 6,
+    "incomplete": 0
+  },
+  "quality": {
+    "status": "passed",
+    "passed": 4,
+    "failed": 0
+  },
+  "tests": {
+    "status": "passed",
+    "passed": 138,
+    "failed": 0,
+    "skipped": 0
+  },
+  "scenarios": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0
+  },
+  "blocking_failures": [],
+  "warnings": [
+    "The broad interactive PTY suite was deferred to user-run manual regression by explicit request; the focused Agent/usage/session-continuity PTY suite passed 11/11."
+  ],
+  "report": "features/active-feat-glm-53-flash/evidence/verification-report.md"
+}

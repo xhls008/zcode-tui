@@ -1706,8 +1706,10 @@ fn session_control_params_match_pinned_schemas() {
 #[test]
 fn session_lifecycle_params_and_list_parsing() {
     use zcode_tui::{
-        app_resume_params, app_session_read_params, app_usage_params, build_runtime_model,
-        parse_session_list, usage_stats_params,
+        app_create_params, app_resume_params, app_session_read_params,
+        app_update_provider_registry_params, app_usage_params, build_runtime_model,
+        build_runtime_model_with_desktop, parse_session_list, runtime_model_controls,
+        usage_stats_params, with_runtime_model,
     };
     assert_eq!(
         app_resume_params("sess_1", None),
@@ -1735,6 +1737,67 @@ fn session_lifecycle_params_and_list_parsing() {
         "https://open.bigmodel.cn/api/anthropic"
     );
     assert_eq!(provider["models"].as_array().unwrap().len(), 2);
+    let desktop = r#"{
+        "provider": {"builtin:bigmodel-coding-plan": {
+            "name": "BigModel - Coding Plan", "kind": "anthropic", "enabled": true,
+            "models": {
+                "GLM-5.3-Flash": {
+                    "reasoning": {"enabled": true, "variants": ["low", "max", "high"], "defaultVariant": "max"},
+                    "limit": {"context": 1000000, "output": 128000},
+                    "modalities": {"input": ["text"], "output": ["text"]}
+                },
+                "GLM-5.1": {"limit": {"context": 200000, "output": 64000}}
+            }
+        }}
+    }"#;
+    let enriched = build_runtime_model_with_desktop(config, Some(desktop), 1236).unwrap();
+    let models = enriched["provider"]["models"].as_array().unwrap();
+    assert_eq!(
+        models.len(),
+        3,
+        "Desktop merge must preserve CLI-only models"
+    );
+    let flash = models
+        .iter()
+        .find(|model| model["modelId"] == "glm-5.3-flash")
+        .expect("Flash model merged into the CLI provider");
+    assert_eq!(flash["label"], "GLM-5.3-Flash");
+    assert_eq!(flash["contextWindow"], 1_000_000);
+    assert_eq!(flash["maxOutputTokens"], 128_000);
+    assert_eq!(flash["reasoning"]["enabled"], true);
+    assert_eq!(flash["reasoning"]["defaultLevel"], "max");
+    assert_eq!(flash["reasoning"]["levels"].as_array().unwrap().len(), 3);
+    let (provider_id, controls) = runtime_model_controls(&enriched).unwrap();
+    assert_eq!(provider_id, "bigmodel");
+    let flash_choice = controls
+        .models
+        .iter()
+        .find(|choice| choice.reference["modelId"] == "glm-5.3-flash")
+        .unwrap();
+    assert_eq!(flash_choice.label, "GLM-5.3-Flash");
+    assert_eq!(flash_choice.context_window, Some(1_000_000));
+    assert_eq!(flash_choice.reference["providerId"], "bigmodel");
+    let create = with_runtime_model(app_create_params("/proj"), Some(&enriched));
+    assert_eq!(create["runtimeModel"]["provider"]["providerId"], "bigmodel");
+    assert!(create["runtimeModel"]["provider"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|model| model["modelId"] == "glm-5.3-flash"));
+    let registry = app_update_provider_registry_params("/proj", &enriched).unwrap();
+    assert_eq!(registry["workspace"]["workspaceKey"], "/proj");
+    assert_eq!(
+        registry["registry"]["providers"].as_array().unwrap().len(),
+        1
+    );
+    assert!(registry["registry"]["providers"][0]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|model| model["modelId"] == "glm-5.3-flash"));
+    assert_eq!(registry["includeWorkspaceState"], true);
+    let malformed = build_runtime_model_with_desktop(config, Some("not json"), 1237).unwrap();
+    assert_eq!(malformed["provider"]["models"].as_array().unwrap().len(), 2);
     // Some ZCode configs store the selected model directly at the root.
     let mut root_model_config: serde_json::Value = serde_json::from_str(config).unwrap();
     root_model_config["model"] = serde_json::json!("bigmodel/glm-4.7");

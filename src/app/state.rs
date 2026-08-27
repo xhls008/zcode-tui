@@ -18,6 +18,7 @@ pub(crate) enum V4Mode {
 /// Borrow-free tag for a connection handshake phase.
 #[derive(Clone, Copy)]
 pub(crate) enum ConnectStage {
+    ProviderRegistry,
     Create,
     Resume,
     Subscribe,

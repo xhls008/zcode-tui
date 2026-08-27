@@ -614,6 +614,19 @@ pub fn app_resume_params(
     }
 }
 
+/// Attach the provider/model snapshot used by the standalone app-server.
+/// This revives the selected model on create/resume; adding new selectable
+/// entries still requires [`app_update_provider_registry_params`] first.
+pub fn with_runtime_model(
+    mut params: serde_json::Value,
+    runtime_model: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    if let (Some(runtime), Some(map)) = (runtime_model, params.as_object_mut()) {
+        map.insert("runtimeModel".to_string(), runtime.clone());
+    }
+    params
+}
+
 /// Attach an `mcpServers` array to `session/create`/`session/resume` params
 /// (both schemas carry the same optional field). `None` leaves the params
 /// untouched so kernels predating the field never see an unknown key.
@@ -706,16 +719,28 @@ pub fn mcp_servers_param(project: &McpConfig, user: &McpConfig) -> Option<serde_
     }
 }
 
-/// Build the `runtimeModel` object the kernel needs to revive a resumed
-/// session, from the kernel's own `~/.zcode/cli/config.json` (the same file
-/// session/create seeds a fresh session from). Shape pinned live 2026-07-07
+/// Build the `runtimeModel` object the kernel needs to materialize a created or
+/// resumed session, from its own `~/.zcode/cli/config.json`. Shape pinned live
+/// 2026-07-07
 /// against the kernel's strict zod schema (`p_` in the bundle):
 /// `{revision, generatedAt, model:{providerId,modelId},
 ///   provider:{providerId, kind, label?, source, baseURL?,
 ///             apiKey:{source:"inline", value}?, models:[{modelId,label?}…]}}`.
 /// Returns None when the config is missing or not in the known layout — the
-/// caller resumes without it and relies on the create-fallback path.
+/// caller falls back to the app-server's own CLI catalog.
 pub fn build_runtime_model(config_json: &str, generated_at: u64) -> Option<serde_json::Value> {
+    build_runtime_model_with_desktop(config_json, None, generated_at)
+}
+
+/// Build a runtime model from the CLI's authenticated provider and optionally
+/// enrich its model catalog with the Desktop app's dynamic registry. Desktop
+/// metadata never replaces CLI credentials or endpoints and is never written
+/// back to either config file.
+pub fn build_runtime_model_with_desktop(
+    config_json: &str,
+    desktop_config_json: Option<&str>,
+    generated_at: u64,
+) -> Option<serde_json::Value> {
     let config: serde_json::Value = serde_json::from_str(config_json).ok()?;
     let main = config
         .pointer("/model/main")
@@ -724,17 +749,90 @@ pub fn build_runtime_model(config_json: &str, generated_at: u64) -> Option<serde
     let (provider_id, model_id) = main.split_once('/')?;
     let provider = config.pointer(&format!("/provider/{provider_id}"))?;
     let kind = provider.get("kind")?.as_str()?;
-    let models: Vec<serde_json::Value> = provider
+    let mut models: BTreeMap<String, serde_json::Value> = provider
         .get("models")?
         .as_object()?
         .iter()
         .map(|(id, m)| {
-            serde_json::json!({
-                "modelId": id,
-                "label": m.get("name").and_then(|v| v.as_str()).unwrap_or(id),
-            })
+            (
+                id.to_ascii_lowercase(),
+                serde_json::json!({
+                    "modelId": id,
+                    "label": m.get("name").and_then(|v| v.as_str()).unwrap_or(id),
+                }),
+            )
         })
         .collect();
+
+    if let Some(desktop_provider) = desktop_config_json
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .as_ref()
+        .and_then(|desktop| matching_desktop_provider(desktop, provider_id))
+    {
+        if let Some(desktop_models) = desktop_provider.get("models").and_then(|v| v.as_object()) {
+            for (display_id, metadata) in desktop_models {
+                let runtime_id = display_id.to_ascii_lowercase();
+                let mut model = models.remove(&runtime_id).unwrap_or_else(|| {
+                    serde_json::json!({
+                        "modelId": runtime_id,
+                        "label": metadata
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(display_id),
+                    })
+                });
+                model["modelId"] = serde_json::json!(runtime_id);
+                if let Some(context) = metadata.pointer("/limit/context").and_then(|v| v.as_u64()) {
+                    model["contextWindow"] = serde_json::json!(context);
+                }
+                if let Some(output) = metadata.pointer("/limit/output").and_then(|v| v.as_u64()) {
+                    model["maxOutputTokens"] = serde_json::json!(output);
+                }
+                if let Some(enabled) = metadata
+                    .pointer("/reasoning/enabled")
+                    .and_then(|v| v.as_bool())
+                {
+                    let variants = metadata
+                        .pointer("/reasoning/variants")
+                        .and_then(|v| v.as_array())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str())
+                                .map(|value| serde_json::json!({"value": value, "label": value}))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let mut reasoning = serde_json::json!({
+                        "enabled": enabled,
+                        "levels": variants,
+                    });
+                    if let Some(default) = metadata
+                        .pointer("/reasoning/defaultVariant")
+                        .and_then(|v| v.as_str())
+                    {
+                        reasoning["defaultLevel"] = serde_json::json!(default);
+                    }
+                    model["reasoning"] = reasoning;
+                }
+                let input_modalities = metadata
+                    .pointer("/modalities/input")
+                    .and_then(|v| v.as_array());
+                if input_modalities
+                    .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("image")))
+                {
+                    model["supportsImages"] = serde_json::json!(true);
+                }
+                if input_modalities
+                    .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("pdf")))
+                {
+                    model["supportsPdf"] = serde_json::json!(true);
+                }
+                models.insert(runtime_id, model);
+            }
+        }
+    }
+    let models: Vec<serde_json::Value> = models.into_values().collect();
     if models.is_empty() {
         return None;
     }
@@ -762,6 +860,75 @@ pub fn build_runtime_model(config_json: &str, generated_at: u64) -> Option<serde
         "model": { "providerId": provider_id, "modelId": model_id },
         "provider": provider_obj,
     }))
+}
+
+fn matching_desktop_provider<'a>(
+    desktop: &'a serde_json::Value,
+    provider_id: &str,
+) -> Option<&'a serde_json::Value> {
+    let providers = desktop.get("provider")?.as_object()?;
+    let coding_plan = format!("builtin:{provider_id}-coding-plan");
+    let builtin = format!("builtin:{provider_id}");
+    let matched = [coding_plan.as_str(), builtin.as_str(), provider_id]
+        .into_iter()
+        .filter_map(|id| providers.get(id))
+        .find(|provider| {
+            provider.get("enabled").and_then(|v| v.as_bool()) != Some(false)
+                && provider
+                    .get("models")
+                    .is_some_and(|models| models.is_object())
+        });
+    matched
+}
+
+/// Convert a redacted runtime snapshot into model-picker controls. The
+/// returned controls contain model metadata only, never provider credentials.
+pub fn runtime_model_controls(runtime: &serde_json::Value) -> Option<(String, SessionControls)> {
+    let provider = runtime.get("provider")?;
+    let provider_id = provider.get("providerId")?.as_str()?.to_string();
+    let provider_label = provider
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&provider_id)
+        .to_string();
+    let models = provider
+        .get("models")?
+        .as_array()?
+        .iter()
+        .filter_map(|model| {
+            let model_id = model.get("modelId")?.as_str()?;
+            Some(ModelChoice {
+                label: model
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(model_id)
+                    .to_string(),
+                provider: provider_label.clone(),
+                context_window: model
+                    .get("contextWindow")
+                    .and_then(serde_json::Value::as_u64),
+                reference: serde_json::json!({
+                    "providerId": provider_id,
+                    "modelId": model_id,
+                }),
+            })
+        })
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return None;
+    }
+    Some((
+        provider_id.clone(),
+        SessionControls {
+            models,
+            model_provider: Some(provider_id),
+            model_current: runtime
+                .pointer("/model/modelId")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            ..SessionControls::default()
+        },
+    ))
 }
 
 /// `session/usage` — per-session token breakdown.
@@ -1652,6 +1819,29 @@ pub fn app_workspace_read_params(workspace_path: &str) -> serde_json::Value {
             "workspacePath": workspace_path,
         }
     })
+}
+
+/// Register the runtime provider with a standalone app-server, mirroring the
+/// Desktop client's dynamic provider-registry handshake. `runtimeModel` alone
+/// revives the active model but does not add new entries to
+/// `settings.model.available`; this call must precede create/resume for those
+/// entries to become selectable.
+pub fn app_update_provider_registry_params(
+    workspace_path: &str,
+    runtime: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    Some(serde_json::json!({
+        "workspace": {
+            "workspaceKey": workspace_path,
+            "workspacePath": workspace_path,
+        },
+        "registry": {
+            "revision": runtime.get("revision")?,
+            "generatedAt": runtime.get("generatedAt")?,
+            "providers": [runtime.get("provider")?.clone()],
+        },
+        "includeWorkspaceState": true,
+    }))
 }
 
 /// Extract the active provider and its models from `workspace/readState`.

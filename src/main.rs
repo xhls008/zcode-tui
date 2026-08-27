@@ -30,30 +30,32 @@ use zcode_tui::{
     app_session_controls, app_session_id_from_result, app_session_read_params, app_set_mode_params,
     app_set_model_params, app_set_thought_params, app_state_context_values, app_state_controls,
     app_state_is_turn_end, app_state_total_tokens, app_state_turn_error, app_steer_params,
-    app_stop_params, app_subscribe_params, app_usage_params, app_workspace_model_controls,
-    app_workspace_read_params, build_runtime_model, build_send_attachments, checkpoint_short_id,
-    classify_input, command_palette_rows, context_watermark_warn, conversation_target, db_baseline,
-    db_schema_supported, detect_auth_status, diff_line_role, discover_zcode_app_dir,
-    encode_interaction_reply, encode_runtime_preferences_reply, env_is_headless,
-    extract_file_mentions, file_suggestions, format_context_watermark, git_diff_command,
-    handle_local_command, help_text, history_search, is_newer_version, kernel_config_path_from,
-    kernel_db_path_from, latest_assistant_text, latest_reasoning, latest_session_for_dir,
-    leader_action_for_key, list_recent_sessions, live_tool_chips, load_mcp_config, load_ui_config,
-    login_command, markdown_lines, mcp_config_path, mcp_servers_param, open_kernel_db_ro,
-    osc52_copy_sequence, parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
+    app_stop_params, app_subscribe_params, app_update_provider_registry_params, app_usage_params,
+    app_workspace_model_controls, app_workspace_read_params, build_runtime_model_with_desktop,
+    build_send_attachments, checkpoint_short_id, classify_input, command_palette_rows,
+    context_watermark_warn, conversation_target, db_baseline, db_schema_supported,
+    detect_auth_status, diff_line_role, discover_zcode_app_dir, encode_interaction_reply,
+    encode_runtime_preferences_reply, env_is_headless, extract_file_mentions, file_suggestions,
+    format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
+    is_newer_version, kernel_config_path_from, kernel_db_path_from, latest_assistant_text,
+    latest_reasoning, latest_session_for_dir, leader_action_for_key, list_recent_sessions,
+    live_tool_chips, load_mcp_config, load_ui_config, login_command, markdown_lines,
+    mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence,
+    parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
     parse_kernel_slash_commands, parse_prompt_summary, parse_resume_messages, parse_rewind_preview,
     parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
     parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age,
-    resolve_update_download_url, rewind_failure, run_command, select_update_feed_url, shorten_home,
-    skyline_mode, slash_suggestions_merged, spawn_streaming_command, tool_result_summary,
-    usage_stats_params, user_mcp_config_path, v4_command_params, v4_conversation_subscribe_params,
-    v4_file_rewind_preview_params, v4_rewind_target, with_mcp_servers, with_tool_policy,
-    wrap_display, zcode_app_version_from_path, AppConfig, AppServerConn, AppServerEvent,
-    AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus, CheckpointEntry, DbBaseline,
-    DebugLog, DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction,
-    LiveToolChip, MdLineKind, ModelChoice, RewindPreview, RewindTarget, SessionControls,
-    SessionRow, SkylineMode, SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem,
-    ToolChipStatus, TurnDelta, UpdateFeed, V4CommandBase, V4ConversationState,
+    resolve_update_download_url, rewind_failure, run_command, runtime_model_controls,
+    select_update_feed_url, shorten_home, skyline_mode, slash_suggestions_merged,
+    spawn_streaming_command, tool_result_summary, usage_stats_params, user_mcp_config_path,
+    v4_command_params, v4_conversation_subscribe_params, v4_file_rewind_preview_params,
+    v4_rewind_target, with_mcp_servers, with_runtime_model, with_tool_policy, wrap_display,
+    zcode_app_version_from_path, AppConfig, AppServerConn, AppServerEvent, AppServerMessage,
+    AppServerTurn, AppServerUnavailable, AuthStatus, CheckpointEntry, DbBaseline, DebugLog,
+    DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction, LiveToolChip,
+    MdLineKind, ModelChoice, RewindPreview, RewindTarget, SessionControls, SessionRow, SkylineMode,
+    SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem, ToolChipStatus, TurnDelta,
+    UpdateFeed, V4CommandBase, V4ConversationState,
 };
 
 mod agents;
@@ -396,7 +398,19 @@ fn cache_model_catalog(report: &ModelCatalogReport) -> Result<()> {
 }
 
 fn refresh_model_catalog(zcode_bin: &str, workspace: &str) -> Option<ModelCatalogReport> {
-    let live = AppServerConn::spawn(zcode_bin).ok().and_then(|mut conn| {
+    let runtime = load_runtime_model();
+    let mut live = AppServerConn::spawn(zcode_bin).ok().and_then(|mut conn| {
+        if let Some(params) = runtime
+            .as_ref()
+            .and_then(|runtime| app_update_provider_registry_params(workspace, runtime))
+        {
+            conn.request_blocking(
+                "workspace/updateProviderRegistry",
+                params,
+                Duration::from_secs(5),
+            )
+            .ok()?;
+        }
         let result = conn
             .request_blocking(
                 "workspace/readState",
@@ -410,6 +424,30 @@ fn refresh_model_catalog(zcode_bin: &str, workspace: &str) -> Option<ModelCatalo
             controls,
         })
     });
+    let enriched = runtime
+        .and_then(|runtime| runtime_model_controls(&runtime))
+        .map(|(provider_id, controls)| ModelCatalogReport {
+            provider_id,
+            controls,
+        });
+    match (&mut live, enriched) {
+        (Some(live), Some(enriched)) if live.provider_id == enriched.provider_id => {
+            for model in enriched.controls.models {
+                if let Some(index) = live
+                    .controls
+                    .models
+                    .iter()
+                    .position(|existing| existing.reference == model.reference)
+                {
+                    live.controls.models[index] = model;
+                } else {
+                    live.controls.models.push(model);
+                }
+            }
+        }
+        (None, Some(enriched)) => live = Some(enriched),
+        _ => {}
+    }
     if let Some(report) = live {
         let _ = cache_model_catalog(&report);
         Some(report)
@@ -586,6 +624,9 @@ struct AppConnect {
 
 /// Which handshake response the connect state is waiting on (matched by id).
 enum ConnectPhase {
+    /// Desktop-equivalent dynamic provider registration. A failure is
+    /// non-fatal for older kernels; the handshake continues with CLI models.
+    ProviderRegistry(u64),
     Create(u64),
     /// `session/resume` of a picked/`--resume` session; an error falls back
     /// to Create (fresh session) instead of downgrading.
@@ -1671,31 +1712,18 @@ impl UiState {
             // that session instead of silently opening a fresh one.
             None => {
                 let workspace = self.app_workspace();
-                let resume = self.config.resume.clone();
-                // Resume restores the conversation but NOT the model runtime:
-                // without this, the first send fails with
-                // ZCODE_RUNTIME_MODEL_UNAVAILABLE (pinned live 2026-07-07).
-                // Built from the kernel's own config.json; None falls back to
-                // a bare resume + the create-fallback path.
-                let runtime = resume.as_ref().and_then(|_| load_runtime_model());
-                // Project + user MCP config rides along on create AND resume
-                // (the kernel never reads project .mcp.json on its own).
-                let mcp_servers = self.mcp_servers_for_session();
-                let resume_params = resume.as_ref().map(|session_id| {
-                    self.session_handshake_params(
-                        app_resume_params(session_id, runtime.as_ref()),
-                        mcp_servers.clone(),
-                    )
-                });
-                let create_params =
-                    self.session_handshake_params(app_create_params(&workspace), mcp_servers);
-                let conn = self.app_conn.as_mut().expect("app_conn set above");
-                let phase = match resume {
-                    Some(_) => ConnectPhase::Resume(conn.send(
-                        "session/resume",
-                        resume_params.expect("resume params built for resume branch"),
-                    )?),
-                    None => ConnectPhase::Create(conn.send("session/create", create_params)?),
+                let runtime = load_runtime_model();
+                let phase = match runtime
+                    .as_ref()
+                    .and_then(|runtime| app_update_provider_registry_params(&workspace, runtime))
+                {
+                    Some(params) => {
+                        let conn = self.app_conn.as_mut().expect("app_conn set above");
+                        ConnectPhase::ProviderRegistry(
+                            conn.send("workspace/updateProviderRegistry", params)?,
+                        )
+                    }
+                    None => self.begin_session_open()?,
                 };
                 self.app_connect = Some(AppConnect {
                     phase,
@@ -1766,6 +1794,37 @@ impl UiState {
             &self.config.tool_allowlist,
             &self.config.tool_denylist,
         )
+    }
+
+    /// Send create or resume after provider registration. Both paths carry
+    /// the same enriched runtime snapshot; MCP and tool policy remain layered
+    /// on top exactly as before.
+    fn begin_session_open(&mut self) -> std::result::Result<ConnectPhase, AppServerUnavailable> {
+        let workspace = self.app_workspace();
+        let runtime = load_runtime_model();
+        let mcp_servers = self.mcp_servers_for_session();
+        let params = match self.config.resume.as_deref() {
+            Some(session_id) => self.session_handshake_params(
+                app_resume_params(session_id, runtime.as_ref()),
+                mcp_servers,
+            ),
+            None => self.session_handshake_params(
+                with_runtime_model(app_create_params(&workspace), runtime.as_ref()),
+                mcp_servers,
+            ),
+        };
+        let conn = self
+            .app_conn
+            .as_mut()
+            .expect("app_conn set before handshake");
+        match self.config.resume.is_some() {
+            true => conn
+                .send("session/resume", params)
+                .map(ConnectPhase::Resume),
+            false => conn
+                .send("session/create", params)
+                .map(ConnectPhase::Create),
+        }
     }
 
     /// Best-effort `session/close` for a live session being discarded
@@ -1860,6 +1919,7 @@ impl UiState {
             // Copy the awaited stage+id out so the match arms can mutate `self`.
             let waiting = match &self.app_connect {
                 Some(connect) => match &connect.phase {
+                    ConnectPhase::ProviderRegistry(want) => (ConnectStage::ProviderRegistry, *want),
                     ConnectPhase::Create(want) => (ConnectStage::Create, *want),
                     ConnectPhase::Resume(want) => (ConnectStage::Resume, *want),
                     ConnectPhase::Subscribe(want) => (ConnectStage::Subscribe, *want),
@@ -1872,6 +1932,23 @@ impl UiState {
                 continue; // stale/unmatched response id
             }
             if let Some(why) = error {
+                if matches!(stage, ConnectStage::ProviderRegistry) {
+                    self.log_debug(&format!(
+                        "provider registry unavailable ({why}); continuing with CLI catalog"
+                    ));
+                    match self.begin_session_open() {
+                        Ok(phase) => {
+                            if let Some(connect) = &mut self.app_connect {
+                                connect.phase = phase;
+                            }
+                            continue;
+                        }
+                        Err(err) => {
+                            self.app_connect_failed(err);
+                            return;
+                        }
+                    }
+                }
                 // V4 is an optional control-plane capability. Old kernels
                 // return Method not found; other V4 failures are reported but
                 // must not tear down the healthy legacy text stream.
@@ -1897,8 +1974,11 @@ impl UiState {
                     self.log_debug("handshake: resume failed, falling back to create");
                     let workspace = self.app_workspace();
                     let mcp_servers = self.mcp_servers_for_session();
-                    let create_params =
-                        self.session_handshake_params(app_create_params(&workspace), mcp_servers);
+                    let runtime = load_runtime_model();
+                    let create_params = self.session_handshake_params(
+                        with_runtime_model(app_create_params(&workspace), runtime.as_ref()),
+                        mcp_servers,
+                    );
                     let conn = self.app_conn.as_mut().expect("alive checked above");
                     match conn.send("session/create", create_params) {
                         Ok(create_id) => {
@@ -1917,6 +1997,18 @@ impl UiState {
                 return;
             }
             match stage {
+                ConnectStage::ProviderRegistry => match self.begin_session_open() {
+                    Ok(phase) => {
+                        if let Some(connect) = &mut self.app_connect {
+                            connect.phase = phase;
+                        }
+                        continue;
+                    }
+                    Err(err) => {
+                        self.app_connect_failed(err);
+                        return;
+                    }
+                },
                 ConnectStage::Create | ConnectStage::Resume => {
                     let result = result.unwrap_or(serde_json::Value::Null);
                     let Some(session_id) = app_session_id_from_result(&result) else {
@@ -5042,17 +5134,20 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
     lines
 }
 
-/// The `runtimeModel` to attach to `session/resume`, built from the kernel's
-/// own `~/.zcode/cli/config.json` (the file session/create seeds fresh
-/// sessions from). None → resume bare; the create-fallback still saves us.
+/// The `runtimeModel` to attach to `session/create` and `session/resume`.
+/// Authentication and endpoints come from the CLI config; optional Desktop
+/// registry metadata enriches the selectable models without mutating either
+/// file. Missing or malformed Desktop state falls back to CLI-only behavior.
 fn load_runtime_model() -> Option<serde_json::Value> {
     let home = env::var("HOME").ok()?;
-    let config = fs::read_to_string(kernel_config_path_from(std::path::Path::new(&home))).ok()?;
+    let home = std::path::Path::new(&home);
+    let config = fs::read_to_string(kernel_config_path_from(home)).ok()?;
+    let desktop = fs::read_to_string(home.join(".zcode/v2/config.json")).ok();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_millis() as u64;
-    build_runtime_model(&config, now)
+    build_runtime_model_with_desktop(&config, desktop.as_deref(), now)
 }
 
 /// `session/usage` result → readable summary (shape pinned live 2026-07-07).
