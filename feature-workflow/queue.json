@@ -1,11 +1,23 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-28T14:30:43Z"
+    "last_updated": "2026-08-28T15:24:06Z"
   },
   "parents": [],
   "active": [],
-  "pending": [],
+  "pending": [
+    {
+      "id": "feat-tsinghua-pku-themes",
+      "name": "Tsinghua purple and PKU red themes",
+      "description": "Add selectable and persistent tsinghua and pku TUI themes, extend theme tests and documentation, and release v0.6.3.",
+      "priority": 1,
+      "workflow_mode": "lite",
+      "risk_signals": [],
+      "dependencies": [],
+      "status": "pending",
+      "created_at": "2026-08-28T15:24:06Z"
+    }
+  ],
   "blocked": [],
   "completed": [
     {
