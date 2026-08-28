@@ -8,10 +8,11 @@ use zcode_tui::{
     format_context_watermark, handle_local_command, history_search, latest_assistant_text,
     latest_reasoning, latest_session_for_dir, leader_action_for_key, list_recent_sessions,
     live_tool_chips, load_mcp_config, login_command, logout_command, mask_secret,
-    open_kernel_db_ro, parse_cli_args, parse_hex_color, parse_part_data, parse_prompt_summary,
-    parse_ui_config, recent_input_history, relative_age, save_mcp_config, slash_suggestions,
-    strip_ansi, tool_result_summary, user_mcp_config_path_from, AppConfig, AuthStatus, InputAction,
-    LeaderAction, McpServer, PartEvent, ToolChipStatus, KNOWN_DB_MIGRATIONS,
+    open_kernel_db_ro, pad_display, parse_cli_args, parse_hex_color, parse_part_data,
+    parse_prompt_summary, parse_ui_config, path_tail, recent_input_history, relative_age,
+    save_mcp_config, save_ui_theme_to, single_line, slash_suggestions, strip_ansi,
+    tool_result_summary, user_home_dir_from, user_mcp_config_path_from, AppConfig, AuthStatus,
+    InputAction, LeaderAction, McpServer, PartEvent, ToolChipStatus, KNOWN_DB_MIGRATIONS,
 };
 
 #[test]
@@ -316,6 +317,7 @@ fn command_palette_exposes_common_commands() {
     assert!(rows.iter().any(|row| row.contains("/skills list")));
     assert!(rows.iter().any(|row| row.contains("/login")));
     assert!(rows.iter().any(|row| row.contains("/usage")));
+    assert!(rows.iter().any(|row| row.contains("/theme")));
     assert!(rows.iter().any(|row| row.contains("/agents")));
     assert!(rows.iter().any(|row| row.contains("/update")));
     assert!(rows.iter().any(|row| row.contains("! <cmd>")));
@@ -936,6 +938,10 @@ fn classify_session_commands_as_local() {
         classify_input("/new").unwrap(),
         InputAction::Local(vec!["new".into()])
     );
+    assert_eq!(
+        classify_input("/theme light").unwrap(),
+        InputAction::Local(vec!["theme".into(), "light".into()])
+    );
 }
 
 #[test]
@@ -1381,6 +1387,8 @@ fn help_no_longer_advertises_output_folding() {
 fn ui_config_parses_colors_and_notify_ignoring_junk() {
     let config = parse_ui_config(
         "# comment\n\
+         theme = light\n\
+         theme = ultraviolet\n\
          accent = #ff8800\n\
          accent = 不是颜色\n\
          unknown_key = #112233\n\
@@ -1392,11 +1400,50 @@ fn ui_config_parses_colors_and_notify_ignoring_junk() {
     assert_eq!(config.colors.get("accent"), Some(&(0xff, 0x88, 0x00)));
     assert!(!config.colors.contains_key("unknown_key"));
     assert_eq!(config.notify, Some(false));
+    assert_eq!(config.theme.as_deref(), Some("light"));
 
     assert_eq!(parse_ui_config(""), zcode_tui::UiConfig::default());
     assert_eq!(parse_hex_color("#12345"), None);
     assert_eq!(parse_hex_color("123456"), None);
     assert_eq!(parse_hex_color(" #A1b2C3 "), Some((0xa1, 0xb2, 0xc3)));
+}
+
+#[test]
+fn ui_theme_persistence_preserves_config_and_crlf() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("nested/config");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        "# keep this\r\ntheme = dark\r\naccent = #ff8800\r\ntheme = dark\r\n",
+    )
+    .unwrap();
+
+    save_ui_theme_to(&path, "light").unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert_eq!(saved.matches("theme = light").count(), 1);
+    assert!(saved.contains("# keep this\r\n"));
+    assert!(saved.contains("accent = #ff8800\r\n"));
+    assert!(!saved.replace("\r\n", "").contains('\n'));
+    assert_eq!(parse_ui_config(&saved).theme.as_deref(), Some("light"));
+    assert!(save_ui_theme_to(&path, "ultraviolet").is_err());
+}
+
+#[test]
+fn windows_home_paths_and_session_text_have_safe_fallbacks() {
+    use std::ffi::OsStr;
+
+    assert_eq!(
+        user_home_dir_from(None, Some(OsStr::new(r"C:\Users\Ada"))),
+        Some(std::path::PathBuf::from(r"C:\Users\Ada"))
+    );
+    assert_eq!(path_tail(r"C:\Users\Ada\project"), Some("project"));
+    assert_eq!(single_line("first\r\nsecond"), "first second");
+    assert_eq!(
+        unicode_width::UnicodeWidthStr::width(pad_display("中文标题", 7).as_str()),
+        7
+    );
+    assert_eq!(pad_display("anything", 0), "");
 }
 
 // ---- app-server protocol client -----------------------------------------
@@ -1826,7 +1873,9 @@ fn session_lifecycle_params_and_list_parsing() {
         {"sessionId": "sess_run", "title": "Busy one", "status": "running",
          "updatedAt": 200, "workspace": {"workspacePath": "/elsewhere"}},
         {"sessionId": "sess_untitled", "status": "idle",
-         "updatedAt": 10, "workspace": {"workspacePath": "/elsewhere/deep/dir"}}
+         "updatedAt": 10, "workspace": {"workspacePath": "/elsewhere/deep/dir"}},
+        {"sessionId": "sess_windows", "status": "idle",
+         "updatedAt": 5, "workspace": {"workspacePath": "C:\\Users\\Ada\\project"}}
     ]});
     let rows = parse_session_list(&result, "/proj");
     // Current-cwd session first, then by recency; running sessions marked.
@@ -1836,6 +1885,7 @@ fn session_lifecycle_params_and_list_parsing() {
     assert_eq!(rows[2].id, "sess_old");
     // Missing title falls back to the directory tail.
     assert_eq!(rows[3].title, "dir");
+    assert_eq!(rows[4].title, "project");
     // Absent/foreign shapes -> empty, never panic.
     assert!(parse_session_list(&serde_json::json!({}), "/proj").is_empty());
 }

@@ -1528,7 +1528,7 @@ pub fn parse_session_list(result: &serde_json::Value, cwd: &str) -> Vec<SessionR
                 .unwrap_or_default()
                 .to_string();
             if title.is_empty() {
-                title = directory.rsplit('/').next().unwrap_or_default().to_string();
+                title = crate::path_tail(&directory).unwrap_or_default().to_string();
             }
             if s.get("status").and_then(|v| v.as_str()) == Some("running") {
                 title.push_str("  · running");

@@ -99,7 +99,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "zcode-tui $GITHUB_REF_NAME" \
-            --notes-file dist/RELEASE_NOTES.md \
-            dist/zcode-tui-* dist/SHA256SUMS dist/install.sh
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber \
+              dist/zcode-tui-* dist/SHA256SUMS dist/install.sh
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "zcode-tui $GITHUB_REF_NAME" \
+              --notes-file dist/RELEASE_NOTES.md \
+              dist/zcode-tui-* dist/SHA256SUMS dist/install.sh
+          fi

@@ -1,0 +1,32 @@
+{
+  "schema": "feature-verification/v1",
+  "feature_id": "feat-issue-5-theme-windows",
+  "status": "passed",
+  "verified_at": "2026-08-28T14:27:10Z",
+  "tasks": {
+    "total": 6,
+    "completed": 6,
+    "incomplete": 0
+  },
+  "quality": {
+    "status": "passed",
+    "passed": 3,
+    "failed": 0
+  },
+  "tests": {
+    "status": "passed",
+    "passed": 143,
+    "failed": 0,
+    "skipped": 0
+  },
+  "scenarios": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0
+  },
+  "blocking_failures": [],
+  "warnings": [
+    "Windows compatibility is best-effort: no Windows target/terminal runner is installed locally; the tag-triggered CI matrix performs the Windows MSVC build."
+  ],
+  "report": "features/active-feat-issue-5-theme-windows/evidence/verification-report.md"
+}

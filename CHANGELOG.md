@@ -6,6 +6,31 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-08-28
+
+### 新增
+
+- **`/theme` 主题切换**：新增内置 `dark` / `light` 配色；`/theme` 或
+  `/theme list` 列出主题，`/theme dark|light` 即时切换并持久化到现有 TUI
+  配置文件，自定义颜色 token 与 `NO_COLOR` 优先级保持不变。
+
+### 修复
+
+- **Windows `/sessions` 兼容（best-effort）**：用户目录在缺少 `HOME` 时回退
+  `USERPROFILE`；首次 prompt 前也会用短连接请求官方 `session/list`，失败后按需
+  重试只读内核 DB 探测，避免启动后台探测尚未完成就误报不可用；同时兼容 `\`
+  路径尾部、CRLF/换行标题、CJK 显示宽度与终端尺寸读取失败。该改进已在 Linux
+  上用平台无关测试验证，仍受 ZCode app-server 自身的 Windows 支持范围限制。
+
+### 文档
+
+- README 中英文版新增 `/theme` 用法，并说明 zcode-tui 继续使用官方 ZCode
+  账户与内核，因此继承 ZCode 的 1.5 倍（150%）用量优惠。
+
+### 验证
+
+- Rust 测试 143/143、格式检查、Clippy 零告警及原生 debug build 通过。
+
 ## [0.6.1] - 2026-08-27
 
 ### 新增

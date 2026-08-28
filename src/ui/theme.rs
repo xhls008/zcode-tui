@@ -17,6 +17,13 @@ pub(crate) struct Theme {
 }
 
 impl Theme {
+    pub(crate) fn named(name: &str, plain: bool) -> Self {
+        match name {
+            "light" => Self::light(plain),
+            _ => Self::zhipu(plain),
+        }
+    }
+
     pub(crate) fn zhipu(plain: bool) -> Self {
         Self {
             plain,
@@ -29,6 +36,21 @@ impl Theme {
             frame: Color::Rgb(56, 62, 78),
             code_bg: Color::Rgb(33, 38, 51),
             band_bg: Color::Rgb(48, 52, 63),
+        }
+    }
+
+    fn light(plain: bool) -> Self {
+        Self {
+            plain,
+            accent: Color::Rgb(35, 91, 210),
+            accent_dim: Color::Rgb(76, 103, 160),
+            text: Color::Rgb(33, 38, 48),
+            dim: Color::Rgb(99, 108, 124),
+            good: Color::Rgb(31, 128, 76),
+            bad: Color::Rgb(190, 55, 55),
+            frame: Color::Rgb(168, 176, 191),
+            code_bg: Color::Rgb(235, 239, 247),
+            band_bg: Color::Rgb(225, 230, 240),
         }
     }
 

@@ -11,6 +11,10 @@
 > **非官方声明**：`zcode-tui` 不是 ZCode / 智谱官方项目，也未获得官方背书。
 > 它是社区/个人维护的 Linux 终端 fallback，用来补齐官方包当前缺失的 TUI 体验。
 
+> **用量优惠**：zcode-tui 仍使用用户自己的官方 ZCode 账户和内核，不另建计费
+> 通道，因此继承 ZCode 的 **1.5 倍（150%）用量优惠**；具体资格与规则仍以
+> ZCode 官方账户政策为准。
+
 `zcode-tui` 是一个 **Rust 写的 ZCode 终端 TUI fallback**，专门兜住官方 Linux
 包缺少 `@zcode/tui` 的尴尬空洞。它面向 SSH、tmux、无桌面服务器和纯键盘
 工作流：普通输入优先走官方 `zcode app-server`，不可用时自动回退到
@@ -25,9 +29,9 @@
 |---|---|
 | ZCode Linux x64 桌面包 | **3.8.1**（官方 feed） |
 | 官方 CLI kernel | **0.16.3**（随 ZCode 3.8.1，版本未变） |
-| zcode-tui | **0.6.1** |
+| zcode-tui | **0.6.2** |
 | 协议兼容 | 3.8.1/3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 140/140；Clippy 零告警；原生 release 构建通过；3.8.1 app-server 握手和 TUI 启停正常 |
+| 当前源码验证 | Rust 测试 143/143；Clippy 零告警；原生 build 通过；3.8.1 app-server 握手和 TUI 启停正常 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -51,7 +55,8 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 - Codex 风布局：无边框流式 transcript，用户消息使用背景横条和 `›` 提示符，
   助手回复 `•` 开头平铺，会话信息横幅进 transcript，
   底部一行 dim 快捷键提示（运行任务时变 spinner 工作行）。
-- 智谱风配色：GLM 蓝单一强调色 + 冷灰中性色阶，行内代码蓝色文字、
+- 内置 `dark` / `light` 主题，`/theme` 列出、`/theme dark|light` 即时切换并
+  持久化；默认 dark 使用 GLM 蓝单一强调色 + 冷灰中性色阶，行内代码蓝色文字、
   引用绿色，语义绿/红只用于 diff 与错误；
   `--no-color` 或 `NO_COLOR` 时退化为无色。
 - **语法高亮**：围栏代码块按语言用 syntect 着色（Codex 同款方案，
@@ -384,6 +389,7 @@ text                         通过 app-server 发送 prompt（不可用时回�
 /mcp status                  作为 /mcp status 转发给 ZCode
 /mode [build|edit|plan|yolo] 查看/切换权限模式（Shift+Tab 循环）；
                              app-server 流式路径下即刻作用于活跃会话
+/theme [list|dark|light]     列出或持久化切换内置主题
 /model                       切换会话模型（浮层选择内核上报的候选；
                              app-server 流式路径）
 /think                       循环思考级别 enabled/disabled（app-server）
@@ -476,6 +482,7 @@ ZCODE_FORCE_SYSTEM_NODE      wrapper：置 1 强制用系统 Node 运行内核
 ```text
 # 主题 token 覆盖。默认是 GLM 蓝 + 冷灰终端风；官方不提供 TUI 主题，
 # 这里就把颜色控制权留给终端用户。
+theme = dark
 # 可配置 token：accent accent_dim text dim good bad frame code_bg band_bg
 accent = #6088ff
 # 关闭 >30s 回合完成铃（默认开启）
@@ -483,6 +490,7 @@ notify = off
 ```
 
 `NO_COLOR`/`--no-color` 优先级最高，设置后所有颜色（含自定义）全部退化。
+也可直接运行 `/theme dark` 或 `/theme light`；命令只更新 `theme` 行，保留其余配置。
 
 ## 设计与参考
 

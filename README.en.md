@@ -14,6 +14,11 @@
 > terminal fallback for the TUI experience currently missing from the official
 > package.
 
+> **Usage benefit**: zcode-tui continues to use your official ZCode account and
+> kernel rather than a separate billing path, so it inherits ZCode's **1.5x
+> (150%) usage benefit**. Eligibility and exact terms remain subject to ZCode's
+> official account policy.
+
 `zcode-tui` is a Rust terminal-first fallback TUI for ZCode on Linux. It exists
 for the gap where the official Linux package exposes a `tui` command, but does
 not ship the terminal UI runtime (`@zcode/tui`).
@@ -30,9 +35,9 @@ palette, and editor workflows are handled locally.
 |---|---|
 | ZCode Linux x64 desktop | **3.8.1** (official feed) |
 | Official CLI kernel | **0.16.3** (bundled with ZCode 3.8.1) |
-| zcode-tui | **0.6.1** |
+| zcode-tui | **0.6.2** |
 | Protocol compatibility | 3.8.1/3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 140/140 Rust tests; zero-warning Clippy; native release build; verified 3.8.1 app-server handshake and TUI lifecycle |
+| Current source verification | 143/143 Rust tests; zero-warning Clippy; native build; verified 3.8.1 app-server handshake and TUI lifecycle |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -60,7 +65,9 @@ for details.
 
 - Codex-like transcript layout: borderless scrollback, user message bands,
   assistant output as flat markdown, and a compact footer.
-- Zhipu-inspired cool gray theme with GLM-blue accents.
+- Built-in `dark` and `light` themes; `/theme` lists them and
+  `/theme dark|light` switches immediately and persists the choice. Dark keeps
+  the Zhipu-inspired cool gray palette with GLM-blue accents.
 - Markdown rendering via `pulldown-cmark`: headings, emphasis, inline code,
   fenced code blocks, lists, quotes, rules, and display-width aligned tables.
 - Syntax highlighting for fenced code blocks via `syntect`; `diff` fences and
@@ -334,6 +341,7 @@ text                         send through app-server (fallback: --prompt)
 /auth                        show local auth status
 /status                      show session, auth, and MCP overview
 /sessions                    open recent session picker
+/theme [list|dark|light]     list or persistently switch built-in themes
 /agents                      inspect parent, Subagents, and Background work
                              (read-only; Tab/Enter/r; x cancels eligible work)
 /mcp list                    list project and user MCP servers
@@ -370,7 +378,8 @@ Config file:
 Line format:
 
 ```text
-# Theme token overrides. The default theme is GLM blue plus cool terminal gray.
+# Built-in palette and optional token overrides.
+theme = dark
 # Tokens: accent accent_dim text dim good bad frame code_bg band_bg
 accent = #6088ff
 
@@ -379,6 +388,8 @@ notify = off
 ```
 
 `NO_COLOR` and `--no-color` take precedence over theme colors.
+You can also run `/theme dark` or `/theme light`; the command updates only the
+`theme` line and preserves the rest of the file.
 
 Useful environment variables:
 

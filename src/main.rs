@@ -40,22 +40,23 @@ use zcode_tui::{
     is_newer_version, kernel_config_path_from, kernel_db_path_from, latest_assistant_text,
     latest_reasoning, latest_session_for_dir, leader_action_for_key, list_recent_sessions,
     live_tool_chips, load_mcp_config, load_ui_config, login_command, markdown_lines,
-    mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence,
+    mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence, pad_display,
     parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
     parse_kernel_slash_commands, parse_prompt_summary, parse_resume_messages, parse_rewind_preview,
     parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
     parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age,
     resolve_update_download_url, rewind_failure, run_command, runtime_model_controls,
-    select_update_feed_url, shorten_home, skyline_mode, slash_suggestions_merged,
-    spawn_streaming_command, tool_result_summary, usage_stats_params, user_mcp_config_path,
-    v4_command_params, v4_conversation_subscribe_params, v4_file_rewind_preview_params,
-    v4_rewind_target, with_mcp_servers, with_runtime_model, with_tool_policy, wrap_display,
-    zcode_app_version_from_path, AppConfig, AppServerConn, AppServerEvent, AppServerMessage,
-    AppServerTurn, AppServerUnavailable, AuthStatus, CheckpointEntry, DbBaseline, DebugLog,
-    DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction, LiveToolChip,
-    MdLineKind, ModelChoice, RewindPreview, RewindTarget, SessionControls, SessionRow, SkylineMode,
-    SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem, ToolChipStatus, TurnDelta,
-    UpdateFeed, V4CommandBase, V4ConversationState,
+    save_ui_theme, select_update_feed_url, shorten_home, single_line, skyline_mode,
+    slash_suggestions_merged, spawn_streaming_command, tool_result_summary, usage_stats_params,
+    user_home_dir, user_mcp_config_path, v4_command_params, v4_conversation_subscribe_params,
+    v4_file_rewind_preview_params, v4_rewind_target, with_mcp_servers, with_runtime_model,
+    with_tool_policy, wrap_display, zcode_app_version_from_path, AppConfig, AppServerConn,
+    AppServerEvent, AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus,
+    CheckpointEntry, DbBaseline, DebugLog, DiffRole, InputAction, InteractionRequest, JobEvent,
+    KernelCommand, LeaderAction, LiveToolChip, MdLineKind, ModelChoice, RewindPreview,
+    RewindTarget, SessionControls, SessionRow, SkylineMode, SpanRole, SteerOutcome, StreamEvent,
+    StreamingJob, TodoItem, ToolChipStatus, TurnDelta, UpdateFeed, V4CommandBase,
+    V4ConversationState,
 };
 
 mod agents;
@@ -272,7 +273,7 @@ struct ModelCatalogReport {
 
 fn active_zcode_app_dir() -> Option<PathBuf> {
     let explicit = env::var_os("ZCODE_APP").map(PathBuf::from);
-    let home = env::var_os("HOME").map(PathBuf::from);
+    let home = user_home_dir();
     discover_zcode_app_dir(
         explicit.as_deref(),
         Some(Path::new("/opt/ZCode")),
@@ -312,7 +313,7 @@ fn update_feed_url_for(app_dir: Option<&Path>) -> Option<String> {
 /// fresh-install state (silent); an unrecognized schema disables every
 /// db-derived feature for this run.
 fn probe_kernel_db() -> DbProbe {
-    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = user_home_dir() else {
         return DbProbe::Missing;
     };
     let path = kernel_db_path_from(&home);
@@ -329,18 +330,14 @@ fn model_cache_path() -> Option<PathBuf> {
     if let Some(root) = env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(root).join("zcode-tui").join("models.json"));
     }
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".cache").join("zcode-tui").join("models.json"))
+    user_home_dir().map(|home| home.join(".cache").join("zcode-tui").join("models.json"))
 }
 
 fn model_preference_path() -> Option<PathBuf> {
     if let Some(root) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(root).join("zcode-tui").join("model.json"));
     }
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".config").join("zcode-tui").join("model.json"))
+    user_home_dir().map(|home| home.join(".config").join("zcode-tui").join("model.json"))
 }
 
 fn parse_model_preference(raw: &str) -> Option<serde_json::Value> {
@@ -750,6 +747,7 @@ struct UiState {
     config: AppConfig,
     zcode_bin: String,
     theme: Theme,
+    theme_name: String,
     kernel_version: Option<String>,
     /// A prompt has completed in this run, so later prompts auto --continue.
     session_active: bool,
@@ -951,6 +949,10 @@ impl UiState {
         let auth_label = auth_status.short_label();
         let plain = config.no_color || env::var_os("NO_COLOR").is_some();
         let ui_config = load_ui_config();
+        let theme_name = ui_config
+            .theme
+            .clone()
+            .unwrap_or_else(|| "dark".to_string());
         let notify_enabled = ui_config.notify != Some(false);
         let app_mode = if app_server_enabled(|key| env::var(key).ok()) {
             AppMode::Ready
@@ -960,7 +962,8 @@ impl UiState {
         Self {
             config,
             zcode_bin,
-            theme: Theme::zhipu(plain).with_overrides(&ui_config),
+            theme: Theme::named(&theme_name, plain).with_overrides(&ui_config),
+            theme_name,
             kernel_version: None,
             session_active: false,
             auth_status,
@@ -1627,6 +1630,10 @@ impl UiState {
             Some("login") => return Some(UiEffect::Login),
             Some("sessions") => {
                 self.open_session_picker();
+                return None;
+            }
+            Some("theme") => {
+                self.set_theme(command.get(1).map(String::as_str));
                 return None;
             }
             Some("agents") => {
@@ -4500,20 +4507,29 @@ fi"#
     }
 
     fn open_session_picker(&mut self) {
-        // A live app-server connection is the authoritative source
-        // (session/list, verified live); the kernel db stays the fallback for
-        // the classic path or when the protocol call fails.
-        if self.app_conn.as_ref().is_some_and(AppServerConn::is_alive) && !self.is_busy() {
+        // session/list is authoritative. Before the first prompt there is no
+        // live connection yet, so an explicit /sessions gets a short-lived
+        // read-only connection instead of depending entirely on SQLite.
+        if self.app_mode == AppMode::Ready && !self.is_busy() {
             let cwd = self.app_workspace();
-            let listed = self
-                .app_conn
-                .as_mut()
-                .expect("alive checked above")
-                .request_blocking(
-                    "session/list",
-                    serde_json::json!({}),
-                    Duration::from_secs(3),
-                );
+            let listed = if self.app_conn.as_ref().is_some_and(AppServerConn::is_alive) {
+                self.app_conn
+                    .as_mut()
+                    .expect("alive checked above")
+                    .request_blocking(
+                        "session/list",
+                        serde_json::json!({}),
+                        Duration::from_secs(3),
+                    )
+            } else {
+                AppServerConn::spawn(&self.zcode_bin).and_then(|mut conn| {
+                    conn.request_blocking(
+                        "session/list",
+                        serde_json::json!({}),
+                        Duration::from_secs(3),
+                    )
+                })
+            };
             if let Ok(result) = listed {
                 let rows = parse_session_list(&result, &cwd);
                 if !rows.is_empty() {
@@ -4526,6 +4542,15 @@ fi"#
                 }
             }
             // Fall through to the db source on error/empty.
+        }
+        // The startup probe also checks updates and model metadata, so a user
+        // can open /sessions before its report arrives. Retry this cheap,
+        // read-only probe on demand instead of treating Unknown as missing.
+        if !matches!(self.db_state, DbState::Enabled(_)) {
+            self.db_state = match probe_kernel_db() {
+                DbProbe::Supported(path) => DbState::Enabled(path),
+                DbProbe::Missing | DbProbe::Unsupported => DbState::Disabled,
+            };
         }
         let DbState::Enabled(path) = &self.db_state else {
             self.push_system(
@@ -4658,7 +4683,7 @@ fi"#
     // ---- log helpers -----------------------------------------------------
 
     fn banner_text(&self) -> String {
-        let home = env::var("HOME").ok();
+        let home = user_home_dir().map(|path| path.to_string_lossy().into_owned());
         let cwd = shorten_home(&display_cwd(&self.config), home.as_deref());
         let version = match &self.kernel_version {
             Some(kernel) => format!("kernel {kernel} · tui {}", env!("CARGO_PKG_VERSION")),
@@ -4726,6 +4751,34 @@ fi"#
                 PERMISSION_MODES.join(", ")
             )),
         }
+    }
+
+    fn set_theme(&mut self, requested: Option<&str>) {
+        let Some(requested) = requested.filter(|value| *value != "list") else {
+            self.push_system(&format!(
+                "themes: dark, light · current: {}",
+                self.theme_name
+            ));
+            self.status = format!("theme: {}", self.theme_name);
+            return;
+        };
+        let requested = requested.to_ascii_lowercase();
+        if !matches!(requested.as_str(), "dark" | "light") {
+            self.push_error(&format!(
+                "unknown theme {requested}; available: dark, light"
+            ));
+            return;
+        }
+        if let Err(error) = save_ui_theme(&requested) {
+            self.push_error(&format!("failed to save theme: {error:#}"));
+            return;
+        }
+        let ui_config = load_ui_config();
+        let plain = self.config.no_color || env::var_os("NO_COLOR").is_some();
+        self.theme = Theme::named(&requested, plain).with_overrides(&ui_config);
+        self.theme_name = requested;
+        self.push_system(&format!("theme switched to {}", self.theme_name));
+        self.status = format!("theme: {}", self.theme_name);
     }
 
     fn cycle_mode(&mut self) {
@@ -4956,7 +5009,7 @@ impl TerminalGuard {
         enable_raw_mode().context("failed to enable raw mode")?;
         execute!(io::stdout(), EnableBracketedPaste, Hide)?;
         let terminal = (|| -> Result<Tui> {
-            let (_, rows) = crossterm::terminal::size().context("failed to read terminal size")?;
+            let (_, rows) = crossterm::terminal::size().unwrap_or((80, 24));
             let backend = CrosstermBackend::new(io::stdout());
             Ok(Terminal::with_options(
                 backend,
@@ -5268,9 +5321,8 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
 /// registry metadata enriches the selectable models without mutating either
 /// file. Missing or malformed Desktop state falls back to CLI-only behavior.
 fn load_runtime_model() -> Option<serde_json::Value> {
-    let home = env::var("HOME").ok()?;
-    let home = std::path::Path::new(&home);
-    let config = fs::read_to_string(kernel_config_path_from(home)).ok()?;
+    let home = user_home_dir()?;
+    let config = fs::read_to_string(kernel_config_path_from(&home)).ok()?;
     let desktop = fs::read_to_string(home.join(".zcode/v2/config.json")).ok();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -6264,18 +6316,31 @@ fn render_session_picker(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
         .unwrap_or(0);
-    let home = env::var("HOME").ok();
+    let home = user_home_dir().map(|path| path.to_string_lossy().into_owned());
+    // Borders use two columns and the selected-row marker uses two more.
+    // Keep every row within that conservative budget on terminals that wrap
+    // at the last column.
+    let inner_width = area.width.saturating_sub(4) as usize;
     let items = rows
         .iter()
         .map(|row| {
-            let title: String = row.title.chars().take(40).collect();
-            let dir = shorten_home(&row.directory, home.as_deref());
+            let age = relative_age(now_ms, row.time_updated);
+            let age_width = age.width().max(4).saturating_add(2).min(inner_width);
+            let available = inner_width.saturating_sub(age_width);
+            let title_width = if available >= 24 {
+                (available * 2 / 3).min(42)
+            } else {
+                available
+            };
+            let dir_width = available.saturating_sub(title_width);
+            let title = pad_display(&single_line(&row.title), title_width);
+            let dir = pad_display(
+                &single_line(&shorten_home(&row.directory, home.as_deref())),
+                dir_width,
+            );
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{title:<42}"), t.text()),
-                Span::styled(
-                    format!("{:>4}  ", relative_age(now_ms, row.time_updated)),
-                    t.dim(),
-                ),
+                Span::styled(title, t.text()),
+                Span::styled(pad_display(&format!("{age:>4}  "), age_width), t.dim()),
                 Span::styled(dir, t.dim()),
             ]))
         })
@@ -6515,6 +6580,16 @@ mod tests {
         // except where the physical terminal itself has fewer rows.
         assert_eq!(inline_viewport_rows(16), 9);
         assert_eq!(inline_viewport_rows(8), 7);
+    }
+
+    #[test]
+    fn built_in_theme_palettes_are_distinct_and_plain_stays_plain() {
+        assert_ne!(
+            Theme::named("dark", false).text(),
+            Theme::named("light", false).text()
+        );
+        assert_eq!(Theme::named("dark", true).text(), Style::default());
+        assert_eq!(Theme::named("light", true).text(), Style::default());
     }
 
     #[test]

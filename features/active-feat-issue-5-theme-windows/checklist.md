@@ -1,7 +1,7 @@
 # Checklist: feat-issue-5-theme-windows
 
-- [ ] All planned tasks completed
-- [ ] Required quality checks passed
-- [ ] Tests passed
-- [ ] Acceptance scenarios passed
-- [ ] Verification evidence saved
+- [x] All planned tasks completed
+- [x] Required quality checks passed
+- [x] Tests passed
+- [x] Acceptance scenarios passed
+- [x] Verification evidence saved

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -241,8 +242,22 @@ where
 }
 
 pub fn detect_auth_status() -> AuthStatus {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = user_home_dir();
     detect_auth_status_with(|key| std::env::var(key).ok(), home.as_deref())
+}
+
+/// Resolve a user home on Unix and Windows without adding a platform-specific
+/// dependency. PowerShell and cmd commonly expose USERPROFILE but not HOME.
+pub fn user_home_dir_from(home: Option<&OsStr>, user_profile: Option<&OsStr>) -> Option<PathBuf> {
+    home.filter(|value| !value.is_empty())
+        .or_else(|| user_profile.filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+}
+
+pub fn user_home_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME");
+    let user_profile = std::env::var_os("USERPROFILE");
+    user_home_dir_from(home.as_deref(), user_profile.as_deref())
 }
 
 pub fn mask_secret(secret: &str) -> String {
@@ -604,8 +619,8 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
     match parts[0].as_str() {
         "exit" | "quit" => Ok(InputAction::Quit),
         "help" | "clear" | "editor" | "login" | "logout" | "auth" | "status" | "diff" | "ide"
-        | "sessions" | "mode" | "resume" | "new" | "model" | "think" | "compact" | "usage"
-        | "update" | "copy" | "rewind" | "agents" => Ok(InputAction::Local(parts)),
+        | "sessions" | "mode" | "theme" | "resume" | "new" | "model" | "think" | "compact"
+        | "usage" | "update" | "copy" | "rewind" | "agents" => Ok(InputAction::Local(parts)),
         "skills" => {
             let mut local = parts;
             if local.len() == 1 {
@@ -715,6 +730,11 @@ pub fn command_catalog() -> &'static [CommandSpec] {
         CommandSpec {
             command: "/mode",
             summary: "show or switch permission mode; Shift+Tab cycles",
+            route: "local",
+        },
+        CommandSpec {
+            command: "/theme",
+            summary: "list or switch dark/light theme",
             route: "local",
         },
         CommandSpec {
@@ -1615,6 +1635,7 @@ launch options:
                                ZCODE_TUI_IDE_CMD
   /mode [build|edit|plan|yolo] show or switch permission mode; applies live
                                on the app-server streaming path
+  /theme [list|dark|light]     list or persistently switch the color theme
   /model                       switch the session model (app-server path)
   /think                       cycle the thought level (app-server path)
   /compact                     compact the session context in place
@@ -2023,7 +2044,10 @@ fn emit_table(rows: &[Vec<String>], out: &mut Vec<StyledLine>) {
 }
 
 /// Pad (or truncate with an ellipsis) to exactly `target` display columns.
-fn pad_display(text: &str, target: usize) -> String {
+pub fn pad_display(text: &str, target: usize) -> String {
+    if target == 0 {
+        return String::new();
+    }
     let text_width = text.width();
     if text_width <= target {
         return format!("{text}{}", " ".repeat(target - text_width));
@@ -2164,6 +2188,17 @@ pub fn shorten_home(path: &str, home: Option<&str>) -> String {
         }
     }
     path.to_string()
+}
+
+/// Keep kernel-provided session metadata on one terminal row. This strips
+/// CR/LF pairs defensively while preserving ordinary spaces.
+pub fn single_line(text: &str) -> String {
+    text.replace("\r\n", " ").replace(['\r', '\n'], " ")
+}
+
+/// Last non-empty component of either a Unix or Windows path.
+pub fn path_tail(path: &str) -> Option<&str> {
+    path.rsplit(['/', '\\']).find(|piece| !piece.is_empty())
 }
 
 // ---- official update check ---------------------------------------------
@@ -2964,11 +2999,7 @@ pub fn list_recent_sessions(
             let title: String = row.get(1)?;
             let directory: String = row.get(2)?;
             let title = if title.trim().is_empty() {
-                directory
-                    .rsplit('/')
-                    .find(|piece| !piece.is_empty())
-                    .unwrap_or(&id)
-                    .to_string()
+                path_tail(&directory).unwrap_or(&id).to_string()
             } else {
                 title
             };
@@ -3028,6 +3059,8 @@ pub fn history_search(history: &[String], query: &str, limit: usize) -> Vec<Stri
 /// break.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UiConfig {
+    /// Built-in palette name. Unknown values are ignored while parsing.
+    pub theme: Option<String>,
     pub colors: BTreeMap<String, (u8, u8, u8)>,
     /// `notify = off` silences the >30s turn-complete terminal bell.
     pub notify: Option<bool>,
@@ -3065,7 +3098,12 @@ pub fn parse_ui_config(content: &str) -> UiConfig {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
-        if key == "notify" {
+        if key == "theme" {
+            let value = value.to_ascii_lowercase();
+            if matches!(value.as_str(), "dark" | "light") {
+                config.theme = Some(value);
+            }
+        } else if key == "notify" {
             config.notify = match value.to_ascii_lowercase().as_str() {
                 "on" | "true" | "1" => Some(true),
                 "off" | "false" | "0" => Some(false),
@@ -3084,12 +3122,69 @@ pub fn ui_config_path_from(home: &Path) -> PathBuf {
     home.join(".config").join("zcode-tui").join("config")
 }
 
+pub fn ui_config_path() -> Option<PathBuf> {
+    std::env::var_os("ZCODE_TUI_CONFIG")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| user_home_dir().map(|home| ui_config_path_from(&home)))
+}
+
+/// Persist one built-in theme while preserving the rest of the line-based
+/// config, including its newline convention.
+pub fn save_ui_theme_to(path: &Path, theme: &str) -> Result<()> {
+    if !matches!(theme, "dark" | "light") {
+        return Err(anyhow!("unknown theme {theme}; available: dark, light"));
+    }
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()))
+        }
+    };
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut replaced = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let is_theme = !line.trim_start().starts_with('#')
+            && line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "theme");
+        if is_theme {
+            if !replaced {
+                lines.push(format!("theme = {theme}"));
+                replaced = true;
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !replaced {
+        lines.push(format!("theme = {theme}"));
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, format!("{}{newline}", lines.join(newline)))?;
+    Ok(())
+}
+
+pub fn save_ui_theme(theme: &str) -> Result<()> {
+    let path = ui_config_path().ok_or_else(|| anyhow!("cannot resolve UI config path"))?;
+    save_ui_theme_to(&path, theme)
+}
+
 /// Resolve and parse the user config; every failure path yields defaults.
 pub fn load_ui_config() -> UiConfig {
-    let path = std::env::var_os("ZCODE_TUI_CONFIG")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| ui_config_path_from(Path::new(&home))));
-    path.and_then(|path| fs::read_to_string(path).ok())
+    ui_config_path()
+        .and_then(|path| fs::read_to_string(path).ok())
         .map(|content| parse_ui_config(&content))
         .unwrap_or_default()
 }
