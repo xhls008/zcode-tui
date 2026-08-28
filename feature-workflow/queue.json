@@ -1,11 +1,26 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-27T01:50:01Z"
+    "last_updated": "2026-08-28T14:09:44Z"
   },
   "parents": [],
   "active": [],
-  "pending": [],
+  "pending": [
+    {
+      "id": "feat-issue-5-theme-windows",
+      "name": "Theme switching and Windows session compatibility",
+      "description": "Users can persistently switch dark/light themes, use a more defensive sessions picker on Windows terminals, and read v0.6.2 documentation for inherited 150% usage benefits.",
+      "priority": 80,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "multi_module",
+        "compatibility"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "created_at": "2026-08-28T14:09:44Z"
+    }
+  ],
   "blocked": [],
   "completed": [
     {

@@ -1,0 +1,8 @@
+{
+  "schema": "feature-review/v1",
+  "feature_id": "feat-issue-5-theme-windows",
+  "status": "passed",
+  "score": 92,
+  "reviewed_at": "2026-08-28T14:15:00Z",
+  "blocking_issues": []
+}
