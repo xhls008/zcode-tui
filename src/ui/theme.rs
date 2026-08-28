@@ -20,6 +20,8 @@ impl Theme {
     pub(crate) fn named(name: &str, plain: bool) -> Self {
         match name {
             "light" => Self::light(plain),
+            "tsinghua" => Self::tsinghua(plain),
+            "pku" => Self::pku(plain),
             _ => Self::zhipu(plain),
         }
     }
@@ -51,6 +53,36 @@ impl Theme {
             frame: Color::Rgb(168, 176, 191),
             code_bg: Color::Rgb(235, 239, 247),
             band_bg: Color::Rgb(225, 230, 240),
+        }
+    }
+
+    fn tsinghua(plain: bool) -> Self {
+        Self {
+            plain,
+            accent: Color::Rgb(167, 104, 190),
+            accent_dim: Color::Rgb(105, 62, 121),
+            text: Color::Rgb(235, 228, 238),
+            dim: Color::Rgb(154, 139, 160),
+            good: Color::Rgb(120, 194, 151),
+            bad: Color::Rgb(234, 120, 128),
+            frame: Color::Rgb(82, 63, 88),
+            code_bg: Color::Rgb(36, 27, 41),
+            band_bg: Color::Rgb(46, 34, 52),
+        }
+    }
+
+    fn pku(plain: bool) -> Self {
+        Self {
+            plain,
+            accent: Color::Rgb(214, 79, 88),
+            accent_dim: Color::Rgb(137, 48, 55),
+            text: Color::Rgb(239, 229, 228),
+            dim: Color::Rgb(159, 139, 138),
+            good: Color::Rgb(126, 194, 145),
+            bad: Color::Rgb(244, 121, 118),
+            frame: Color::Rgb(91, 61, 62),
+            code_bg: Color::Rgb(42, 27, 28),
+            band_bg: Color::Rgb(54, 34, 35),
         }
     }
 

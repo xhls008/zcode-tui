@@ -734,7 +734,7 @@ pub fn command_catalog() -> &'static [CommandSpec] {
         },
         CommandSpec {
             command: "/theme",
-            summary: "list or switch dark/light theme",
+            summary: "list or switch built-in theme",
             route: "local",
         },
         CommandSpec {
@@ -1635,7 +1635,8 @@ launch options:
                                ZCODE_TUI_IDE_CMD
   /mode [build|edit|plan|yolo] show or switch permission mode; applies live
                                on the app-server streaming path
-  /theme [list|dark|light]     list or persistently switch the color theme
+  /theme [list|dark|light|tsinghua|pku]
+                               list or persistently switch the color theme
   /model                       switch the session model (app-server path)
   /think                       cycle the thought level (app-server path)
   /compact                     compact the session context in place
@@ -3100,7 +3101,7 @@ pub fn parse_ui_config(content: &str) -> UiConfig {
         let (key, value) = (key.trim(), value.trim());
         if key == "theme" {
             let value = value.to_ascii_lowercase();
-            if matches!(value.as_str(), "dark" | "light") {
+            if matches!(value.as_str(), "dark" | "light" | "tsinghua" | "pku") {
                 config.theme = Some(value);
             }
         } else if key == "notify" {
@@ -3132,8 +3133,10 @@ pub fn ui_config_path() -> Option<PathBuf> {
 /// Persist one built-in theme while preserving the rest of the line-based
 /// config, including its newline convention.
 pub fn save_ui_theme_to(path: &Path, theme: &str) -> Result<()> {
-    if !matches!(theme, "dark" | "light") {
-        return Err(anyhow!("unknown theme {theme}; available: dark, light"));
+    if !matches!(theme, "dark" | "light" | "tsinghua" | "pku") {
+        return Err(anyhow!(
+            "unknown theme {theme}; available: dark, light, tsinghua, pku"
+        ));
     }
     let content = match fs::read_to_string(path) {
         Ok(content) => content,

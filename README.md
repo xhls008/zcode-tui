@@ -29,9 +29,9 @@
 |---|---|
 | ZCode Linux x64 桌面包 | **3.8.1**（官方 feed） |
 | 官方 CLI kernel | **0.16.3**（随 ZCode 3.8.1，版本未变） |
-| zcode-tui | **0.6.2** |
+| zcode-tui | **0.6.3** |
 | 协议兼容 | 3.8.1/3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 143/143；Clippy 零告警；原生 build 通过；3.8.1 app-server 握手和 TUI 启停正常 |
+| 当前源码验证 | Rust 测试 144/144；Clippy 零告警；原生 build 通过；3.8.1 app-server 握手和 TUI 启停正常 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -55,9 +55,9 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 - Codex 风布局：无边框流式 transcript，用户消息使用背景横条和 `›` 提示符，
   助手回复 `•` 开头平铺，会话信息横幅进 transcript，
   底部一行 dim 快捷键提示（运行任务时变 spinner 工作行）。
-- 内置 `dark` / `light` 主题，`/theme` 列出、`/theme dark|light` 即时切换并
-  持久化；默认 dark 使用 GLM 蓝单一强调色 + 冷灰中性色阶，行内代码蓝色文字、
-  引用绿色，语义绿/红只用于 diff 与错误；
+- 内置 `dark` / `light` / `tsinghua`（清华紫）/ `pku`（北大红）主题，
+  `/theme` 列出、`/theme <名称>` 即时切换并持久化；默认 dark 使用 GLM 蓝单一
+  强调色 + 冷灰中性色阶，行内代码蓝色文字、引用绿色，语义绿/红只用于 diff 与错误；
   `--no-color` 或 `NO_COLOR` 时退化为无色。
 - **语法高亮**：围栏代码块按语言用 syntect 着色（Codex 同款方案，
   base16-ocean 主题）+ dim 行号 gutter；` ```diff ` 围栏按
@@ -389,7 +389,8 @@ text                         通过 app-server 发送 prompt（不可用时回�
 /mcp status                  作为 /mcp status 转发给 ZCode
 /mode [build|edit|plan|yolo] 查看/切换权限模式（Shift+Tab 循环）；
                              app-server 流式路径下即刻作用于活跃会话
-/theme [list|dark|light]     列出或持久化切换内置主题
+/theme [list|dark|light|tsinghua|pku]
+                             列出或持久化切换内置主题
 /model                       切换会话模型（浮层选择内核上报的候选；
                              app-server 流式路径）
 /think                       循环思考级别 enabled/disabled（app-server）
@@ -490,7 +491,7 @@ notify = off
 ```
 
 `NO_COLOR`/`--no-color` 优先级最高，设置后所有颜色（含自定义）全部退化。
-也可直接运行 `/theme dark` 或 `/theme light`；命令只更新 `theme` 行，保留其余配置。
+也可直接运行 `/theme dark|light|tsinghua|pku`；命令只更新 `theme` 行，保留其余配置。
 
 ## 设计与参考
 
