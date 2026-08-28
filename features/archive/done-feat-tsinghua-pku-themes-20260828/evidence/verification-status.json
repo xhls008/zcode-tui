@@ -1,0 +1,30 @@
+{
+  "schema": "feature-verification/v1",
+  "feature_id": "feat-tsinghua-pku-themes",
+  "status": "passed",
+  "verified_at": "2026-08-28T15:48:43Z",
+  "tasks": {
+    "total": 6,
+    "completed": 6,
+    "incomplete": 0
+  },
+  "quality": {
+    "status": "passed",
+    "passed": 3,
+    "failed": 0
+  },
+  "tests": {
+    "status": "passed",
+    "passed": 144,
+    "failed": 0,
+    "skipped": 0
+  },
+  "scenarios": {
+    "total": 6,
+    "passed": 6,
+    "failed": 0
+  },
+  "blocking_failures": [],
+  "warnings": [],
+  "report": "features/archive/done-feat-tsinghua-pku-themes-20260828/evidence/verification-report.md"
+}

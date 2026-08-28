@@ -1,8 +1,8 @@
 {
   "schema": "feature-archive/v1",
   "meta": {
-    "last_updated": "2026-08-28T14:30:43Z",
-    "total_completed": 9
+    "last_updated": "2026-08-28T15:52:02Z",
+    "total_completed": 10
   },
   "records": [
     {
@@ -367,6 +367,46 @@
           "Windows compatibility is best-effort: no Windows target/terminal runner is installed locally; the tag-triggered CI matrix performs the Windows MSVC build."
         ],
         "report": "features/archive/done-feat-issue-5-theme-windows-20260828/evidence/verification-report.md"
+      }
+    },
+    {
+      "id": "feat-tsinghua-pku-themes",
+      "name": "Tsinghua purple and PKU red themes",
+      "status": "completed",
+      "completed_at": "2026-08-28T15:52:02Z",
+      "archive_path": "features/archive/done-feat-tsinghua-pku-themes-20260828",
+      "tag": "v0.6.3",
+      "merge_commit": "83f1e7662e86619d6eed8359e99218593e1e3cc9",
+      "workflow_mode": "lite",
+      "verification": {
+        "schema": "feature-verification/v1",
+        "feature_id": "feat-tsinghua-pku-themes",
+        "status": "passed",
+        "verified_at": "2026-08-28T15:48:43Z",
+        "tasks": {
+          "total": 6,
+          "completed": 6,
+          "incomplete": 0
+        },
+        "quality": {
+          "status": "passed",
+          "passed": 3,
+          "failed": 0
+        },
+        "tests": {
+          "status": "passed",
+          "passed": 144,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scenarios": {
+          "total": 6,
+          "passed": 6,
+          "failed": 0
+        },
+        "blocking_failures": [],
+        "warnings": [],
+        "report": "features/archive/done-feat-tsinghua-pku-themes-20260828/evidence/verification-report.md"
       }
     }
   ]
