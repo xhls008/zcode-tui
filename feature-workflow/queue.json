@@ -1,28 +1,10 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-28T14:13:28Z"
+    "last_updated": "2026-08-28T14:30:43Z"
   },
   "parents": [],
-  "active": [
-    {
-      "id": "feat-issue-5-theme-windows",
-      "name": "Theme switching and Windows session compatibility",
-      "description": "Users can persistently switch dark/light themes, use a more defensive sessions picker on Windows terminals, and read v0.6.2 documentation for inherited 150% usage benefits.",
-      "priority": 80,
-      "workflow_mode": "deep",
-      "risk_signals": [
-        "multi_module",
-        "compatibility"
-      ],
-      "dependencies": [],
-      "status": "active",
-      "created_at": "2026-08-28T14:09:44Z",
-      "branch": "feature/feat-issue-5-theme-windows",
-      "worktree": "/home/flybear/flybear_data/my_project/zcode_tui-feat-issue-5-theme-windows",
-      "started_at": "2026-08-28T14:13:28Z"
-    }
-  ],
+  "active": [],
   "pending": [],
   "blocked": [],
   "completed": [
@@ -346,6 +328,48 @@
           "The broad interactive PTY suite was deferred to user-run manual regression by explicit request; the focused Agent/usage/session-continuity PTY suite passed 11/11."
         ],
         "report": "features/archive/done-feat-glm-53-flash-20260827/evidence/verification-report.md"
+      }
+    },
+    {
+      "id": "feat-issue-5-theme-windows",
+      "name": "Theme switching and Windows session compatibility",
+      "status": "completed",
+      "completed_at": "2026-08-28T14:30:43Z",
+      "archive_path": "features/archive/done-feat-issue-5-theme-windows-20260828",
+      "tag": "v0.6.2",
+      "merge_commit": "c9aaa4f8",
+      "workflow_mode": "deep",
+      "verification": {
+        "schema": "feature-verification/v1",
+        "feature_id": "feat-issue-5-theme-windows",
+        "status": "passed",
+        "verified_at": "2026-08-28T14:27:10Z",
+        "tasks": {
+          "total": 6,
+          "completed": 6,
+          "incomplete": 0
+        },
+        "quality": {
+          "status": "passed",
+          "passed": 3,
+          "failed": 0
+        },
+        "tests": {
+          "status": "passed",
+          "passed": 143,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scenarios": {
+          "total": 8,
+          "passed": 8,
+          "failed": 0
+        },
+        "blocking_failures": [],
+        "warnings": [
+          "Windows compatibility is best-effort: no Windows target/terminal runner is installed locally; the tag-triggered CI matrix performs the Windows MSVC build."
+        ],
+        "report": "features/archive/done-feat-issue-5-theme-windows-20260828/evidence/verification-report.md"
       }
     }
   ]
