@@ -1,11 +1,23 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-28T15:52:02Z"
+    "last_updated": "2026-08-29T00:45:44Z"
   },
   "parents": [],
   "active": [],
-  "pending": [],
+  "pending": [
+    {
+      "id": "feat-classic-editor-themes",
+      "name": "Six classic editor themes",
+      "description": "Ship six built-in editor-inspired themes with switching, persistence, documentation, and v0.6.4 release metadata.",
+      "priority": 70,
+      "workflow_mode": "lite",
+      "risk_signals": [],
+      "dependencies": [],
+      "status": "pending",
+      "created_at": "2026-08-29T00:45:44Z"
+    }
+  ],
   "blocked": [],
   "completed": [
     {
