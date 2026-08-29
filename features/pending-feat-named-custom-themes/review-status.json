@@ -1,0 +1,8 @@
+{
+  "schema": "feature-review/v1",
+  "feature_id": "feat-named-custom-themes",
+  "status": "passed",
+  "score": 94,
+  "reviewed_at": "2026-08-29T11:35:00Z",
+  "blocking_issues": []
+}
