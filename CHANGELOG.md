@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-08-29
+
+### 新增
+
+- **六种经典编辑器主题**：新增 `solarized-dark`、`solarized-light`、
+  `dracula`、`nord`、`gruvbox-dark` 与 `tokyo-night`，使用各自经典色板并针对
+  终端可读性微调；`/theme` 列表、即时切换、配置持久化、自定义 token 覆盖及
+  `NO_COLOR` 行为与现有主题一致。
+
+### 文档
+
+- README 中英文版补充十种内置主题及完整 `/theme` 用法，并更新 v0.6.4
+  版本信息。
+
+### 验证
+
+- Rust 测试 144/144、格式检查、Clippy 零告警及原生 debug build 通过。
+
 ## [0.6.3] - 2026-08-28
 
 ### 新增

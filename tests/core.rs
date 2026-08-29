@@ -1430,25 +1430,28 @@ fn ui_theme_persistence_preserves_config_and_crlf() {
 }
 
 #[test]
-fn ui_theme_persistence_accepts_new_built_ins() {
+fn ui_theme_persistence_accepts_all_named_built_ins() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("config");
 
-    save_ui_theme_to(&path, "tsinghua").unwrap();
-    assert_eq!(
-        parse_ui_config(&fs::read_to_string(&path).unwrap())
-            .theme
-            .as_deref(),
-        Some("tsinghua")
-    );
-
-    save_ui_theme_to(&path, "pku").unwrap();
-    assert_eq!(
-        parse_ui_config(&fs::read_to_string(&path).unwrap())
-            .theme
-            .as_deref(),
-        Some("pku")
-    );
+    for theme in [
+        "tsinghua",
+        "pku",
+        "solarized-dark",
+        "solarized-light",
+        "dracula",
+        "nord",
+        "gruvbox-dark",
+        "tokyo-night",
+    ] {
+        save_ui_theme_to(&path, theme).unwrap();
+        assert_eq!(
+            parse_ui_config(&fs::read_to_string(&path).unwrap())
+                .theme
+                .as_deref(),
+            Some(theme)
+        );
+    }
 }
 
 #[test]

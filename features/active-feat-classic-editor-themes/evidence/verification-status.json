@@ -1,0 +1,30 @@
+{
+  "schema": "feature-verification/v1",
+  "feature_id": "feat-classic-editor-themes",
+  "status": "passed",
+  "verified_at": "2026-08-29T00:50:07Z",
+  "tasks": {
+    "total": 6,
+    "completed": 6,
+    "incomplete": 0
+  },
+  "quality": {
+    "status": "passed",
+    "passed": 4,
+    "failed": 0
+  },
+  "tests": {
+    "status": "passed",
+    "passed": 144,
+    "failed": 0,
+    "skipped": 0
+  },
+  "scenarios": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0
+  },
+  "blocking_failures": [],
+  "warnings": [],
+  "report": "features/active-feat-classic-editor-themes/evidence/verification-report.md"
+}

@@ -22,6 +22,12 @@ impl Theme {
             "light" => Self::light(plain),
             "tsinghua" => Self::tsinghua(plain),
             "pku" => Self::pku(plain),
+            "solarized-dark" => Self::solarized_dark(plain),
+            "solarized-light" => Self::solarized_light(plain),
+            "dracula" => Self::dracula(plain),
+            "nord" => Self::nord(plain),
+            "gruvbox-dark" => Self::gruvbox_dark(plain),
+            "tokyo-night" => Self::tokyo_night(plain),
             _ => Self::zhipu(plain),
         }
     }
@@ -83,6 +89,96 @@ impl Theme {
             frame: Color::Rgb(91, 61, 62),
             code_bg: Color::Rgb(42, 27, 28),
             band_bg: Color::Rgb(54, 34, 35),
+        }
+    }
+
+    fn solarized_dark(plain: bool) -> Self {
+        Self {
+            plain,
+            accent: Color::Rgb(38, 139, 210),
+            accent_dim: Color::Rgb(29, 97, 125),
+            text: Color::Rgb(147, 161, 161),
+            dim: Color::Rgb(101, 123, 131),
+            good: Color::Rgb(133, 153, 0),
+            bad: Color::Rgb(220, 50, 47),
+            frame: Color::Rgb(7, 54, 66),
+            code_bg: Color::Rgb(0, 43, 54),
+            band_bg: Color::Rgb(7, 54, 66),
+        }
+    }
+
+    fn solarized_light(plain: bool) -> Self {
+        Self {
+            plain,
+            accent: Color::Rgb(38, 139, 210),
+            accent_dim: Color::Rgb(42, 161, 152),
+            text: Color::Rgb(88, 110, 117),
+            dim: Color::Rgb(131, 148, 150),
+            good: Color::Rgb(133, 153, 0),
+            bad: Color::Rgb(220, 50, 47),
+            frame: Color::Rgb(238, 232, 213),
+            code_bg: Color::Rgb(253, 246, 227),
+            band_bg: Color::Rgb(238, 232, 213),
+        }
+    }
+
+    fn dracula(plain: bool) -> Self {
+        Self {
+            plain,
+            accent: Color::Rgb(189, 147, 249),
+            accent_dim: Color::Rgb(132, 102, 173),
+            text: Color::Rgb(248, 248, 242),
+            dim: Color::Rgb(98, 114, 164),
+            good: Color::Rgb(80, 250, 123),
+            bad: Color::Rgb(255, 85, 85),
+            frame: Color::Rgb(68, 71, 90),
+            code_bg: Color::Rgb(40, 42, 54),
+            band_bg: Color::Rgb(52, 55, 70),
+        }
+    }
+
+    fn nord(plain: bool) -> Self {
+        Self {
+            plain,
+            accent: Color::Rgb(136, 192, 208),
+            accent_dim: Color::Rgb(94, 129, 172),
+            text: Color::Rgb(216, 222, 233),
+            dim: Color::Rgb(129, 142, 167),
+            good: Color::Rgb(163, 190, 140),
+            bad: Color::Rgb(191, 97, 106),
+            frame: Color::Rgb(76, 86, 106),
+            code_bg: Color::Rgb(46, 52, 64),
+            band_bg: Color::Rgb(59, 66, 82),
+        }
+    }
+
+    fn gruvbox_dark(plain: bool) -> Self {
+        Self {
+            plain,
+            accent: Color::Rgb(254, 128, 25),
+            accent_dim: Color::Rgb(214, 93, 14),
+            text: Color::Rgb(235, 219, 178),
+            dim: Color::Rgb(168, 153, 132),
+            good: Color::Rgb(184, 187, 38),
+            bad: Color::Rgb(251, 73, 52),
+            frame: Color::Rgb(80, 73, 69),
+            code_bg: Color::Rgb(40, 40, 40),
+            band_bg: Color::Rgb(60, 56, 54),
+        }
+    }
+
+    fn tokyo_night(plain: bool) -> Self {
+        Self {
+            plain,
+            accent: Color::Rgb(122, 162, 247),
+            accent_dim: Color::Rgb(61, 89, 161),
+            text: Color::Rgb(192, 202, 245),
+            dim: Color::Rgb(86, 95, 137),
+            good: Color::Rgb(158, 206, 106),
+            bad: Color::Rgb(247, 118, 142),
+            frame: Color::Rgb(59, 66, 97),
+            code_bg: Color::Rgb(26, 27, 38),
+            band_bg: Color::Rgb(36, 40, 59),
         }
     }
 
@@ -163,5 +259,33 @@ impl Theme {
             }
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_dispatches_built_in_palettes_and_plain_stays_plain() {
+        let palettes = [
+            ("dark", (96, 136, 255), (33, 38, 51)),
+            ("light", (35, 91, 210), (235, 239, 247)),
+            ("tsinghua", (167, 104, 190), (36, 27, 41)),
+            ("pku", (214, 79, 88), (42, 27, 28)),
+            ("solarized-dark", (38, 139, 210), (0, 43, 54)),
+            ("solarized-light", (38, 139, 210), (253, 246, 227)),
+            ("dracula", (189, 147, 249), (40, 42, 54)),
+            ("nord", (136, 192, 208), (46, 52, 64)),
+            ("gruvbox-dark", (254, 128, 25), (40, 40, 40)),
+            ("tokyo-night", (122, 162, 247), (26, 27, 38)),
+        ];
+
+        for (name, accent, code_bg) in palettes {
+            let theme = Theme::named(name, false);
+            assert_eq!(theme.accent, Color::Rgb(accent.0, accent.1, accent.2));
+            assert_eq!(theme.code_bg, Color::Rgb(code_bg.0, code_bg.1, code_bg.2));
+            assert_eq!(Theme::named(name, true).text(), Style::default());
+        }
     }
 }

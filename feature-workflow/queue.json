@@ -1,11 +1,10 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-29T00:45:44Z"
+    "last_updated": "2026-08-29T00:46:10Z"
   },
   "parents": [],
-  "active": [],
-  "pending": [
+  "active": [
     {
       "id": "feat-classic-editor-themes",
       "name": "Six classic editor themes",
@@ -14,10 +13,14 @@
       "workflow_mode": "lite",
       "risk_signals": [],
       "dependencies": [],
-      "status": "pending",
-      "created_at": "2026-08-29T00:45:44Z"
+      "status": "active",
+      "created_at": "2026-08-29T00:45:44Z",
+      "branch": "feature/feat-classic-editor-themes",
+      "worktree": "../zcode_tui-feat-classic-editor-themes",
+      "started_at": "2026-08-29T00:46:10Z"
     }
   ],
+  "pending": [],
   "blocked": [],
   "completed": [
     {

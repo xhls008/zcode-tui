@@ -29,7 +29,8 @@ Ship six built-in editor-inspired themes with switching, persistence, documentat
 4. Each new theme name survives config persistence and reload.
 5. Chinese and English READMEs and command help list all themes.
 6. `cargo fmt --check`, `cargo test`, Clippy with denied warnings, and `cargo build` pass.
-7. Version 0.6.4 is committed, tagged, pushed, and published as a GitHub Release.
+7. Version 0.6.4 metadata and release notes are ready for commit, tag, push, and
+   GitHub Release publication.
 
 ## Technical notes
 

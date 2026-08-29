@@ -4756,16 +4756,28 @@ fi"#
     fn set_theme(&mut self, requested: Option<&str>) {
         let Some(requested) = requested.filter(|value| *value != "list") else {
             self.push_system(&format!(
-                "themes: dark, light, tsinghua (清华紫), pku (北大红) · current: {}",
+                "themes: dark, light, tsinghua (清华紫), pku (北大红), solarized-dark, solarized-light, dracula, nord, gruvbox-dark, tokyo-night · current: {}",
                 self.theme_name
             ));
             self.status = format!("theme: {}", self.theme_name);
             return;
         };
         let requested = requested.to_ascii_lowercase();
-        if !matches!(requested.as_str(), "dark" | "light" | "tsinghua" | "pku") {
+        if !matches!(
+            requested.as_str(),
+            "dark"
+                | "light"
+                | "tsinghua"
+                | "pku"
+                | "solarized-dark"
+                | "solarized-light"
+                | "dracula"
+                | "nord"
+                | "gruvbox-dark"
+                | "tokyo-night"
+        ) {
             self.push_error(&format!(
-                "unknown theme {requested}; available: dark, light, tsinghua, pku"
+                "unknown theme {requested}; available: dark, light, tsinghua, pku, solarized-dark, solarized-light, dracula, nord, gruvbox-dark, tokyo-night"
             ));
             return;
         }
@@ -6580,26 +6592,6 @@ mod tests {
         // except where the physical terminal itself has fewer rows.
         assert_eq!(inline_viewport_rows(16), 9);
         assert_eq!(inline_viewport_rows(8), 7);
-    }
-
-    #[test]
-    fn built_in_theme_palettes_are_distinct_and_plain_stays_plain() {
-        let dark = Theme::named("dark", false);
-        let light = Theme::named("light", false);
-        let tsinghua = Theme::named("tsinghua", false);
-        let pku = Theme::named("pku", false);
-        assert_ne!((dark.accent(), dark.code()), (light.accent(), light.code()));
-        assert_ne!(
-            (dark.accent(), dark.code()),
-            (tsinghua.accent(), tsinghua.code())
-        );
-        assert_ne!(
-            (tsinghua.accent(), tsinghua.code()),
-            (pku.accent(), pku.code())
-        );
-        for name in ["dark", "light", "tsinghua", "pku"] {
-            assert_eq!(Theme::named(name, true).text(), Style::default());
-        }
     }
 
     #[test]

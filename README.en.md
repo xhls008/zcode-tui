@@ -35,7 +35,7 @@ palette, and editor workflows are handled locally.
 |---|---|
 | ZCode Linux x64 desktop | **3.8.1** (official feed) |
 | Official CLI kernel | **0.16.3** (bundled with ZCode 3.8.1) |
-| zcode-tui | **0.6.3** |
+| zcode-tui | **0.6.4** |
 | Protocol compatibility | 3.8.1/3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
 | Current source verification | 144/144 Rust tests; zero-warning Clippy; native build; verified 3.8.1 app-server handshake and TUI lifecycle |
 
@@ -65,10 +65,11 @@ for details.
 
 - Codex-like transcript layout: borderless scrollback, user message bands,
   assistant output as flat markdown, and a compact footer.
-- Built-in `dark`, `light`, `tsinghua` (Tsinghua Purple), and `pku` (PKU Red)
-  themes; `/theme` lists them and `/theme <name>` switches immediately and
-  persists the choice. Dark keeps the Zhipu-inspired cool gray palette with
-  GLM-blue accents.
+- Ten built-in themes: `dark`, `light`, `tsinghua` (Tsinghua Purple), `pku`
+  (PKU Red), plus the classic editor-inspired `solarized-dark`,
+  `solarized-light`, `dracula`, `nord`, `gruvbox-dark`, and `tokyo-night`;
+  `/theme` lists them and `/theme <name>` switches immediately and persists the
+  choice. Dark keeps the Zhipu-inspired cool gray palette with GLM-blue accents.
 - Markdown rendering via `pulldown-cmark`: headings, emphasis, inline code,
   fenced code blocks, lists, quotes, rules, and display-width aligned tables.
 - Syntax highlighting for fenced code blocks via `syntect`; `diff` fences and
@@ -342,7 +343,7 @@ text                         send through app-server (fallback: --prompt)
 /auth                        show local auth status
 /status                      show session, auth, and MCP overview
 /sessions                    open recent session picker
-/theme [list|dark|light|tsinghua|pku]
+/theme [list|dark|light|tsinghua|pku|solarized-dark|solarized-light|dracula|nord|gruvbox-dark|tokyo-night]
                              list or persistently switch built-in themes
 /agents                      inspect parent, Subagents, and Background work
                              (read-only; Tab/Enter/r; x cancels eligible work)
@@ -390,8 +391,8 @@ notify = off
 ```
 
 `NO_COLOR` and `--no-color` take precedence over theme colors.
-You can also run `/theme dark|light|tsinghua|pku`; the command updates only the
-`theme` line and preserves the rest of the file.
+You can also run `/theme <name>` for any built-in theme; the command updates
+only the `theme` line and preserves the rest of the file.
 
 Useful environment variables:
 
