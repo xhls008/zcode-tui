@@ -1,29 +1,10 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-29T11:29:45Z"
+    "last_updated": "2026-08-29T11:45:17Z"
   },
   "parents": [],
-  "active": [
-    {
-      "id": "feat-named-custom-themes",
-      "name": "Named custom themes",
-      "description": "Users can define, switch, persist, and restore validated named custom color themes through the existing theme registry.",
-      "priority": 90,
-      "workflow_mode": "deep",
-      "risk_signals": [
-        "multi_module",
-        "compatibility",
-        "data_consistency"
-      ],
-      "dependencies": [],
-      "status": "active",
-      "created_at": "2026-08-29T11:27:04Z",
-      "branch": "feature/feat-named-custom-themes",
-      "worktree": "../zcode_tui-feat-named-custom-themes",
-      "started_at": "2026-08-29T11:29:45Z"
-    }
-  ],
+  "active": [],
   "pending": [],
   "blocked": [],
   "completed": [
@@ -509,6 +490,46 @@
         "blocking_failures": [],
         "warnings": [],
         "report": "features/archive/done-feat-theme-registry-accessible-20260829/evidence/verification-report.md"
+      }
+    },
+    {
+      "id": "feat-named-custom-themes",
+      "name": "Named custom themes",
+      "status": "completed",
+      "completed_at": "2026-08-29T11:45:17Z",
+      "archive_path": "features/archive/done-feat-named-custom-themes-20260829",
+      "tag": "v0.6.6",
+      "merge_commit": "fc445b9d5ef9e93b803e3f5463f4366744ecfb70",
+      "workflow_mode": "deep",
+      "verification": {
+        "schema": "feature-verification/v1",
+        "feature_id": "feat-named-custom-themes",
+        "status": "passed",
+        "verified_at": "2026-08-29T19:42:14+08:00",
+        "tasks": {
+          "total": 7,
+          "completed": 7,
+          "incomplete": 0
+        },
+        "quality": {
+          "status": "passed",
+          "passed": 4,
+          "failed": 0
+        },
+        "tests": {
+          "status": "passed",
+          "passed": 159,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scenarios": {
+          "total": 8,
+          "passed": 8,
+          "failed": 0
+        },
+        "blocking_failures": [],
+        "warnings": [],
+        "report": "features/archive/done-feat-named-custom-themes-20260829/evidence/verification-report.md"
       }
     }
   ]
