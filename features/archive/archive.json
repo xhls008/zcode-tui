@@ -1,8 +1,8 @@
 {
   "schema": "feature-archive/v1",
   "meta": {
-    "last_updated": "2026-08-28T15:52:02Z",
-    "total_completed": 10
+    "last_updated": "2026-08-29T00:56:17Z",
+    "total_completed": 11
   },
   "records": [
     {
@@ -407,6 +407,46 @@
         "blocking_failures": [],
         "warnings": [],
         "report": "features/archive/done-feat-tsinghua-pku-themes-20260828/evidence/verification-report.md"
+      }
+    },
+    {
+      "id": "feat-classic-editor-themes",
+      "name": "Six classic editor themes",
+      "status": "completed",
+      "completed_at": "2026-08-29T00:56:17Z",
+      "archive_path": "features/archive/done-feat-classic-editor-themes-20260829",
+      "tag": "v0.6.4",
+      "merge_commit": "c3ada12efe8033e186c6d1a8996b5ce1b37fe5c7",
+      "workflow_mode": "lite",
+      "verification": {
+        "schema": "feature-verification/v1",
+        "feature_id": "feat-classic-editor-themes",
+        "status": "passed",
+        "verified_at": "2026-08-29T00:50:07Z",
+        "tasks": {
+          "total": 6,
+          "completed": 6,
+          "incomplete": 0
+        },
+        "quality": {
+          "status": "passed",
+          "passed": 4,
+          "failed": 0
+        },
+        "tests": {
+          "status": "passed",
+          "passed": 144,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scenarios": {
+          "total": 7,
+          "passed": 7,
+          "failed": 0
+        },
+        "blocking_failures": [],
+        "warnings": [],
+        "report": "features/archive/done-feat-classic-editor-themes-20260829/evidence/verification-report.md"
       }
     }
   ]
