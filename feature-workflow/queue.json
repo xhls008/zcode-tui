@@ -1,28 +1,10 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-29T05:55:59Z"
+    "last_updated": "2026-08-29T06:14:09Z"
   },
   "parents": [],
-  "active": [
-    {
-      "id": "feat-theme-registry-accessible",
-      "name": "Registry-backed accessible themes",
-      "description": "Ship v0.6.5 with one theme registry, an accessible palette, corrected themed colors, tests, docs, and release artifacts",
-      "priority": 90,
-      "workflow_mode": "deep",
-      "risk_signals": [
-        "multi_module",
-        "compatibility"
-      ],
-      "dependencies": [],
-      "status": "active",
-      "created_at": "2026-08-29T05:53:39Z",
-      "branch": "feature/feat-theme-registry-accessible",
-      "worktree": "/home/flybear/flybear_data/my_project/zcode_tui-feat-theme-registry-accessible",
-      "started_at": "2026-08-29T05:55:59Z"
-    }
-  ],
+  "active": [],
   "pending": [],
   "blocked": [],
   "completed": [
@@ -468,6 +450,46 @@
         "blocking_failures": [],
         "warnings": [],
         "report": "features/archive/done-feat-classic-editor-themes-20260829/evidence/verification-report.md"
+      }
+    },
+    {
+      "id": "feat-theme-registry-accessible",
+      "name": "Registry-backed accessible themes",
+      "status": "completed",
+      "completed_at": "2026-08-29T06:14:09Z",
+      "archive_path": "features/archive/done-feat-theme-registry-accessible-20260829",
+      "tag": "v0.6.5",
+      "merge_commit": "ce2240cc",
+      "workflow_mode": "deep",
+      "verification": {
+        "schema": "feature-verification/v1",
+        "feature_id": "feat-theme-registry-accessible",
+        "status": "passed",
+        "verified_at": "2026-08-29T06:07:47Z",
+        "tasks": {
+          "total": 7,
+          "completed": 7,
+          "incomplete": 0
+        },
+        "quality": {
+          "status": "passed",
+          "passed": 5,
+          "failed": 0
+        },
+        "tests": {
+          "status": "passed",
+          "passed": 152,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scenarios": {
+          "total": 8,
+          "passed": 8,
+          "failed": 0
+        },
+        "blocking_failures": [],
+        "warnings": [],
+        "report": "features/archive/done-feat-theme-registry-accessible-20260829/evidence/verification-report.md"
       }
     }
   ]
