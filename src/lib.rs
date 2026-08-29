@@ -15,6 +15,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+pub mod theme_registry;
+
 mod protocol;
 
 pub use protocol::*;
@@ -1572,7 +1574,9 @@ fn handle_mcp_command(command: &[String], config: &AppConfig) -> Result<String> 
 }
 
 pub fn help_text() -> &'static str {
-    r#"zcode-tui help
+    static HELP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HELP.get_or_init(|| {
+        r#"zcode-tui help
 
 keyboard shortcuts:
   Enter                        accept a suggestion or send the prompt
@@ -1635,7 +1639,7 @@ launch options:
                                ZCODE_TUI_IDE_CMD
   /mode [build|edit|plan|yolo] show or switch permission mode; applies live
                                on the app-server streaming path
-  /theme [list|dark|light|tsinghua|pku|solarized-dark|solarized-light|dracula|nord|gruvbox-dark|tokyo-night]
+  /theme [list|{theme_choices}]
                                list or persistently switch the color theme
   /model                       switch the session model (app-server path)
   /think                       cycle the thought level (app-server path)
@@ -1657,6 +1661,9 @@ launch options:
   /exit                        quit
 
 "#
+        .replace("{theme_choices}", &theme_registry::theme_name_list("|"))
+    })
+    .as_str()
 }
 
 // ---- markdown rendering (transcript) ----------------------------------
@@ -3077,6 +3084,7 @@ pub const UI_CONFIG_COLOR_KEYS: &[&str] = &[
     "frame",
     "code_bg",
     "band_bg",
+    "selection_fg",
 ];
 
 pub fn parse_hex_color(value: &str) -> Option<(u8, u8, u8)> {
@@ -3101,19 +3109,7 @@ pub fn parse_ui_config(content: &str) -> UiConfig {
         let (key, value) = (key.trim(), value.trim());
         if key == "theme" {
             let value = value.to_ascii_lowercase();
-            if matches!(
-                value.as_str(),
-                "dark"
-                    | "light"
-                    | "tsinghua"
-                    | "pku"
-                    | "solarized-dark"
-                    | "solarized-light"
-                    | "dracula"
-                    | "nord"
-                    | "gruvbox-dark"
-                    | "tokyo-night"
-            ) {
+            if theme_registry::is_built_in_theme(&value) {
                 config.theme = Some(value);
             }
         } else if key == "notify" {
@@ -3145,21 +3141,10 @@ pub fn ui_config_path() -> Option<PathBuf> {
 /// Persist one built-in theme while preserving the rest of the line-based
 /// config, including its newline convention.
 pub fn save_ui_theme_to(path: &Path, theme: &str) -> Result<()> {
-    if !matches!(
-        theme,
-        "dark"
-            | "light"
-            | "tsinghua"
-            | "pku"
-            | "solarized-dark"
-            | "solarized-light"
-            | "dracula"
-            | "nord"
-            | "gruvbox-dark"
-            | "tokyo-night"
-    ) {
+    if !theme_registry::is_built_in_theme(theme) {
         return Err(anyhow!(
-            "unknown theme {theme}; available: dark, light, tsinghua, pku, solarized-dark, solarized-light, dracula, nord, gruvbox-dark, tokyo-night"
+            "unknown theme {theme}; available: {}",
+            theme_registry::theme_name_list(", ")
         ));
     }
     let content = match fs::read_to_string(path) {

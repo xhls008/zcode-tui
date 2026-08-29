@@ -11,6 +11,7 @@ use zcode_tui::{
     open_kernel_db_ro, pad_display, parse_cli_args, parse_hex_color, parse_part_data,
     parse_prompt_summary, parse_ui_config, path_tail, recent_input_history, relative_age,
     save_mcp_config, save_ui_theme_to, single_line, slash_suggestions, strip_ansi,
+    theme_registry::{theme_name_list, theme_names, BUILT_IN_THEMES},
     tool_result_summary, user_home_dir_from, user_mcp_config_path_from, AppConfig, AuthStatus,
     InputAction, LeaderAction, McpServer, PartEvent, ToolChipStatus, KNOWN_DB_MIGRATIONS,
 };
@@ -1384,12 +1385,34 @@ fn help_no_longer_advertises_output_folding() {
 }
 
 #[test]
+fn theme_registry_drives_help_parsing_and_save_validation() {
+    let help = zcode_tui::help_text();
+    assert!(help.contains(&format!("/theme [list|{}]", theme_name_list("|"))));
+    assert_eq!(theme_names().count(), 11);
+
+    for registered in BUILT_IN_THEMES {
+        assert_eq!(
+            parse_ui_config(&format!("theme = {}", registered.name))
+                .theme
+                .as_deref(),
+            Some(registered.name)
+        );
+    }
+    assert!(parse_ui_config("theme = ultraviolet").theme.is_none());
+
+    let temp = tempfile::tempdir().unwrap();
+    let error = save_ui_theme_to(&temp.path().join("config"), "ultraviolet").unwrap_err();
+    assert!(error.to_string().contains(&theme_name_list(", ")));
+}
+
+#[test]
 fn ui_config_parses_colors_and_notify_ignoring_junk() {
     let config = parse_ui_config(
         "# comment\n\
          theme = light\n\
          theme = ultraviolet\n\
          accent = #ff8800\n\
+         selection_fg = #f0e442\n\
          accent = 不是颜色\n\
          unknown_key = #112233\n\
          notify = off\n\
@@ -1398,6 +1421,7 @@ fn ui_config_parses_colors_and_notify_ignoring_junk() {
     );
     // A later malformed value must not clobber an earlier good one.
     assert_eq!(config.colors.get("accent"), Some(&(0xff, 0x88, 0x00)));
+    assert_eq!(config.colors.get("selection_fg"), Some(&(0xf0, 0xe4, 0x42)));
     assert!(!config.colors.contains_key("unknown_key"));
     assert_eq!(config.notify, Some(false));
     assert_eq!(config.theme.as_deref(), Some("light"));
@@ -1434,22 +1458,13 @@ fn ui_theme_persistence_accepts_all_named_built_ins() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("config");
 
-    for theme in [
-        "tsinghua",
-        "pku",
-        "solarized-dark",
-        "solarized-light",
-        "dracula",
-        "nord",
-        "gruvbox-dark",
-        "tokyo-night",
-    ] {
-        save_ui_theme_to(&path, theme).unwrap();
+    for registered in BUILT_IN_THEMES {
+        save_ui_theme_to(&path, registered.name).unwrap();
         assert_eq!(
             parse_ui_config(&fs::read_to_string(&path).unwrap())
                 .theme
                 .as_deref(),
-            Some(theme)
+            Some(registered.name)
         );
     }
 }

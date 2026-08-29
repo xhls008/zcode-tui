@@ -1,10 +1,12 @@
 use ratatui::style::{Color, Style, Stylize};
+use zcode_tui::theme_registry::{built_in_theme, ThemePalette, DEFAULT_THEME};
 use zcode_tui::UiConfig;
 
 /// Zhipu-flavored theme in a Codex-like shell.
 #[derive(Clone, Copy)]
 pub(crate) struct Theme {
     pub(crate) plain: bool,
+    light: bool,
     accent: Color,
     accent_dim: Color,
     text: Color,
@@ -14,171 +16,33 @@ pub(crate) struct Theme {
     frame: Color,
     pub(crate) code_bg: Color,
     band_bg: Color,
+    selection_fg: Color,
 }
 
 impl Theme {
     pub(crate) fn named(name: &str, plain: bool) -> Self {
-        match name {
-            "light" => Self::light(plain),
-            "tsinghua" => Self::tsinghua(plain),
-            "pku" => Self::pku(plain),
-            "solarized-dark" => Self::solarized_dark(plain),
-            "solarized-light" => Self::solarized_light(plain),
-            "dracula" => Self::dracula(plain),
-            "nord" => Self::nord(plain),
-            "gruvbox-dark" => Self::gruvbox_dark(plain),
-            "tokyo-night" => Self::tokyo_night(plain),
-            _ => Self::zhipu(plain),
-        }
+        let palette = built_in_theme(name)
+            .or_else(|| built_in_theme(DEFAULT_THEME))
+            .expect("default theme is registered")
+            .palette;
+        Self::from_palette(palette, plain)
     }
 
-    pub(crate) fn zhipu(plain: bool) -> Self {
+    fn from_palette(palette: ThemePalette, plain: bool) -> Self {
+        let color = |(r, g, b)| Color::Rgb(r, g, b);
         Self {
             plain,
-            accent: Color::Rgb(96, 136, 255),
-            accent_dim: Color::Rgb(64, 88, 168),
-            text: Color::Rgb(222, 226, 234),
-            dim: Color::Rgb(122, 130, 146),
-            good: Color::Rgb(126, 200, 154),
-            bad: Color::Rgb(232, 116, 116),
-            frame: Color::Rgb(56, 62, 78),
-            code_bg: Color::Rgb(33, 38, 51),
-            band_bg: Color::Rgb(48, 52, 63),
-        }
-    }
-
-    fn light(plain: bool) -> Self {
-        Self {
-            plain,
-            accent: Color::Rgb(35, 91, 210),
-            accent_dim: Color::Rgb(76, 103, 160),
-            text: Color::Rgb(33, 38, 48),
-            dim: Color::Rgb(99, 108, 124),
-            good: Color::Rgb(31, 128, 76),
-            bad: Color::Rgb(190, 55, 55),
-            frame: Color::Rgb(168, 176, 191),
-            code_bg: Color::Rgb(235, 239, 247),
-            band_bg: Color::Rgb(225, 230, 240),
-        }
-    }
-
-    fn tsinghua(plain: bool) -> Self {
-        Self {
-            plain,
-            accent: Color::Rgb(167, 104, 190),
-            accent_dim: Color::Rgb(105, 62, 121),
-            text: Color::Rgb(235, 228, 238),
-            dim: Color::Rgb(154, 139, 160),
-            good: Color::Rgb(120, 194, 151),
-            bad: Color::Rgb(234, 120, 128),
-            frame: Color::Rgb(82, 63, 88),
-            code_bg: Color::Rgb(36, 27, 41),
-            band_bg: Color::Rgb(46, 34, 52),
-        }
-    }
-
-    fn pku(plain: bool) -> Self {
-        Self {
-            plain,
-            accent: Color::Rgb(214, 79, 88),
-            accent_dim: Color::Rgb(137, 48, 55),
-            text: Color::Rgb(239, 229, 228),
-            dim: Color::Rgb(159, 139, 138),
-            good: Color::Rgb(126, 194, 145),
-            bad: Color::Rgb(244, 121, 118),
-            frame: Color::Rgb(91, 61, 62),
-            code_bg: Color::Rgb(42, 27, 28),
-            band_bg: Color::Rgb(54, 34, 35),
-        }
-    }
-
-    fn solarized_dark(plain: bool) -> Self {
-        Self {
-            plain,
-            accent: Color::Rgb(38, 139, 210),
-            accent_dim: Color::Rgb(29, 97, 125),
-            text: Color::Rgb(147, 161, 161),
-            dim: Color::Rgb(101, 123, 131),
-            good: Color::Rgb(133, 153, 0),
-            bad: Color::Rgb(220, 50, 47),
-            frame: Color::Rgb(7, 54, 66),
-            code_bg: Color::Rgb(0, 43, 54),
-            band_bg: Color::Rgb(7, 54, 66),
-        }
-    }
-
-    fn solarized_light(plain: bool) -> Self {
-        Self {
-            plain,
-            accent: Color::Rgb(38, 139, 210),
-            accent_dim: Color::Rgb(42, 161, 152),
-            text: Color::Rgb(88, 110, 117),
-            dim: Color::Rgb(131, 148, 150),
-            good: Color::Rgb(133, 153, 0),
-            bad: Color::Rgb(220, 50, 47),
-            frame: Color::Rgb(238, 232, 213),
-            code_bg: Color::Rgb(253, 246, 227),
-            band_bg: Color::Rgb(238, 232, 213),
-        }
-    }
-
-    fn dracula(plain: bool) -> Self {
-        Self {
-            plain,
-            accent: Color::Rgb(189, 147, 249),
-            accent_dim: Color::Rgb(132, 102, 173),
-            text: Color::Rgb(248, 248, 242),
-            dim: Color::Rgb(98, 114, 164),
-            good: Color::Rgb(80, 250, 123),
-            bad: Color::Rgb(255, 85, 85),
-            frame: Color::Rgb(68, 71, 90),
-            code_bg: Color::Rgb(40, 42, 54),
-            band_bg: Color::Rgb(52, 55, 70),
-        }
-    }
-
-    fn nord(plain: bool) -> Self {
-        Self {
-            plain,
-            accent: Color::Rgb(136, 192, 208),
-            accent_dim: Color::Rgb(94, 129, 172),
-            text: Color::Rgb(216, 222, 233),
-            dim: Color::Rgb(129, 142, 167),
-            good: Color::Rgb(163, 190, 140),
-            bad: Color::Rgb(191, 97, 106),
-            frame: Color::Rgb(76, 86, 106),
-            code_bg: Color::Rgb(46, 52, 64),
-            band_bg: Color::Rgb(59, 66, 82),
-        }
-    }
-
-    fn gruvbox_dark(plain: bool) -> Self {
-        Self {
-            plain,
-            accent: Color::Rgb(254, 128, 25),
-            accent_dim: Color::Rgb(214, 93, 14),
-            text: Color::Rgb(235, 219, 178),
-            dim: Color::Rgb(168, 153, 132),
-            good: Color::Rgb(184, 187, 38),
-            bad: Color::Rgb(251, 73, 52),
-            frame: Color::Rgb(80, 73, 69),
-            code_bg: Color::Rgb(40, 40, 40),
-            band_bg: Color::Rgb(60, 56, 54),
-        }
-    }
-
-    fn tokyo_night(plain: bool) -> Self {
-        Self {
-            plain,
-            accent: Color::Rgb(122, 162, 247),
-            accent_dim: Color::Rgb(61, 89, 161),
-            text: Color::Rgb(192, 202, 245),
-            dim: Color::Rgb(86, 95, 137),
-            good: Color::Rgb(158, 206, 106),
-            bad: Color::Rgb(247, 118, 142),
-            frame: Color::Rgb(59, 66, 97),
-            code_bg: Color::Rgb(26, 27, 38),
-            band_bg: Color::Rgb(36, 40, 59),
+            light: palette.light,
+            accent: color(palette.accent),
+            accent_dim: color(palette.accent_dim),
+            text: color(palette.text),
+            dim: color(palette.dim),
+            good: color(palette.good),
+            bad: color(palette.bad),
+            frame: color(palette.frame),
+            code_bg: color(palette.code_bg),
+            band_bg: color(palette.band_bg),
+            selection_fg: color(palette.selection_fg),
         }
     }
 
@@ -238,7 +102,18 @@ impl Theme {
         if self.plain {
             Style::default().reversed()
         } else {
-            Style::default().fg(Color::Rgb(14, 18, 30)).bg(self.accent)
+            Style::default().fg(self.selection_fg).bg(self.accent)
+        }
+    }
+
+    /// Syntect uses a dark source palette. Darken its RGB values on light code
+    /// panels so the hue remains useful without low-contrast pastel text.
+    pub(crate) fn syntax_color(&self, r: u8, g: u8, b: u8) -> Color {
+        if self.light {
+            let darken = |channel| ((u16::from(channel) * 2) / 5) as u8;
+            Color::Rgb(darken(r), darken(g), darken(b))
+        } else {
+            Color::Rgb(r, g, b)
         }
     }
 
@@ -255,6 +130,7 @@ impl Theme {
                 "frame" => self.frame = color,
                 "code_bg" => self.code_bg = color,
                 "band_bg" => self.band_bg = color,
+                "selection_fg" => self.selection_fg = color,
                 _ => {}
             }
         }
@@ -265,27 +141,73 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zcode_tui::theme_registry::BUILT_IN_THEMES;
 
     #[test]
-    fn named_dispatches_built_in_palettes_and_plain_stays_plain() {
-        let palettes = [
-            ("dark", (96, 136, 255), (33, 38, 51)),
-            ("light", (35, 91, 210), (235, 239, 247)),
-            ("tsinghua", (167, 104, 190), (36, 27, 41)),
-            ("pku", (214, 79, 88), (42, 27, 28)),
-            ("solarized-dark", (38, 139, 210), (0, 43, 54)),
-            ("solarized-light", (38, 139, 210), (253, 246, 227)),
-            ("dracula", (189, 147, 249), (40, 42, 54)),
-            ("nord", (136, 192, 208), (46, 52, 64)),
-            ("gruvbox-dark", (254, 128, 25), (40, 40, 40)),
-            ("tokyo-night", (122, 162, 247), (26, 27, 38)),
-        ];
-
-        for (name, accent, code_bg) in palettes {
-            let theme = Theme::named(name, false);
-            assert_eq!(theme.accent, Color::Rgb(accent.0, accent.1, accent.2));
-            assert_eq!(theme.code_bg, Color::Rgb(code_bg.0, code_bg.1, code_bg.2));
-            assert_eq!(Theme::named(name, true).text(), Style::default());
+    fn registry_dispatches_every_palette_and_unknown_falls_back_to_dark() {
+        for registered in BUILT_IN_THEMES {
+            let theme = Theme::named(registered.name, false);
+            let (r, g, b) = registered.palette.accent;
+            assert_eq!(theme.accent, Color::Rgb(r, g, b));
+            let (r, g, b) = registered.palette.code_bg;
+            assert_eq!(theme.code_bg, Color::Rgb(r, g, b));
+            assert_eq!(Theme::named(registered.name, true).text(), Style::default());
         }
+        assert_eq!(
+            Theme::named("ultraviolet", false).accent,
+            Theme::named("dark", false).accent
+        );
+    }
+
+    #[test]
+    fn accessible_palette_and_selection_foregrounds_are_dispatched() {
+        let accessible = Theme::named("accessible", false);
+        assert_eq!(accessible.accent, Color::Rgb(0, 114, 178));
+        assert_eq!(accessible.accent_dim, Color::Rgb(230, 159, 0));
+        assert_eq!(accessible.good, Color::Rgb(0, 158, 115));
+        assert_eq!(accessible.frame, Color::Rgb(204, 121, 167));
+        assert_eq!(accessible.selection().fg, Some(Color::Rgb(255, 255, 255)));
+
+        for registered in BUILT_IN_THEMES {
+            let (r, g, b) = registered.palette.selection_fg;
+            assert_eq!(
+                Theme::named(registered.name, false).selection().fg,
+                Some(Color::Rgb(r, g, b))
+            );
+        }
+    }
+
+    #[test]
+    fn light_themes_adapt_dark_syntax_colors() {
+        let source = (216, 222, 233);
+        assert_eq!(
+            Theme::named("light", false).syntax_color(source.0, source.1, source.2),
+            Color::Rgb(86, 88, 93)
+        );
+        assert_eq!(
+            Theme::named("solarized-light", false).syntax_color(source.0, source.1, source.2),
+            Color::Rgb(86, 88, 93)
+        );
+        assert_eq!(
+            Theme::named("dark", false).syntax_color(source.0, source.1, source.2),
+            Color::Rgb(source.0, source.1, source.2)
+        );
+    }
+
+    #[test]
+    fn selection_foreground_can_be_overridden() {
+        let config = UiConfig {
+            colors: [("selection_fg".to_string(), (1, 2, 3))]
+                .into_iter()
+                .collect(),
+            ..UiConfig::default()
+        };
+        assert_eq!(
+            Theme::named("light", false)
+                .with_overrides(&config)
+                .selection()
+                .fg,
+            Some(Color::Rgb(1, 2, 3))
+        );
     }
 }

@@ -17,7 +17,7 @@ use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear as TerminalClear, ClearType};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style, Stylize};
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Widget, Wrap,
@@ -47,16 +47,17 @@ use zcode_tui::{
     parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age,
     resolve_update_download_url, rewind_failure, run_command, runtime_model_controls,
     save_ui_theme, select_update_feed_url, shorten_home, single_line, skyline_mode,
-    slash_suggestions_merged, spawn_streaming_command, tool_result_summary, usage_stats_params,
-    user_home_dir, user_mcp_config_path, v4_command_params, v4_conversation_subscribe_params,
-    v4_file_rewind_preview_params, v4_rewind_target, with_mcp_servers, with_runtime_model,
-    with_tool_policy, wrap_display, zcode_app_version_from_path, AppConfig, AppServerConn,
-    AppServerEvent, AppServerMessage, AppServerTurn, AppServerUnavailable, AuthStatus,
-    CheckpointEntry, DbBaseline, DebugLog, DiffRole, InputAction, InteractionRequest, JobEvent,
-    KernelCommand, LeaderAction, LiveToolChip, MdLineKind, ModelChoice, RewindPreview,
-    RewindTarget, SessionControls, SessionRow, SkylineMode, SpanRole, SteerOutcome, StreamEvent,
-    StreamingJob, TodoItem, ToolChipStatus, TurnDelta, UpdateFeed, V4CommandBase,
-    V4ConversationState,
+    slash_suggestions_merged, spawn_streaming_command,
+    theme_registry::{is_built_in_theme, theme_display_list, theme_name_list},
+    tool_result_summary, usage_stats_params, user_home_dir, user_mcp_config_path,
+    v4_command_params, v4_conversation_subscribe_params, v4_file_rewind_preview_params,
+    v4_rewind_target, with_mcp_servers, with_runtime_model, with_tool_policy, wrap_display,
+    zcode_app_version_from_path, AppConfig, AppServerConn, AppServerEvent, AppServerMessage,
+    AppServerTurn, AppServerUnavailable, AuthStatus, CheckpointEntry, DbBaseline, DebugLog,
+    DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction, LiveToolChip,
+    MdLineKind, ModelChoice, RewindPreview, RewindTarget, SessionControls, SessionRow, SkylineMode,
+    SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem, ToolChipStatus, TurnDelta,
+    UpdateFeed, V4CommandBase, V4ConversationState,
 };
 
 mod agents;
@@ -4756,28 +4757,18 @@ fi"#
     fn set_theme(&mut self, requested: Option<&str>) {
         let Some(requested) = requested.filter(|value| *value != "list") else {
             self.push_system(&format!(
-                "themes: dark, light, tsinghua (清华紫), pku (北大红), solarized-dark, solarized-light, dracula, nord, gruvbox-dark, tokyo-night · current: {}",
+                "themes: {} · current: {}",
+                theme_display_list(", "),
                 self.theme_name
             ));
             self.status = format!("theme: {}", self.theme_name);
             return;
         };
         let requested = requested.to_ascii_lowercase();
-        if !matches!(
-            requested.as_str(),
-            "dark"
-                | "light"
-                | "tsinghua"
-                | "pku"
-                | "solarized-dark"
-                | "solarized-light"
-                | "dracula"
-                | "nord"
-                | "gruvbox-dark"
-                | "tokyo-night"
-        ) {
+        if !is_built_in_theme(&requested) {
             self.push_error(&format!(
-                "unknown theme {requested}; available: dark, light, tsinghua, pku, solarized-dark, solarized-light, dracula, nord, gruvbox-dark, tokyo-night"
+                "unknown theme {requested}; available: {}",
+                theme_name_list(", ")
             ));
             return;
         }
@@ -5664,7 +5655,7 @@ fn log_to_items(
                         let mut style = md_style(theme, styled.kind, span.role);
                         if let Some((r, g, b)) = span.color {
                             if !theme.plain {
-                                style = style.fg(Color::Rgb(r, g, b));
+                                style = style.fg(theme.syntax_color(r, g, b));
                             }
                         }
                         used += span.text.as_str().width();
@@ -5681,7 +5672,7 @@ fn log_to_items(
                     let mut style = md_style(theme, styled.kind, span.role);
                     if let Some((r, g, b)) = span.color {
                         if !theme.plain {
-                            style = style.fg(Color::Rgb(r, g, b));
+                            style = style.fg(theme.syntax_color(r, g, b));
                         }
                     }
                     spans.push(Span::styled(span.text, style));
@@ -5887,9 +5878,7 @@ fn official_icon_frame(theme: &Theme) -> Style {
     if theme.plain {
         Style::default()
     } else {
-        Style::default()
-            .fg(Color::Rgb(88, 94, 108))
-            .bg(Color::Rgb(7, 9, 12))
+        theme.frame().bg(theme.code_bg)
     }
 }
 
@@ -5897,7 +5886,7 @@ fn official_icon_fill(theme: &Theme) -> Style {
     if theme.plain {
         Style::default()
     } else {
-        Style::default().bg(Color::Rgb(7, 9, 12))
+        Style::default().bg(theme.code_bg)
     }
 }
 
@@ -5905,9 +5894,7 @@ fn official_icon_mark(theme: &Theme) -> Style {
     if theme.plain {
         Style::default()
     } else {
-        Style::default()
-            .fg(Color::Rgb(170, 176, 188))
-            .bg(Color::Rgb(7, 9, 12))
+        theme.text().bold().bg(theme.code_bg)
     }
 }
 
@@ -6494,6 +6481,34 @@ fn display_cwd(config: &AppConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
+
+    #[test]
+    fn theme_command_lists_and_rejects_from_the_registry() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.set_theme(None);
+        assert!(state
+            .log
+            .last()
+            .expect("theme list")
+            .text
+            .contains(&theme_display_list(", ")));
+
+        state.set_theme(Some("ultraviolet"));
+        let error = &state.log.last().expect("unknown theme error").text;
+        assert!(error.contains("unknown theme ultraviolet"));
+        assert!(error.contains(&theme_name_list(", ")));
+    }
+
+    #[test]
+    fn official_icon_uses_theme_tokens() {
+        let light = Theme::named("light", false);
+        assert_eq!(official_icon_frame(&light).fg, light.frame().fg);
+        assert_eq!(official_icon_frame(&light).bg, Some(light.code_bg));
+        assert_eq!(official_icon_fill(&light).bg, Some(light.code_bg));
+        assert_eq!(official_icon_mark(&light).fg, light.text().fg);
+        assert_eq!(official_icon_mark(&light).bg, Some(light.code_bg));
+    }
 
     fn render_footer_text(state: &UiState, width: u16) -> String {
         let backend = ratatui::backend::TestBackend::new(width, 1);
@@ -6914,7 +6929,7 @@ mod tests {
 
     #[test]
     fn user_message_spaces_share_the_message_band_background() {
-        let theme = Theme::zhipu(false);
+        let theme = Theme::named("dark", false);
         let entry = LogLine::new(LogKind::User, "hello   world");
         let items = log_to_items(&entry, 40, &theme, SkylineMode::None);
         let area = Rect::new(0, 0, 40, items.len() as u16);
@@ -6930,7 +6945,7 @@ mod tests {
 
     #[test]
     fn assistant_output_has_symmetric_vertical_padding() {
-        let theme = Theme::zhipu(false);
+        let theme = Theme::named("dark", false);
         let entry = LogLine::new(LogKind::Assistant, "answer");
         let items = log_to_items(&entry, 40, &theme, SkylineMode::None);
 

@@ -35,9 +35,9 @@ palette, and editor workflows are handled locally.
 |---|---|
 | ZCode Linux x64 desktop | **3.8.1** (official feed) |
 | Official CLI kernel | **0.16.3** (bundled with ZCode 3.8.1) |
-| zcode-tui | **0.6.4** |
+| zcode-tui | **0.6.5** |
 | Protocol compatibility | 3.8.1/3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 144/144 Rust tests; zero-warning Clippy; native build; verified 3.8.1 app-server handshake and TUI lifecycle |
+| Current source verification | 152/152 Rust tests; zero-warning Clippy; native build; verified 3.8.1 app-server handshake and TUI lifecycle |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -65,15 +65,19 @@ for details.
 
 - Codex-like transcript layout: borderless scrollback, user message bands,
   assistant output as flat markdown, and a compact footer.
-- Ten built-in themes: `dark`, `light`, `tsinghua` (Tsinghua Purple), `pku`
+- Eleven built-in themes: `dark`, `light`, `tsinghua` (Tsinghua Purple), `pku`
   (PKU Red), plus the classic editor-inspired `solarized-dark`,
-  `solarized-light`, `dracula`, `nord`, `gruvbox-dark`, and `tokyo-night`;
-  `/theme` lists them and `/theme <name>` switches immediately and persists the
-  choice. Dark keeps the Zhipu-inspired cool gray palette with GLM-blue accents.
+  `solarized-light`, `dracula`, `nord`, `gruvbox-dark`, and `tokyo-night`, and
+  the Okabe-Ito color-vision-friendly `accessible`; `/theme` lists them and
+  `/theme <name>` switches immediately and persists the choice. Names, display
+  aliases, and complete palettes come from one registry, so adding a built-in
+  theme requires one registry entry. Dark keeps the Zhipu-inspired cool gray
+  palette with GLM-blue accents.
 - Markdown rendering via `pulldown-cmark`: headings, emphasis, inline code,
   fenced code blocks, lists, quotes, rules, and display-width aligned tables.
-- Syntax highlighting for fenced code blocks via `syntect`; `diff` fences and
-  `/diff` output are colored by line role.
+- Syntax highlighting for fenced code blocks via `syntect`; light themes
+  darken the dark-source syntax colors for readable contrast, while `diff`
+  fences and `/diff` output remain colored by line role.
 - Startup banner with kernel/TUI versions, cwd, mode, session, and auth status.
 - Optional official update check using the same Linux update feed as the
   desktop app.
@@ -343,7 +347,7 @@ text                         send through app-server (fallback: --prompt)
 /auth                        show local auth status
 /status                      show session, auth, and MCP overview
 /sessions                    open recent session picker
-/theme [list|dark|light|tsinghua|pku|solarized-dark|solarized-light|dracula|nord|gruvbox-dark|tokyo-night]
+/theme [list|dark|light|tsinghua|pku|solarized-dark|solarized-light|dracula|nord|gruvbox-dark|tokyo-night|accessible]
                              list or persistently switch built-in themes
 /agents                      inspect parent, Subagents, and Background work
                              (read-only; Tab/Enter/r; x cancels eligible work)
@@ -383,7 +387,7 @@ Line format:
 ```text
 # Built-in palette and optional token overrides.
 theme = dark
-# Tokens: accent accent_dim text dim good bad frame code_bg band_bg
+# Tokens: accent accent_dim text dim good bad frame code_bg band_bg selection_fg
 accent = #6088ff
 
 # Disable the >30s turn-complete terminal bell.

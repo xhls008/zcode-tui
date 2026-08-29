@@ -29,9 +29,9 @@
 |---|---|
 | ZCode Linux x64 桌面包 | **3.8.1**（官方 feed） |
 | 官方 CLI kernel | **0.16.3**（随 ZCode 3.8.1，版本未变） |
-| zcode-tui | **0.6.4** |
+| zcode-tui | **0.6.5** |
 | 协议兼容 | 3.8.1/3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 144/144；Clippy 零告警；原生 build 通过；3.8.1 app-server 握手和 TUI 启停正常 |
+| 当前源码验证 | Rust 测试 152/152；Clippy 零告警；原生 build 通过；3.8.1 app-server 握手和 TUI 启停正常 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -55,13 +55,16 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 - Codex 风布局：无边框流式 transcript，用户消息使用背景横条和 `›` 提示符，
   助手回复 `•` 开头平铺，会话信息横幅进 transcript，
   底部一行 dim 快捷键提示（运行任务时变 spinner 工作行）。
-- 内置十种主题：`dark`、`light`、`tsinghua`（清华紫）、`pku`（北大红），以及
+- 内置十一种主题：`dark`、`light`、`tsinghua`（清华紫）、`pku`（北大红），以及
   `solarized-dark`、`solarized-light`、`dracula`、`nord`、`gruvbox-dark`、
-  `tokyo-night` 六种经典编辑器风格；`/theme` 列出、`/theme <名称>` 即时切换并
-  持久化。默认 dark 使用 GLM 蓝单一强调色 + 冷灰中性色阶，行内代码蓝色文字、
+  `tokyo-night` 六种经典编辑器风格和 Okabe-Ito 色盲友好的 `accessible`；
+  `/theme` 列出、`/theme <名称>` 即时切换并持久化。主题名称、显示别名与完整
+  调色板由同一注册表驱动，新增内置主题只需在该注册表加一项。默认 dark 使用
+  GLM 蓝单一强调色 + 冷灰中性色阶，行内代码蓝色文字、
   引用绿色，语义绿/红只用于 diff 与错误；`--no-color` 或 `NO_COLOR` 时退化为无色。
 - **语法高亮**：围栏代码块按语言用 syntect 着色（Codex 同款方案，
-  base16-ocean 主题）+ dim 行号 gutter；` ```diff ` 围栏按
+  base16-ocean 主题）+ dim 行号 gutter；浅色主题会自动压暗 dark-source
+  高亮色，避免代码背景上的低对比度；` ```diff ` 围栏按
   +绿/−红/@@蓝 渲染（+/- 是 diff 专属语义，普通代码块只有行号）。
 - **启动欢迎框**：圆角信息框内同时保留最初的 Z 图标与官方 SVG 字标重制的
   黑白纯文本 ZCODE Logo，显示内核/TUI 版本、目录、mode、auth 及对应提示；
@@ -390,7 +393,7 @@ text                         通过 app-server 发送 prompt（不可用时回�
 /mcp status                  作为 /mcp status 转发给 ZCode
 /mode [build|edit|plan|yolo] 查看/切换权限模式（Shift+Tab 循环）；
                              app-server 流式路径下即刻作用于活跃会话
-/theme [list|dark|light|tsinghua|pku|solarized-dark|solarized-light|dracula|nord|gruvbox-dark|tokyo-night]
+/theme [list|dark|light|tsinghua|pku|solarized-dark|solarized-light|dracula|nord|gruvbox-dark|tokyo-night|accessible]
                              列出或持久化切换内置主题
 /model                       切换会话模型（浮层选择内核上报的候选；
                              app-server 流式路径）
@@ -485,7 +488,7 @@ ZCODE_FORCE_SYSTEM_NODE      wrapper：置 1 强制用系统 Node 运行内核
 # 主题 token 覆盖。默认是 GLM 蓝 + 冷灰终端风；官方不提供 TUI 主题，
 # 这里就把颜色控制权留给终端用户。
 theme = dark
-# 可配置 token：accent accent_dim text dim good bad frame code_bg band_bg
+# 可配置 token：accent accent_dim text dim good bad frame code_bg band_bg selection_fg
 accent = #6088ff
 # 关闭 >30s 回合完成铃（默认开启）
 notify = off
