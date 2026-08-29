@@ -11,7 +11,7 @@ use zcode_tui::{
     open_kernel_db_ro, pad_display, parse_cli_args, parse_hex_color, parse_part_data,
     parse_prompt_summary, parse_ui_config, path_tail, recent_input_history, relative_age,
     save_mcp_config, save_ui_theme_to, single_line, slash_suggestions, strip_ansi,
-    theme_registry::{theme_name_list, theme_names, BUILT_IN_THEMES},
+    theme_registry::{built_in_theme, theme_name_list, theme_names, BUILT_IN_THEMES},
     tool_result_summary, user_home_dir_from, user_mcp_config_path_from, AppConfig, AuthStatus,
     InputAction, LeaderAction, McpServer, PartEvent, ToolChipStatus, KNOWN_DB_MIGRATIONS,
 };
@@ -1467,6 +1467,104 @@ fn ui_theme_persistence_accepts_all_named_built_ins() {
             Some(registered.name)
         );
     }
+}
+
+#[test]
+fn ui_config_parses_multiple_custom_themes_with_base_fallbacks() {
+    let config = parse_ui_config(
+        "theme = my-light\n\
+         [[custom_themes]]\n\
+         name = \"my-light\"\n\
+         base = \"light\"\n\
+         accent = \"#ff8800\"\n\
+         [[custom_themes]]\n\
+         name = \"default-base\"\n\
+         selection_fg = \"#010203\"\n",
+    );
+
+    assert!(config.errors.is_empty());
+    assert_eq!(config.theme.as_deref(), Some("my-light"));
+    assert_eq!(config.themes.custom_themes().len(), 2);
+    let light = config.themes.palette("my-light").unwrap();
+    assert_eq!(light.accent, (255, 136, 0));
+    assert_eq!(light.text, built_in_theme("light").unwrap().palette.text);
+    assert!(light.light);
+    let default_base = config.themes.palette("default-base").unwrap();
+    assert_eq!(default_base.selection_fg, (1, 2, 3));
+    assert_eq!(
+        default_base.code_bg,
+        built_in_theme("dark").unwrap().palette.code_bg
+    );
+    assert!(!default_base.light);
+}
+
+#[test]
+fn ui_config_reports_invalid_custom_themes_and_keeps_valid_entries() {
+    let overlong = "a".repeat(33);
+    let config = parse_ui_config(&format!(
+        "[[custom_themes]]\nname = \"dark\"\n\
+         [[custom_themes]]\nname = \"\"\n\
+         [[custom_themes]]\nname = \"bad_name\"\n\
+         [[custom_themes]]\nname = \"{overlong}\"\n\
+         [[custom_themes]]\nname = \"bad-color\"\naccent = \"orange\"\n\
+         [[custom_themes]]\nname = \"bad-base\"\nbase = \"ultraviolet\"\n\
+         [[custom_themes]]\nname = \"valid-one\"\naccent = \"#112233\"\n\
+         [[custom_themes]]\nname = \"valid-one\"\n"
+    ));
+    let errors = config.errors.join("\n");
+
+    assert!(errors.contains("conflicts with a built-in theme"));
+    assert!(errors.contains("name cannot be empty"));
+    assert!(errors.contains("invalid custom theme name 'bad_name'"));
+    assert!(errors.contains("too long"));
+    assert!(errors.contains("invalid accent color"));
+    assert!(errors.contains("unknown custom theme base 'ultraviolet'"));
+    assert!(errors.contains("duplicate custom theme name 'valid-one'"));
+    assert_eq!(config.themes.custom_themes().len(), 1);
+    assert_eq!(
+        config.themes.palette("valid-one").unwrap().accent,
+        (17, 34, 51)
+    );
+}
+
+#[test]
+fn dynamic_registry_drives_custom_help_listing_persistence_and_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config");
+    let custom_section = "[[custom_themes]]\nname = \"my-theme\"\nbase = \"light\"\naccent = \"#ff8800\"\nselection_fg = \"#ffffff\"\n";
+    fs::write(&path, custom_section).unwrap();
+
+    let initial = parse_ui_config(custom_section);
+    let help = zcode_tui::help_text_with_registry(&initial.themes);
+    assert!(help.contains("|accessible|my-theme]"));
+    assert!(initial
+        .themes
+        .display_list(", ")
+        .contains("my-theme (custom)"));
+    assert!(initial.themes.name_list(", ").ends_with(", my-theme"));
+
+    save_ui_theme_to(&path, "my-theme").unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.starts_with("theme = my-theme\n[[custom_themes]]"));
+    assert!(saved.contains(custom_section));
+    let restored = parse_ui_config(&saved);
+    assert_eq!(restored.theme.as_deref(), Some("my-theme"));
+    assert_eq!(
+        restored.themes.palette("my-theme").unwrap().accent,
+        (255, 136, 0)
+    );
+}
+
+#[test]
+fn invalid_custom_theme_cannot_be_selected_and_does_not_rewrite_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config");
+    let original = "notify = off\n[[custom_themes]]\nname = \"broken\"\naccent = \"orange\"\n";
+    fs::write(&path, original).unwrap();
+
+    let error = save_ui_theme_to(&path, "broken").unwrap_err();
+    assert!(error.to_string().contains("unknown theme broken"));
+    assert_eq!(fs::read_to_string(path).unwrap(), original);
 }
 
 #[test]

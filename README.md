@@ -29,9 +29,9 @@
 |---|---|
 | ZCode Linux x64 桌面包 | **3.8.1**（官方 feed） |
 | 官方 CLI kernel | **0.16.3**（随 ZCode 3.8.1，版本未变） |
-| zcode-tui | **0.6.5** |
+| zcode-tui | **0.6.6** |
 | 协议兼容 | 3.8.1/3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 152/152；Clippy 零告警；原生 build 通过；3.8.1 app-server 握手和 TUI 启停正常 |
+| 当前源码验证 | Rust 测试 159/159；Clippy 零告警；原生 build 通过；3.8.1 app-server 握手和 TUI 启停正常 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -58,8 +58,9 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
 - 内置十一种主题：`dark`、`light`、`tsinghua`（清华紫）、`pku`（北大红），以及
   `solarized-dark`、`solarized-light`、`dracula`、`nord`、`gruvbox-dark`、
   `tokyo-night` 六种经典编辑器风格和 Okabe-Ito 色盲友好的 `accessible`；
-  `/theme` 列出、`/theme <名称>` 即时切换并持久化。主题名称、显示别名与完整
-  调色板由同一注册表驱动，新增内置主题只需在该注册表加一项。默认 dark 使用
+  另支持在配置中定义一套或多套命名自定义主题；`/theme` 统一列出内置和
+  `(custom)` 标记的自定义主题，`/theme <名称>` 即时切换并持久化。主题名称、
+  显示别名与完整调色板由同一动态注册表驱动。默认 dark 使用
   GLM 蓝单一强调色 + 冷灰中性色阶，行内代码蓝色文字、
   引用绿色，语义绿/红只用于 diff 与错误；`--no-color` 或 `NO_COLOR` 时退化为无色。
 - **语法高亮**：围栏代码块按语言用 syntect 着色（Codex 同款方案，
@@ -394,7 +395,7 @@ text                         通过 app-server 发送 prompt（不可用时回�
 /mode [build|edit|plan|yolo] 查看/切换权限模式（Shift+Tab 循环）；
                              app-server 流式路径下即刻作用于活跃会话
 /theme [list|dark|light|tsinghua|pku|solarized-dark|solarized-light|dracula|nord|gruvbox-dark|tokyo-night|accessible]
-                             列出或持久化切换内置主题
+                             列出或持久化切换内置/自定义主题
 /model                       切换会话模型（浮层选择内核上报的候选；
                              app-server 流式路径）
 /think                       循环思考级别 enabled/disabled（app-server）
@@ -481,8 +482,8 @@ ZCODE_FORCE_SYSTEM_NODE      wrapper：置 1 强制用系统 Node 运行内核
 
 ## 配置文件
 
-`~/.config/zcode-tui/config`（行式 `key = value`，`#` 行为注释；坏值和
-未知键静默忽略，配置永远不会阻止启动）：
+`~/.config/zcode-tui/config`（行式 `key = value`，`#` 行为注释；普通坏值和
+未知键忽略，自定义主题错误会在 TUI 中明确提示，但配置永远不会阻止启动）：
 
 ```text
 # 主题 token 覆盖。默认是 GLM 蓝 + 冷灰终端风；官方不提供 TUI 主题，
@@ -495,8 +496,36 @@ notify = off
 ```
 
 `NO_COLOR`/`--no-color` 优先级最高，设置后所有颜色（含自定义）全部退化。
-也可直接运行 `/theme <名称>` 切换上述任一内置主题；命令只更新 `theme` 行，
+也可直接运行 `/theme <名称>` 切换任一已注册主题；命令只更新顶层 `theme` 行，
 保留其余配置。
+
+### 自定义主题
+
+用一个或多个 `[[custom_themes]]` 定义命名主题。`base` 必须是上述十一种内置
+主题之一，省略时默认为 `dark`；未设置的 token 从 base 回退：
+
+```text
+theme = my-theme
+
+[[custom_themes]]
+name = "my-theme"
+base = "dark"
+accent = "#ff8800"
+selection_fg = "#ffffff"
+
+[[custom_themes]]
+name = "paper"
+base = "light"
+text = "#202020"
+code_bg = "#f4f1e8"
+```
+
+每套自定义主题都支持 `accent`、`accent_dim`、`text`、`dim`、`good`、`bad`、
+`frame`、`code_bg`、`band_bg`、`selection_fg`。名称须为 1–32 个小写字母/数字
+组成的片段，以单个连字符连接（如 `my-theme`），且不能与内置或其他自定义名称
+冲突。非法名称、base 或色值只会禁用对应主题并给出错误，不会改写配置；运行
+`/theme list` 查看带 `(custom)` 标记的主题，运行 `/theme my-theme` 切换并保存，
+重启后会自动恢复。
 
 ## 设计与参考
 

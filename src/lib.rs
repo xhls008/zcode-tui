@@ -736,7 +736,7 @@ pub fn command_catalog() -> &'static [CommandSpec] {
         },
         CommandSpec {
             command: "/theme",
-            summary: "list or switch built-in theme",
+            summary: "list or switch a registered theme",
             route: "local",
         },
         CommandSpec {
@@ -1575,8 +1575,12 @@ fn handle_mcp_command(command: &[String], config: &AppConfig) -> Result<String> 
 
 pub fn help_text() -> &'static str {
     static HELP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HELP.get_or_init(|| {
-        r#"zcode-tui help
+    HELP.get_or_init(|| help_text_with_registry(&theme_registry::ThemeRegistry::default()))
+        .as_str()
+}
+
+pub fn help_text_with_registry(registry: &theme_registry::ThemeRegistry) -> String {
+    r#"zcode-tui help
 
 keyboard shortcuts:
   Enter                        accept a suggestion or send the prompt
@@ -1661,9 +1665,7 @@ launch options:
   /exit                        quit
 
 "#
-        .replace("{theme_choices}", &theme_registry::theme_name_list("|"))
-    })
-    .as_str()
+    .replace("{theme_choices}", &registry.name_list("|"))
 }
 
 // ---- markdown rendering (transcript) ----------------------------------
@@ -3062,16 +3064,19 @@ pub fn history_search(history: &[String], query: &str, limit: usize) -> Vec<Stri
         .collect()
 }
 
-/// User config: theme token overrides plus the notify switch.
+/// User config: theme registry, global token overrides, and the notify switch.
 /// Parsing never fails — bad lines fall back to defaults so startup cannot
 /// break.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UiConfig {
-    /// Built-in palette name. Unknown values are ignored while parsing.
+    /// Built-in or valid custom palette name. Unknown values are ignored.
     pub theme: Option<String>,
+    pub themes: theme_registry::ThemeRegistry,
     pub colors: BTreeMap<String, (u8, u8, u8)>,
     /// `notify = off` silences the >30s turn-complete terminal bell.
     pub notify: Option<bool>,
+    /// Invalid custom sections are ignored and reported without blocking startup.
+    pub errors: Vec<String>,
 }
 
 pub const UI_CONFIG_COLOR_KEYS: &[&str] = &[
@@ -3096,22 +3101,83 @@ pub fn parse_hex_color(value: &str) -> Option<(u8, u8, u8)> {
     Some((channel(0..2)?, channel(2..4)?, channel(4..6)?))
 }
 
+#[derive(Default)]
+struct CustomThemeSection {
+    line: usize,
+    values: BTreeMap<String, String>,
+}
+
+fn unquote_config_value(value: &str) -> &str {
+    let value = value.trim();
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    }
+}
+
+fn finish_custom_theme(config: &mut UiConfig, section: CustomThemeSection) {
+    let name = section
+        .values
+        .get("name")
+        .map(|value| unquote_config_value(value))
+        .unwrap_or_default();
+    let base = section
+        .values
+        .get("base")
+        .map(|value| unquote_config_value(value))
+        .unwrap_or(theme_registry::DEFAULT_THEME);
+    let mut colors = BTreeMap::new();
+    for key in UI_CONFIG_COLOR_KEYS {
+        let Some(raw) = section.values.get(*key) else {
+            continue;
+        };
+        let Some(rgb) = parse_hex_color(unquote_config_value(raw)) else {
+            let label = if name.is_empty() { "<unnamed>" } else { name };
+            config.errors.push(format!(
+                "custom theme '{label}' at line {} has invalid {key} color '{raw}'",
+                section.line
+            ));
+            return;
+        };
+        colors.insert((*key).to_string(), rgb);
+    }
+    if let Err(error) = config.themes.add_custom_theme(name, base, &colors) {
+        config
+            .errors
+            .push(format!("custom theme at line {}: {error}", section.line));
+    }
+}
+
 pub fn parse_ui_config(content: &str) -> UiConfig {
     let mut config = UiConfig::default();
-    for line in content.lines() {
+    let mut theme_candidates = Vec::new();
+    let mut custom = None;
+    for (index, line) in content.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line == "[[custom_themes]]" {
+            if let Some(section) = custom.take() {
+                finish_custom_theme(&mut config, section);
+            }
+            custom = Some(CustomThemeSection {
+                line: index + 1,
+                ..CustomThemeSection::default()
+            });
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
-        if key == "theme" {
-            let value = value.to_ascii_lowercase();
-            if theme_registry::is_built_in_theme(&value) {
-                config.theme = Some(value);
+        if let Some(section) = custom.as_mut() {
+            if key == "name" || key == "base" || UI_CONFIG_COLOR_KEYS.contains(&key) {
+                section.values.insert(key.to_string(), value.to_string());
             }
+        } else if key == "theme" {
+            theme_candidates.push(unquote_config_value(value).to_ascii_lowercase());
         } else if key == "notify" {
             config.notify = match value.to_ascii_lowercase().as_str() {
                 "on" | "true" | "1" => Some(true),
@@ -3122,6 +3188,14 @@ pub fn parse_ui_config(content: &str) -> UiConfig {
             if let Some(rgb) = parse_hex_color(value) {
                 config.colors.insert(key.to_string(), rgb);
             }
+        }
+    }
+    if let Some(section) = custom {
+        finish_custom_theme(&mut config, section);
+    }
+    for candidate in theme_candidates {
+        if config.themes.contains(&candidate) {
+            config.theme = Some(candidate);
         }
     }
     config
@@ -3138,15 +3212,9 @@ pub fn ui_config_path() -> Option<PathBuf> {
         .or_else(|| user_home_dir().map(|home| ui_config_path_from(&home)))
 }
 
-/// Persist one built-in theme while preserving the rest of the line-based
+/// Persist one registered theme while preserving the rest of the line-based
 /// config, including its newline convention.
 pub fn save_ui_theme_to(path: &Path, theme: &str) -> Result<()> {
-    if !theme_registry::is_built_in_theme(theme) {
-        return Err(anyhow!(
-            "unknown theme {theme}; available: {}",
-            theme_registry::theme_name_list(", ")
-        ));
-    }
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -3154,15 +3222,31 @@ pub fn save_ui_theme_to(path: &Path, theme: &str) -> Result<()> {
             return Err(error).with_context(|| format!("failed to read {}", path.display()))
         }
     };
+    let config = parse_ui_config(&content);
+    if !config.themes.contains(theme) {
+        return Err(anyhow!(
+            "unknown theme {theme}; available: {}",
+            config.themes.name_list(", ")
+        ));
+    }
     let newline = if content.contains("\r\n") {
         "\r\n"
     } else {
         "\n"
     };
     let mut replaced = false;
+    let mut in_custom_themes = false;
     let mut lines = Vec::new();
     for line in content.lines() {
-        let is_theme = !line.trim_start().starts_with('#')
+        if line.trim() == "[[custom_themes]]" {
+            if !replaced {
+                lines.push(format!("theme = {theme}"));
+                replaced = true;
+            }
+            in_custom_themes = true;
+        }
+        let is_theme = !in_custom_themes
+            && !line.trim_start().starts_with('#')
             && line
                 .split_once('=')
                 .is_some_and(|(key, _)| key.trim() == "theme");

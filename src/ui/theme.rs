@@ -1,5 +1,7 @@
 use ratatui::style::{Color, Style, Stylize};
-use zcode_tui::theme_registry::{built_in_theme, ThemePalette, DEFAULT_THEME};
+#[cfg(test)]
+use zcode_tui::theme_registry::built_in_theme;
+use zcode_tui::theme_registry::{ThemePalette, DEFAULT_THEME};
 use zcode_tui::UiConfig;
 
 /// Zhipu-flavored theme in a Codex-like shell.
@@ -20,12 +22,22 @@ pub(crate) struct Theme {
 }
 
 impl Theme {
+    #[cfg(test)]
     pub(crate) fn named(name: &str, plain: bool) -> Self {
         let palette = built_in_theme(name)
             .or_else(|| built_in_theme(DEFAULT_THEME))
             .expect("default theme is registered")
             .palette;
         Self::from_palette(palette, plain)
+    }
+
+    pub(crate) fn configured(name: &str, config: &UiConfig, plain: bool) -> Self {
+        let palette = config
+            .themes
+            .palette(name)
+            .or_else(|| config.themes.palette(DEFAULT_THEME))
+            .expect("default theme is registered");
+        Self::from_palette(palette, plain).with_overrides(config)
     }
 
     fn from_palette(palette: ThemePalette, plain: bool) -> Self {
@@ -209,5 +221,16 @@ mod tests {
                 .fg,
             Some(Color::Rgb(1, 2, 3))
         );
+    }
+
+    #[test]
+    fn configured_theme_uses_custom_palette_then_global_overrides() {
+        let config = zcode_tui::parse_ui_config(
+            "theme = my-theme\ntext = #010203\n[[custom_themes]]\nname = \"my-theme\"\nbase = \"light\"\naccent = \"#ff8800\"\n",
+        );
+        let theme = Theme::configured("my-theme", &config, false);
+        assert_eq!(theme.accent, Color::Rgb(255, 136, 0));
+        assert_eq!(theme.text, Color::Rgb(1, 2, 3));
+        assert!(theme.light);
     }
 }

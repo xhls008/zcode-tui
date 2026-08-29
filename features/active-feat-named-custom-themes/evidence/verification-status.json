@@ -1,0 +1,30 @@
+{
+  "schema": "feature-verification/v1",
+  "feature_id": "feat-named-custom-themes",
+  "status": "passed",
+  "verified_at": "2026-08-29T19:42:14+08:00",
+  "tasks": {
+    "total": 7,
+    "completed": 7,
+    "incomplete": 0
+  },
+  "quality": {
+    "status": "passed",
+    "passed": 4,
+    "failed": 0
+  },
+  "tests": {
+    "status": "passed",
+    "passed": 159,
+    "failed": 0,
+    "skipped": 0
+  },
+  "scenarios": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0
+  },
+  "blocking_failures": [],
+  "warnings": [],
+  "report": "features/active-feat-named-custom-themes/evidence/verification-report.md"
+}

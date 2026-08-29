@@ -36,19 +36,18 @@ use zcode_tui::{
     context_watermark_warn, conversation_target, db_baseline, db_schema_supported,
     detect_auth_status, diff_line_role, discover_zcode_app_dir, encode_interaction_reply,
     encode_runtime_preferences_reply, env_is_headless, extract_file_mentions, file_suggestions,
-    format_context_watermark, git_diff_command, handle_local_command, help_text, history_search,
-    is_newer_version, kernel_config_path_from, kernel_db_path_from, latest_assistant_text,
-    latest_reasoning, latest_session_for_dir, leader_action_for_key, list_recent_sessions,
-    live_tool_chips, load_mcp_config, load_ui_config, login_command, markdown_lines,
-    mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence, pad_display,
-    parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
+    format_context_watermark, git_diff_command, handle_local_command, help_text_with_registry,
+    history_search, is_newer_version, kernel_config_path_from, kernel_db_path_from,
+    latest_assistant_text, latest_reasoning, latest_session_for_dir, leader_action_for_key,
+    list_recent_sessions, live_tool_chips, load_mcp_config, load_ui_config, login_command,
+    markdown_lines, mcp_config_path, mcp_servers_param, open_kernel_db_ro, osc52_copy_sequence,
+    pad_display, parse_apply_file_rewind, parse_cli_args, parse_interaction_request,
     parse_kernel_slash_commands, parse_prompt_summary, parse_resume_messages, parse_rewind_preview,
     parse_session_list, parse_steer_result, parse_stream_event, parse_todos, parse_update_feed,
     parse_v4_command_ack, prompt_command_for, recent_input_history, relative_age,
     resolve_update_download_url, rewind_failure, run_command, runtime_model_controls,
     save_ui_theme, select_update_feed_url, shorten_home, single_line, skyline_mode,
-    slash_suggestions_merged, spawn_streaming_command,
-    theme_registry::{is_built_in_theme, theme_display_list, theme_name_list},
+    slash_suggestions_merged, spawn_streaming_command, theme_registry::ThemeRegistry,
     tool_result_summary, usage_stats_params, user_home_dir, user_mcp_config_path,
     v4_command_params, v4_conversation_subscribe_params, v4_file_rewind_preview_params,
     v4_rewind_target, with_mcp_servers, with_runtime_model, with_tool_policy, wrap_display,
@@ -57,7 +56,7 @@ use zcode_tui::{
     DiffRole, InputAction, InteractionRequest, JobEvent, KernelCommand, LeaderAction, LiveToolChip,
     MdLineKind, ModelChoice, RewindPreview, RewindTarget, SessionControls, SessionRow, SkylineMode,
     SpanRole, SteerOutcome, StreamEvent, StreamingJob, TodoItem, ToolChipStatus, TurnDelta,
-    UpdateFeed, V4CommandBase, V4ConversationState,
+    UiConfig, UpdateFeed, V4CommandBase, V4ConversationState,
 };
 
 mod agents;
@@ -135,7 +134,7 @@ fn inline_viewport_rows(terminal_rows: u16) -> u16 {
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        println!("{}", help_text());
+        println!("{}", help_text_with_registry(&load_ui_config().themes));
         return Ok(());
     }
     if args.iter().any(|arg| arg == "-V" || arg == "--version") {
@@ -749,6 +748,7 @@ struct UiState {
     zcode_bin: String,
     theme: Theme,
     theme_name: String,
+    themes: ThemeRegistry,
     kernel_version: Option<String>,
     /// A prompt has completed in this run, so later prompts auto --continue.
     session_active: bool,
@@ -955,16 +955,18 @@ impl UiState {
             .clone()
             .unwrap_or_else(|| "dark".to_string());
         let notify_enabled = ui_config.notify != Some(false);
+        let config_errors = ui_config.errors.clone();
         let app_mode = if app_server_enabled(|key| env::var(key).ok()) {
             AppMode::Ready
         } else {
             AppMode::Off
         };
-        Self {
+        let mut state = Self {
             config,
             zcode_bin,
-            theme: Theme::named(&theme_name, plain).with_overrides(&ui_config),
+            theme: Theme::configured(&theme_name, &ui_config, plain),
             theme_name,
+            themes: ui_config.themes.clone(),
             kernel_version: None,
             session_active: false,
             auth_status,
@@ -1022,7 +1024,11 @@ impl UiState {
             debug_log: DebugLog::from_env(),
             notify_enabled,
             browser_route_noted: false,
+        };
+        for error in config_errors {
+            state.push_error(&format!("UI config: {error}"));
         }
+        state
     }
 
     /// State-transition line into the ZCODE_TUI_LOG debug log (no-op when
@@ -4755,30 +4761,44 @@ fi"#
     }
 
     fn set_theme(&mut self, requested: Option<&str>) {
+        self.set_theme_with(requested, load_ui_config, save_ui_theme);
+    }
+
+    fn set_theme_with<L, S>(&mut self, requested: Option<&str>, load: L, save: S)
+    where
+        L: Fn() -> UiConfig,
+        S: Fn(&str) -> anyhow::Result<()>,
+    {
+        let ui_config = load();
+        self.themes = ui_config.themes.clone();
+        for error in &ui_config.errors {
+            self.push_error(&format!("UI config: {error}"));
+        }
         let Some(requested) = requested.filter(|value| *value != "list") else {
             self.push_system(&format!(
                 "themes: {} · current: {}",
-                theme_display_list(", "),
+                self.themes.display_list(", "),
                 self.theme_name
             ));
             self.status = format!("theme: {}", self.theme_name);
             return;
         };
         let requested = requested.to_ascii_lowercase();
-        if !is_built_in_theme(&requested) {
+        if !self.themes.contains(&requested) {
             self.push_error(&format!(
                 "unknown theme {requested}; available: {}",
-                theme_name_list(", ")
+                self.themes.name_list(", ")
             ));
             return;
         }
-        if let Err(error) = save_ui_theme(&requested) {
+        if let Err(error) = save(&requested) {
             self.push_error(&format!("failed to save theme: {error:#}"));
             return;
         }
-        let ui_config = load_ui_config();
+        let ui_config = load();
+        self.themes = ui_config.themes.clone();
         let plain = self.config.no_color || env::var_os("NO_COLOR").is_some();
-        self.theme = Theme::named(&requested, plain).with_overrides(&ui_config);
+        self.theme = Theme::configured(&requested, &ui_config, plain);
         self.theme_name = requested;
         self.push_system(&format!("theme switched to {}", self.theme_name));
         self.status = format!("theme: {}", self.theme_name);
@@ -6399,6 +6419,7 @@ fn render_history_search(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
 
 fn render_help_modal(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
     let theme = &state.theme;
+    let help_text = help_text_with_registry(&state.themes);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -6409,7 +6430,7 @@ fn render_help_modal(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
         )));
     let content_width = area.width.saturating_sub(2);
     let viewport_height = area.height.saturating_sub(2) as usize;
-    let wrapped_lines = help_text()
+    let wrapped_lines = help_text
         .lines()
         .map(|line| {
             UnicodeWidthStr::width(line)
@@ -6425,7 +6446,7 @@ fn render_help_modal(frame: &mut Frame<'_>, area: Rect, state: &mut UiState) {
     } else {
         state.help_scroll = state.help_scroll.min(max_scroll);
     }
-    let help = Paragraph::new(Text::styled(help_text(), theme.text()))
+    let help = Paragraph::new(Text::styled(help_text, theme.text()))
         .block(block)
         .wrap(Wrap { trim: false })
         .scroll((state.help_scroll, 0));
@@ -6492,12 +6513,44 @@ mod tests {
             .last()
             .expect("theme list")
             .text
-            .contains(&theme_display_list(", ")));
+            .contains(&state.themes.display_list(", ")));
 
         state.set_theme(Some("ultraviolet"));
         let error = &state.log.last().expect("unknown theme error").text;
         assert!(error.contains("unknown theme ultraviolet"));
-        assert!(error.contains(&theme_name_list(", ")));
+        assert!(error.contains(&state.themes.name_list(", ")));
+    }
+
+    #[test]
+    fn theme_command_lists_switches_persists_and_restores_custom_theme() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config");
+        fs::write(
+            &path,
+            "theme = dark\n[[custom_themes]]\nname = \"my-theme\"\nbase = \"light\"\naccent = \"#ff8800\"\n",
+        )
+        .unwrap();
+        let load = || zcode_tui::parse_ui_config(&fs::read_to_string(&path).unwrap());
+        let save = |theme: &str| zcode_tui::save_ui_theme_to(&path, theme);
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+
+        state.set_theme_with(None, load, save);
+        assert!(state.log.last().unwrap().text.contains("my-theme (custom)"));
+        state.set_theme_with(Some("my-theme"), load, save);
+        assert_eq!(state.theme_name, "my-theme");
+        assert_eq!(
+            state.themes.palette("my-theme").unwrap().accent,
+            (255, 136, 0)
+        );
+
+        let restored = load();
+        assert_eq!(restored.theme.as_deref(), Some("my-theme"));
+        assert_eq!(
+            Theme::configured(restored.theme.as_deref().unwrap(), &restored, false)
+                .accent()
+                .fg,
+            Some(Color::Rgb(255, 136, 0))
+        );
     }
 
     #[test]

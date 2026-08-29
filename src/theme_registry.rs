@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 pub type Rgb = (u8, u8, u8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +22,18 @@ pub struct BuiltInTheme {
     pub name: &'static str,
     pub display_alias: Option<&'static str>,
     pub palette: ThemePalette,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomTheme {
+    pub name: String,
+    pub base: &'static str,
+    pub palette: ThemePalette,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThemeRegistry {
+    custom: Vec<CustomTheme>,
 }
 
 pub const DEFAULT_THEME: &str = "dark";
@@ -244,6 +258,115 @@ pub fn theme_display_list(separator: &str) -> String {
         .join(separator)
 }
 
+impl ThemeRegistry {
+    pub fn add_custom_theme(
+        &mut self,
+        name: &str,
+        base: &str,
+        colors: &BTreeMap<String, Rgb>,
+    ) -> Result<(), String> {
+        validate_custom_theme_name(name)?;
+        if is_built_in_theme(name) {
+            return Err(format!(
+                "custom theme name '{name}' conflicts with a built-in theme"
+            ));
+        }
+        if self.custom.iter().any(|theme| theme.name == name) {
+            return Err(format!("duplicate custom theme name '{name}'"));
+        }
+        let registered_base = built_in_theme(base)
+            .ok_or_else(|| format!("unknown custom theme base '{base}'; base must be built-in"))?;
+        self.custom.push(CustomTheme {
+            name: name.to_string(),
+            base: registered_base.name,
+            palette: palette_with_overrides(registered_base.palette, colors),
+        });
+        Ok(())
+    }
+
+    pub fn palette(&self, name: &str) -> Option<ThemePalette> {
+        built_in_theme(name).map(|theme| theme.palette).or_else(|| {
+            self.custom
+                .iter()
+                .find(|theme| theme.name == name)
+                .map(|theme| theme.palette)
+        })
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.palette(name).is_some()
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        theme_names()
+            .map(str::to_string)
+            .chain(self.custom.iter().map(|theme| theme.name.clone()))
+            .collect()
+    }
+
+    pub fn name_list(&self, separator: &str) -> String {
+        self.names().join(separator)
+    }
+
+    pub fn display_list(&self, separator: &str) -> String {
+        let mut display = theme_display_list(separator);
+        for theme in &self.custom {
+            display.push_str(separator);
+            display.push_str(&format!("{} (custom)", theme.name));
+        }
+        display
+    }
+
+    pub fn custom_themes(&self) -> &[CustomTheme] {
+        &self.custom
+    }
+}
+
+fn validate_custom_theme_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("custom theme name cannot be empty".to_string());
+    }
+    if name.len() > 32 {
+        return Err(format!(
+            "custom theme name '{name}' is too long (maximum 32 characters)"
+        ));
+    }
+    let valid = name.split('-').all(|part| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    });
+    if !valid {
+        return Err(format!(
+            "invalid custom theme name '{name}'; use 1-32 lowercase letters, digits, and single hyphens"
+        ));
+    }
+    Ok(())
+}
+
+fn palette_with_overrides(
+    mut palette: ThemePalette,
+    colors: &BTreeMap<String, Rgb>,
+) -> ThemePalette {
+    for (key, value) in colors {
+        match key.as_str() {
+            "accent" => palette.accent = *value,
+            "accent_dim" => palette.accent_dim = *value,
+            "text" => palette.text = *value,
+            "dim" => palette.dim = *value,
+            "good" => palette.good = *value,
+            "bad" => palette.bad = *value,
+            "frame" => palette.frame = *value,
+            "code_bg" => palette.code_bg = *value,
+            "band_bg" => palette.band_bg = *value,
+            "selection_fg" => palette.selection_fg = *value,
+            _ => {}
+        }
+    }
+    palette
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -291,5 +414,26 @@ mod tests {
                 theme.name
             );
         }
+    }
+
+    #[test]
+    fn dynamic_registry_extends_built_ins_without_a_second_name_source() {
+        let mut registry = ThemeRegistry::default();
+        registry
+            .add_custom_theme(
+                "my-theme",
+                "light",
+                &[("accent".to_string(), (255, 136, 0))]
+                    .into_iter()
+                    .collect(),
+            )
+            .unwrap();
+
+        assert_eq!(registry.names().len(), BUILT_IN_THEMES.len() + 1);
+        assert!(registry.contains("my-theme"));
+        assert_eq!(registry.palette("my-theme").unwrap().accent, (255, 136, 0));
+        assert!(registry.palette("my-theme").unwrap().light);
+        assert!(registry.display_list(", ").contains("my-theme (custom)"));
+        assert!(registry.name_list("|").ends_with("|my-theme"));
     }
 }
