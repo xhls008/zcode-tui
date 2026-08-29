@@ -1,0 +1,8 @@
+{
+  "schema": "feature-review/v1",
+  "feature_id": "feat-theme-registry-accessible",
+  "status": "passed",
+  "score": 92,
+  "reviewed_at": "2026-08-29T06:03:00Z",
+  "blocking_issues": []
+}

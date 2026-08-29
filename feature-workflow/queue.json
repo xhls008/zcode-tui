@@ -1,11 +1,26 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-29T00:56:17Z"
+    "last_updated": "2026-08-29T05:53:39Z"
   },
   "parents": [],
   "active": [],
-  "pending": [],
+  "pending": [
+    {
+      "id": "feat-theme-registry-accessible",
+      "name": "Registry-backed accessible themes",
+      "description": "Ship v0.6.5 with one theme registry, an accessible palette, corrected themed colors, tests, docs, and release artifacts",
+      "priority": 90,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "multi_module",
+        "compatibility"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "created_at": "2026-08-29T05:53:39Z"
+    }
+  ],
   "blocked": [],
   "completed": [
     {
