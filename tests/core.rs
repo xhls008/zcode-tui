@@ -2544,7 +2544,7 @@ fn send_attachments_map_mentions_by_extension() {
     assert_eq!(file["mimeType"], "text/plain");
     // kind:"file" REQUIRES sizeBytes (kernel Pwt schema is strict).
     assert_eq!(file["sizeBytes"], 14);
-    assert!(file["localPath"].as_str().unwrap().ends_with("/notes.txt"));
+    assert!(std::path::Path::new(file["localPath"].as_str().unwrap()).ends_with("notes.txt"));
     assert!(file.get("dataBase64").is_none());
 
     let image = &attachments[1];

@@ -19,3 +19,7 @@
   Clippy with warnings denied, release build, install.sh syntax, and exact
   `zcode-tui 0.6.6` binary-version smoke. Windows/macOS hosted jobs require an
   authorized branch push and remain the final executable acceptance gate.
+- 2026-08-30: PR #6 first run passed Ubuntu and macOS arm64, then exposed two
+  Windows assumptions: user config only checked `HOME`, and an attachment test
+  assumed `/` separators. Added `USERPROFILE` fallback and component-aware path
+  assertion; local fmt, Clippy, and 159/159 tests passed again before rerun.

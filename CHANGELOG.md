@@ -14,6 +14,8 @@
 - **Release 原生冒烟**：四个平台的 tag 构建在上传前先运行宿主测试、生成目标
   二进制并实际执行 `--version`；输出必须与 tag 完全一致。macOS Intel 与 Apple
   Silicon 改在匹配架构的 Runner 上分别构建、执行，不再只依赖交叉编译。
+- **Windows 用户配置路径**：未设置 Unix `HOME` 时回退使用 `USERPROFILE`，
+  `/mcp list` 等命令可在原生 Windows 环境解析用户级 MCP 配置。
 - GitHub 官方 Actions 更新到 Node 24 版本；普通 CI 权限固定为只读，发布工作流
   继续仅保留创建 Release 所需的 `contents: write`。
 
