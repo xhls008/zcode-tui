@@ -6,7 +6,7 @@
 - [x] Document hosted-runner and real-ZCode validation boundaries in both READMEs
 - [x] Align the design environment baseline with ZCode 3.8.1 / CLI 0.16.3
 - [x] Run workflow review and local Rust/shell quality gates
-- [ ] Save verification evidence and complete the delivery workflow
+- [x] Save verification evidence; keep PR unmerged pending maintainer approval
 
 ## Progress log
 
@@ -23,3 +23,6 @@
   Windows assumptions: user config only checked `HOME`, and an attachment test
   assumed `/` separators. Added `USERPROFILE` fallback and component-aware path
   assertion; local fmt, Clippy, and 159/159 tests passed again before rerun.
+- 2026-08-30: PR #6 run 33318040354 passed all four jobs: Ubuntu quality,
+  Windows x64, macOS arm64, and macOS x64. Saved canonical verification
+  evidence; the PR remains open and unmerged for maintainer approval.
