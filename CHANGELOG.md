@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+### 工程
+
+- **PR/main 跨平台 CI**：Pull Request 与 `main` push 现在运行 Ubuntu 格式、
+  Clippy、Rust 测试和安装脚本语法门禁，并在 GitHub 托管的 Windows x64、
+  macOS Apple Silicon 与 macOS Intel Runner 上执行原生 Rust 测试。
+- **Release 原生冒烟**：四个平台的 tag 构建在上传前先运行宿主测试、生成目标
+  二进制并实际执行 `--version`；输出必须与 tag 完全一致。macOS Intel 与 Apple
+  Silicon 改在匹配架构的 Runner 上分别构建、执行，不再只依赖交叉编译。
+- GitHub 官方 Actions 更新到 Node 24 版本；普通 CI 权限固定为只读，发布工作流
+  继续仅保留创建 Release 所需的 `contents: write`。
+
+### 文档
+
+- README 中英文版补充托管 Runner、fake app-server 与真实 ZCode 账号验证的边界；
+  设计文档的兼容基线同步为 ZCode 3.8.1 / CLI 0.16.3。
+
 ## [0.6.6] - 2026-08-29
 
 ### 新增

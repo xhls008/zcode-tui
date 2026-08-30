@@ -514,12 +514,22 @@ fn streaming_job_delivers_all_output_with_eof_signals() {
     use std::time::Duration;
     use zcode_tui::{spawn_streaming_command, JobEvent};
 
-    let job = spawn_streaming_command(&[
+    #[cfg(unix)]
+    let command = [
         "sh".to_string(),
         "-c".to_string(),
         "seq 1 500; echo tail-marker >&2".to_string(),
-    ])
-    .unwrap();
+    ];
+    #[cfg(windows)]
+    let command = [
+        "powershell.exe".to_string(),
+        "-NoProfile".to_string(),
+        "-Command".to_string(),
+        "1..500 | ForEach-Object { Write-Output $_ }; [Console]::Error.WriteLine('tail-marker')"
+            .to_string(),
+    ];
+
+    let job = spawn_streaming_command(&command).unwrap();
     assert_eq!(job.streams, 2);
 
     let mut lines = Vec::new();

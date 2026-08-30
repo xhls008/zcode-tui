@@ -482,6 +482,18 @@ cargo test
 cargo clippy --all-targets --all-features
 ```
 
+Pull requests and pushes to `main` run the full Ubuntu quality gates plus
+native Rust tests on `windows-latest` (x64), `macos-latest` (Apple Silicon),
+and `macos-15-intel` (Intel). Tag releases also build on all four target
+platforms, execute each binary with `--version`, and require an exact tag match
+before uploading the assets.
+
+Hosted CI never receives ZCode credentials or real API keys. Deterministic
+fake-app-server and fixture tests cover app-server, auth, model, and session
+protocol behavior. Desktop installers, real accounts, and provider-network
+checks belong on a maintainer-owned Mac/Windows machine or a private
+self-hosted runner that never accepts untrusted pull requests.
+
 Thanks to [@tastypear](https://github.com/tastypear) for the resumed-session
 model-config compatibility fix
 ([PR #1](https://github.com/xhls008/zcode-tui/pull/1)) and slash-command Enter

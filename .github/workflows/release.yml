@@ -5,19 +5,20 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Quality gates
         run: |
           cargo fmt --check
-          cargo clippy --all-targets --all-features -- -D warnings
+          cargo clippy --locked --all-targets --all-features -- -D warnings
           cargo test --locked
+          bash -n install.sh
 
   build:
     needs: quality
@@ -33,7 +34,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             source: target/x86_64-pc-windows-msvc/release/zcode-tui.exe
             asset: zcode-tui-x86_64-pc-windows-msvc.exe
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             source: target/x86_64-apple-darwin/release/zcode-tui
             asset: zcode-tui-x86_64-apple-darwin
@@ -43,7 +44,7 @@ jobs:
             asset: zcode-tui-aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
@@ -54,14 +55,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
+      - name: Run native tests
+        run: cargo test --locked
+
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Smoke-test release binary
+        shell: bash
+        run: |
+          actual="$("${{ matrix.source }}" --version)"
+          expected="zcode-tui ${GITHUB_REF_NAME#v}"
+          test "$actual" = "$expected"
 
       - name: Name release asset
         shell: bash
         run: cp "${{ matrix.source }}" "${{ matrix.asset }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.target }}
           path: ${{ matrix.asset }}
@@ -70,10 +81,12 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: binary-*
           path: dist
