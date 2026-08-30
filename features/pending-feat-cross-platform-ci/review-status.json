@@ -1,0 +1,8 @@
+{
+  "schema": "feature-review/v1",
+  "feature_id": "feat-cross-platform-ci",
+  "status": "passed",
+  "score": 92,
+  "reviewed_at": "2026-08-30T13:10:00Z",
+  "blocking_issues": []
+}
