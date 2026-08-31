@@ -31,7 +31,7 @@
 | 官方 CLI kernel | **0.16.5**（随 ZCode 3.9.1） |
 | zcode-tui | **0.6.7** |
 | 协议兼容 | 3.9.1：0.16.5 runtime preferences + official MCP auth 安全回退 + legacy/V4；3.8.1/3.7.7/3.7.6：0.16.3 runtime preferences + legacy/V4；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 160/160；Clippy 零告警；原生 build 通过；0.16.5 app-server `session/create` 握手正常 |
+| 当前源码验证 | Rust 测试 164/164；Clippy 零告警；原生 build 通过；0.16.5 app-server `session/create` 握手正常 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -168,7 +168,7 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   不接受 `browserUse`，这类 turn 明确路由到官方 `zcode --prompt`，界面提示
   该 turn 没有 token 流式/steer 控制；参数不会再在流式路径被静默忽略。
 - **上下文水位**：prompt 通道用 `--json` 总结对象作为权威结果（response 走
-  markdown 渲染，解析失败自动降级纯文本），状态栏常驻 `ctx 9k/200k (4%)`
+  markdown 渲染，解析失败自动降级纯文本），状态栏常驻 `ctx 9.1k/200k (4%)`
   用量显示，≥80% 提示 `/compact` 或 `/new`。
 - **实时补全菜单**：输入 `/` 即弹出建议（前缀 > 子串 > 子序列模糊匹配），
   上下键选择、`Tab`/`Enter` 接受、`Esc` 关闭。
@@ -181,13 +181,14 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   自动跟随光标，不再把持续输入截断在右边缘。
 - **持久输入历史**：启动时读入内核 `input_history`（内核记录每条 --prompt），
   Up/Down 跨进程可用；`Ctrl+R` 反向搜索（子串过滤、新→旧、Enter 取回）。
-- 使用普通屏幕的 Ratatui inline viewport：完成的对话写入终端 scrollback，底部
-  只重绘流式状态和输入框。应用不捕获鼠标，滚轮、普通拖选以及 macOS
+- 使用普通屏幕的 Ratatui inline viewport：最新一轮能完整容纳的不可变消息与
+  thinking 状态连续显示；上一轮或超出空间的稳定渲染行写入终端 scrollback。
+  应用不捕获鼠标，滚轮、普通拖选以及 macOS
   `Cmd+C` / Windows、Linux `Ctrl+Shift+C` 全部由系统终端原生处理；scrolling-region
   稀疏写入不会把行尾空格固化到历史中，窗口缩放时由终端正常重排。
-- 对话按产生顺序持续追加：完成的用户、正文阶段、工具结果和助手尾段进入系统
-  scrollback，底部只显示尚未完成的 thinking 状态与输入框；不固定轮数，也不按
-  可用高度重新排列历史。
+- 对话按产生顺序持续追加：只保留最新且已不可变的 turn 尾部用于消除结束状态空白，
+  动态输出不会压缩这段结束状态预留；旧的稳定行移入系统 scrollback，不重写已有
+  历史。
 - **结构化工具摘要**：Agent 内部的 Read/Search/Bash/Edit/MCP 等调用只展示
   文件、查询、耗时和状态等有意义信息；失败保留有界的诊断尾部。
   `! command`、`/diff`、`/usage`、`/status` 和助手最终回答始终完整展示。

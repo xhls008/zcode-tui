@@ -1252,7 +1252,7 @@ fn prompt_command_carries_json_flag_exactly_once() {
 
 #[test]
 fn context_watermark_formats_and_warns() {
-    assert_eq!(format_context_watermark(9055, 200000), "ctx 9k/200k (4%)");
+    assert_eq!(format_context_watermark(9055, 200000), "ctx 9.1k/200k (4%)");
     assert_eq!(format_context_watermark(512, 0), "ctx 512");
     assert!(!context_watermark_warn(9055, 200000));
     assert!(context_watermark_warn(160000, 200000));

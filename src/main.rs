@@ -69,7 +69,7 @@ use agents::AgentInspectorState;
 use app::input::{composer_layout, suggestion_popup_area};
 use app::state::{AppMode, ConnectStage, DbState, UsageSnapshot, V4Mode};
 use transcript::{log_entry_needs_separator, EntryId, LogKind, LogLine};
-use ui::{render_agent_inspector, render_composer, render_conversation, Theme};
+use ui::{render_agent_inspector, render_composer, render_conversation_items, Theme};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -185,7 +185,7 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
             Event::Paste(text) => {
                 state.insert_text(&text.replace("\r\n", "\n").replace('\r', "\n"));
             }
-            Event::Resize(width, height) => terminal.resize(width, height)?,
+            Event::Resize(width, height) => terminal.resize(&mut state, width, height)?,
             _ => {}
         }
     }
@@ -789,8 +789,11 @@ struct UiState {
     model_provider: Option<String>,
     /// Ctrl+R reverse search overlay: query + selected index.
     history_query: Option<(String, usize)>,
-    /// Number of log entries already committed to terminal scrollback.
+    /// Index of the transcript entry currently being committed to scrollback.
     flushed_log: usize,
+    /// Number of rendered rows already committed from `flushed_log`.
+    /// Entries are immutable before this cursor advances into them.
+    flushed_log_rows: usize,
     /// Incremented by /clear so the inline terminal purges its scrollback.
     clear_generation: u64,
     /// App-server streaming path (default-on, seamless fallback).
@@ -998,6 +1001,7 @@ impl UiState {
             model_provider: None,
             history_query: None,
             flushed_log: 0,
+            flushed_log_rows: 0,
             clear_generation: 0,
             app_mode,
             app_conn: None,
@@ -1550,6 +1554,7 @@ impl UiState {
         }
         self.log.clear();
         self.flushed_log = 0;
+        self.flushed_log_rows = 0;
         self.clear_generation = self.clear_generation.wrapping_add(1);
         self.push_startup_frame();
     }
@@ -5059,24 +5064,54 @@ impl TerminalGuard {
             self.terminal.clear()?;
             self.clear_generation = state.clear_generation;
         }
+        let viewport = self.terminal.get_frame().area();
+        let width = viewport.width.saturating_sub(2).max(1) as usize;
+        let composer_width = viewport.width.saturating_sub(3).max(1) as usize;
+        let input_lines = composer_layout(&state.input, state.cursor, composer_width)
+            .lines
+            .len() as u16;
+        let composer_height = input_lines.clamp(1, 5) + 2;
+        let conversation_height = viewport
+            .height
+            .saturating_sub(composer_height.saturating_add(2));
+        let rows = viewport_transcript_rows_to_flush(state, width, conversation_height);
+        self.flush_transcript_rows(state, width, rows)
+    }
+
+    fn flush_transcript_rows(
+        &mut self,
+        state: &mut UiState,
+        width: usize,
+        mut rows: usize,
+    ) -> Result<()> {
         let end = state.committable_log_end();
-        while state.flushed_log < end {
+        while rows > 0 && state.flushed_log < end {
             let index = state.flushed_log;
             let area = self.terminal.size()?;
-            let width = area.width.saturating_sub(2).max(1) as usize;
             if state.log[index].kind == LogKind::Logo
+                && state.flushed_log_rows == 0
                 && !ascii_logo_fits(width, area.height, state.skyline_mode)
             {
                 state.flushed_log += 1;
+                rows = rows.saturating_sub(rendered_log_entry_rows(state, index, width).len());
                 continue;
             }
-            let mut items = Vec::new();
-            if log_entry_needs_separator(&state.log, index) {
-                items.push(ListItem::new(Line::default()));
+            let entry_rows = rendered_log_entry_rows(state, index, width);
+            let skipped = state.flushed_log_rows.min(entry_rows.len());
+            let take = rows.min(entry_rows.len().saturating_sub(skipped));
+            if take == 0 {
+                state.flushed_log += 1;
+                state.flushed_log_rows = 0;
+                continue;
             }
-            items.extend(rendered_log_entry(state, index, width));
+            let items = entry_rows.into_iter().skip(skipped).take(take).collect();
             self.insert_transcript_items(items)?;
-            state.flushed_log += 1;
+            state.flushed_log_rows += take;
+            rows -= take;
+            if state.flushed_log_rows >= rendered_log_entry_rows(state, index, width).len() {
+                state.flushed_log += 1;
+                state.flushed_log_rows = 0;
+            }
         }
         Ok(())
     }
@@ -5104,7 +5139,22 @@ impl TerminalGuard {
     /// frame. Inline autoresize can otherwise consume the new dimensions
     /// before the queued event arrives, leaving unchanged footer cells absent
     /// after the viewport clear.
-    fn resize(&mut self, width: u16, height: u16) -> Result<()> {
+    fn resize(&mut self, state: &mut UiState, width: u16, height: u16) -> Result<()> {
+        // A partial row cursor is tied to the old wrapping width. Finish that
+        // immutable entry before resizing so no row is duplicated or skipped.
+        if state.flushed_log_rows > 0 {
+            let old_width = self
+                .terminal
+                .get_frame()
+                .area()
+                .width
+                .saturating_sub(2)
+                .max(1) as usize;
+            let remaining = rendered_log_entry_rows(state, state.flushed_log, old_width)
+                .len()
+                .saturating_sub(state.flushed_log_rows);
+            self.flush_transcript_rows(state, old_width, remaining)?;
+        }
         self.terminal.resize(Rect::new(0, 0, width, height))?;
         self.terminal.clear()?;
         Ok(())
@@ -5140,6 +5190,17 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
         .lines
         .len() as u16;
     let composer_height = input_lines.clamp(1, 5) + 2;
+    let transcript_end = state.committable_log_end();
+    let mut conversation_items = viewport_transcript_items(
+        state,
+        root.width.saturating_sub(2).max(1) as usize,
+        transcript_end,
+    );
+    let live_lines = live_panel_lines(state);
+    if !conversation_items.is_empty() && !live_lines.is_empty() {
+        conversation_items.push(ListItem::new(Line::default()));
+    }
+    conversation_items.extend(live_lines.into_iter().map(ListItem::new));
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -5150,7 +5211,7 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
         ])
         .split(root);
 
-    render_conversation(frame, vertical[0], state);
+    render_conversation_items(frame, vertical[0], conversation_items, !state.is_busy());
     render_composer(frame, vertical[2], state);
     render_footer(frame, vertical[3], state);
 
@@ -5188,6 +5249,67 @@ fn render(frame: &mut Frame<'_>, state: &mut UiState) {
     if state.interaction.is_some() {
         render_interaction(frame, centered_rect(74, 62, root), state);
     }
+}
+
+fn viewport_transcript_items(state: &UiState, width: usize, end: usize) -> Vec<ListItem<'static>> {
+    let mut items = Vec::new();
+    for index in state.flushed_log..end.min(state.log.len()) {
+        let skip = if index == state.flushed_log {
+            state.flushed_log_rows
+        } else {
+            0
+        };
+        items.extend(
+            rendered_log_entry_rows(state, index, width)
+                .into_iter()
+                .skip(skip),
+        );
+    }
+    items
+}
+
+fn rendered_log_entry_rows(state: &UiState, index: usize, width: usize) -> Vec<ListItem<'static>> {
+    let mut rows = Vec::new();
+    if log_entry_needs_separator(&state.log, index) {
+        rows.push(ListItem::new(Line::default()));
+    }
+    rows.extend(rendered_log_entry(state, index, width));
+    debug_assert!(rows.iter().all(|item| item.height() == 1));
+    rows
+}
+
+/// Number of stable rendered rows that can move into native scrollback while
+/// retaining the latest turn's tail. Live thinking does not reduce this
+/// reservoir: it may temporarily cover older retained rows, which become
+/// visible again when the live panel collapses.
+fn viewport_transcript_rows_to_flush(state: &UiState, width: usize, height: u16) -> usize {
+    let end = state.committable_log_end();
+    let mut total_rows = 0usize;
+    let mut latest_user_row = None;
+    for index in state.flushed_log..end {
+        let skip = if index == state.flushed_log {
+            state.flushed_log_rows
+        } else {
+            0
+        };
+        if state.log[index].kind == LogKind::User {
+            latest_user_row = Some(total_rows);
+        }
+        total_rows += rendered_log_entry_rows(state, index, width)
+            .len()
+            .saturating_sub(skip);
+    }
+
+    let Some(turn_row) = latest_user_row.or_else(|| {
+        state.log[..end]
+            .iter()
+            .any(|entry| entry.kind == LogKind::User)
+            .then_some(0)
+    }) else {
+        return total_rows;
+    };
+    let current_turn_rows = total_rows.saturating_sub(turn_row);
+    turn_row.saturating_add(current_turn_rows.saturating_sub(usize::from(height)))
 }
 
 /// Max lines of forming assistant text shown with the current turn.
@@ -5366,7 +5488,7 @@ fn format_session_usage(result: &serde_json::Value) -> String {
             .unwrap_or(0)
     };
     format!(
-        "session usage\n  total {}  ·  in {}  ·  out {}  ·  reasoning {}\n  \
+        "session usage · cumulative\n  total {}  ·  in {}  ·  out {}  ·  reasoning {}\n  \
          model requests {}  ·  cache read {}",
         n("totalTokens"),
         n("inputTokens"),
@@ -5379,9 +5501,19 @@ fn format_session_usage(result: &serde_json::Value) -> String {
 
 fn compact_token_count(value: u64) -> String {
     if value >= 1_000_000 {
-        format!("{}m", value / 1_000_000)
+        let scaled = value as f64 / 1_000_000.0;
+        if value.is_multiple_of(1_000_000) {
+            format!("{scaled:.0}m")
+        } else {
+            format!("{scaled:.1}m")
+        }
     } else if value >= 1_000 {
-        format!("{}k", value / 1_000)
+        let scaled = value as f64 / 1_000.0;
+        if value.is_multiple_of(1_000) {
+            format!("{scaled:.0}k")
+        } else {
+            format!("{scaled:.1}k")
+        }
     } else {
         value.to_string()
     }
@@ -5400,7 +5532,7 @@ fn format_usage_status(usage: &UsageSnapshot) -> String {
         .total_tokens
         .map(compact_token_count)
         .unwrap_or_else(|| "--".to_string());
-    format!("{context} · tok {tokens}")
+    format!("{context} · sess {tokens}")
 }
 
 /// `usage/stats` result → readable summary.
@@ -6662,6 +6794,79 @@ mod tests {
     }
 
     #[test]
+    fn viewport_flushes_prior_turns_then_only_the_overflowing_tail_rows() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.log.clear();
+        state.flushed_log = 0;
+        state
+            .log
+            .push(LogLine::new(LogKind::User, "short question"));
+        state
+            .log
+            .push(LogLine::new(LogKind::Assistant, "short answer"));
+
+        assert_eq!(viewport_transcript_rows_to_flush(&state, 78, 19), 0);
+
+        state.log.push(LogLine::new(LogKind::User, "next question"));
+        let prior_turn_rows = rendered_log_entry_rows(&state, 0, 78).len()
+            + rendered_log_entry_rows(&state, 1, 78).len();
+        assert_eq!(
+            viewport_transcript_rows_to_flush(&state, 78, 19),
+            prior_turn_rows
+        );
+
+        let long_answer = (1..=30)
+            .map(|line| format!("long answer line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state
+            .log
+            .push(LogLine::new(LogKind::Assistant, &long_answer));
+        let current_turn_rows = rendered_log_entry_rows(&state, 2, 78).len()
+            + rendered_log_entry_rows(&state, 3, 78).len();
+        assert_eq!(
+            viewport_transcript_rows_to_flush(&state, 78, 19),
+            prior_turn_rows + current_turn_rows.saturating_sub(19)
+        );
+
+        state.flushed_log = 3;
+        state.flushed_log_rows = 5;
+        let remaining = viewport_transcript_items(&state, 78, state.log.len());
+        assert_eq!(
+            remaining.len(),
+            rendered_log_entry_rows(&state, 3, 78).len() - 5
+        );
+    }
+
+    #[test]
+    fn viewport_does_not_render_mutable_transcript_entries() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.log.clear();
+        state.flushed_log = 0;
+        state.log.push(LogLine::new(LogKind::User, "question"));
+        state
+            .log
+            .push(LogLine::new(LogKind::Assistant, "forming answer"));
+        state.app_turn = Some(AppTurn {
+            turn: AppServerTurn::default(),
+            committable_end: 1,
+            text_entry_id: None,
+            written: 0,
+            started: Instant::now(),
+            cancel_requested: false,
+            got_text: false,
+            send_id: 1,
+        });
+
+        let end = state.committable_log_end();
+        assert_eq!(end, 1);
+        assert_eq!(viewport_transcript_rows_to_flush(&state, 78, 19), 0);
+        let rendered = viewport_transcript_items(&state, 78, end);
+        let expected = rendered_log_entry(&state, 0, 78);
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
     fn model_preference_keeps_only_the_selectable_reference() {
         let parsed = parse_model_preference(
             r#"{"version":1,"providerId":"bigmodel","modelId":"glm-5.3-flash","secret":"ignored"}"#,
@@ -6870,22 +7075,25 @@ mod tests {
     fn usage_status_is_always_present_and_combines_context_with_tokens() {
         assert_eq!(
             format_usage_status(&UsageSnapshot::default()),
-            "ctx -- · tok --"
+            "ctx -- · sess --"
         );
 
         let mut usage = UsageSnapshot::default();
         usage.update_context_window(200_000);
         usage.total_tokens = Some(17_859);
-        assert_eq!(format_usage_status(&usage), "ctx --/200k · tok 17k");
+        assert_eq!(format_usage_status(&usage), "ctx --/200k · sess 17.9k");
 
         usage.update_context(9_055, 200_000);
-        assert_eq!(format_usage_status(&usage), "ctx 9k/200k (4%) · tok 17k");
+        assert_eq!(
+            format_usage_status(&usage),
+            "ctx 9.1k/200k (4%) · sess 17.9k"
+        );
 
         let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
         state.usage = usage;
         state.controls.model_current = Some("glm-5.3".to_string());
         let footer = render_footer_text(&state, 120);
-        assert!(footer.contains("ctx 9k/200k (4%) · tok 17k · glm-5.3"));
+        assert!(footer.contains("ctx 9.1k/200k (4%) · sess 17.9k · glm-5.3"));
         assert!(!footer.contains("auth"));
         assert!(!footer.contains("send"));
         assert!(!footer.contains("commands"));

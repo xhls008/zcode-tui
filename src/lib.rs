@@ -2779,11 +2779,23 @@ pub fn parse_prompt_summary(output: &str) -> Option<PromptSummary> {
     })
 }
 
-/// Compact context watermark for the status line, e.g. `ctx 9k/200k (4%)`.
+/// Compact context watermark for the status line, e.g. `ctx 9.1k/200k (4%)`.
 pub fn format_context_watermark(used: u64, window: u64) -> String {
     let kilo = |n: u64| -> String {
-        if n >= 1000 {
-            format!("{}k", n / 1000)
+        if n >= 1_000_000 {
+            let scaled = n as f64 / 1_000_000.0;
+            if n.is_multiple_of(1_000_000) {
+                format!("{scaled:.0}m")
+            } else {
+                format!("{scaled:.1}m")
+            }
+        } else if n >= 1_000 {
+            let scaled = n as f64 / 1_000.0;
+            if n.is_multiple_of(1_000) {
+                format!("{scaled:.0}k")
+            } else {
+                format!("{scaled:.1}k")
+            }
         } else {
             n.to_string()
         }

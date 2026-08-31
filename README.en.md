@@ -37,7 +37,7 @@ palette, and editor workflows are handled locally.
 | Official CLI kernel | **0.16.5** (bundled with ZCode 3.9.1) |
 | zcode-tui | **0.6.7** |
 | Protocol compatibility | 3.9.1: 0.16.5 runtime preferences + safe official-MCP-auth fallback + legacy/V4; 3.8.1/3.7.7/3.7.6: 0.16.3 runtime preferences + legacy/V4; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 160/160 Rust tests; zero-warning Clippy; native build; verified 0.16.5 app-server `session/create` handshake |
+| Current source verification | 164/164 Rust tests; zero-warning Clippy; native build; verified 0.16.5 app-server `session/create` handshake |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -187,10 +187,10 @@ for details.
   a real `taskId`. Inactive child transcripts on ZCode 0.16.3 require a stateful
   resume, so the TUI deliberately shows official summaries/output tails only,
   never auto-resumes a child, and never falls back to SQLite.
-- The TUI uses a normal-screen Ratatui inline viewport. Completed phases append
-  to terminal scrollback in chronological order; only unfinished thinking
-  state and the composer remain in the viewport. Mouse capture is
-  never enabled, so wheel scrolling,
+- The TUI uses a normal-screen Ratatui inline viewport. The latest immutable
+  turn that fits stays next to the composer together with unfinished thinking;
+  previous or overflowing stable rows append to terminal scrollback. Mouse
+  capture is never enabled, so wheel scrolling,
   ordinary drag selection, and system Cmd+C/Ctrl+Shift+C work natively. Sparse
   scrolling-region writes keep trailing spaces out of history so terminal
   reflow remains stable after a window resize.
