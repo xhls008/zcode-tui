@@ -1,0 +1,1 @@
+{"id":"server-2","method":"interaction/requestOfficialMcpAuthHeaders","params":{"requestId":"official-mcp-auth:1","workspace":{"workspaceKey":"/repo","workspacePath":"/repo"},"pluginId":"zcode-official","mcpKey":"official-docs","targetOrigin":"https://api.z.ai"}}

@@ -6,7 +6,7 @@
 
 > v0.6.0 界面实机截图：ZCode CLI kernel 0.16.3，macOS。展示自适应 ASCII
 > 品牌面板、终端原生 scrollback、app-server 阶段追加，以及只读的父 Agent /
-> Subagent / Background Inspector；当前源码另已实测适配 ZCode Linux 3.8.1。
+> Subagent / Background Inspector；当前源码另已实测适配 ZCode Linux 3.9.1。
 
 > **非官方声明**：`zcode-tui` 不是 ZCode / 智谱官方项目，也未获得官方背书。
 > 它是社区/个人维护的 Linux 终端 fallback，用来补齐官方包当前缺失的 TUI 体验。
@@ -27,11 +27,11 @@
 
 | 组件 | 当前版本 / 状态 |
 |---|---|
-| ZCode Linux x64 桌面包 | **3.8.1**（官方 feed） |
-| 官方 CLI kernel | **0.16.3**（随 ZCode 3.8.1，版本未变） |
+| ZCode Linux x64 桌面包 | **3.9.1-5853**（官方 deb，SHA-512 已校验） |
+| 官方 CLI kernel | **0.16.5**（随 ZCode 3.9.1） |
 | zcode-tui | **0.6.6** |
-| 协议兼容 | 3.8.1/3.7.7/3.7.6：runtime preferences 握手 + legacy 正文流 + V4 控制；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 159/159；Clippy 零告警；原生 build 通过；3.8.1 app-server 握手和 TUI 启停正常 |
+| 协议兼容 | 3.9.1：0.16.5 runtime preferences + official MCP auth 安全回退 + legacy/V4；3.8.1/3.7.7/3.7.6：0.16.3 runtime preferences + legacy/V4；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
+| 当前源码验证 | Rust 测试 160/160；Clippy 零告警；原生 build 通过；0.16.5 app-server `session/create` 握手正常 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -126,9 +126,11 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   `--prompt` 路径时设 `ZCODE_TUI_APP_SERVER=0`。ZCode 3.5.3 上会在 legacy
   正文流之上协商 `v4/conversation/subscribe`，仅把新版控制能力接到 V4；
   3.3.6 返回 Method not found 时继续使用既有 legacy 控制，不影响正文流。
-  ZCode 3.7.6+ / CLI 0.16.3 建会话时新增的
+  ZCode 3.7.6+ / CLI 0.16.3+ 建会话时新增的
   `session/requestRuntimePreferences` 反向请求会自动应答；不再等待 15 秒后
-  错误降级到经典路径。
+  错误降级到经典路径。CLI 0.16.5 新增
+  `interaction/requestOfficialMcpAuthHeaders`；TUI 不持有桌面端官方 MCP 凭据，
+  会按内核 strict schema 明确返回 `official_auth_unavailable`，不会让请求悬挂。
 - **工具权限确认（app-server 路径）**：build 模式下有副作用的工具（写文件等）
   与 plan 模式的计划审批会弹**确认浮层**（↑↓ 选项 / Enter 应答 / Esc 拒绝），
   批准后工具同回合继续执行；plan 计划批准后自动切 build 并续跑。

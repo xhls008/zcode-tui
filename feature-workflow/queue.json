@@ -1,11 +1,10 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-31T06:48:36Z"
+    "last_updated": "2026-08-31T07:28:12Z"
   },
   "parents": [],
-  "active": [],
-  "pending": [
+  "active": [
     {
       "id": "feat-zcode-cli-0165-compat",
       "name": "ZCode CLI 0.16.5 compatibility evidence",
@@ -17,10 +16,14 @@
         "compatibility"
       ],
       "dependencies": [],
-      "status": "pending",
-      "created_at": "2026-08-31T06:48:36Z"
+      "status": "active",
+      "created_at": "2026-08-31T06:48:36Z",
+      "branch": "feature/feat-zcode-cli-0165-compat",
+      "worktree": "/home/flybear/flybear_data/my_project/zcode_tui-feat-zcode-cli-0165-compat",
+      "started_at": "2026-08-31T07:28:12Z"
     }
   ],
+  "pending": [],
   "blocked": [],
   "completed": [
     {

@@ -7,7 +7,7 @@
 > The v0.6.0 interface captured with ZCode CLI kernel 0.16.3 on macOS. It shows
 > the adaptive ASCII brand panel, native terminal scrollback, phased app-server
 > output, and the read-only parent Agent / Subagent / Background Inspector. The
-> current source is also verified against ZCode Linux 3.8.1.
+> current source is also verified against ZCode Linux 3.9.1.
 
 > **Unofficial notice**: `zcode-tui` is not an official ZCode / Zhipu project
 > and is not endorsed by ZCode or Zhipu. It is a community/personal Linux
@@ -33,11 +33,11 @@ palette, and editor workflows are handled locally.
 
 | Component | Current version / status |
 |---|---|
-| ZCode Linux x64 desktop | **3.8.1** (official feed) |
-| Official CLI kernel | **0.16.3** (bundled with ZCode 3.8.1) |
+| ZCode Linux x64 desktop | **3.9.1-5853** (official deb, SHA-512 verified) |
+| Official CLI kernel | **0.16.5** (bundled with ZCode 3.9.1) |
 | zcode-tui | **0.6.6** |
-| Protocol compatibility | 3.8.1/3.7.7/3.7.6: runtime-preferences handshake + legacy body stream + V4 controls; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 159/159 Rust tests; zero-warning Clippy; native build; verified 3.8.1 app-server handshake and TUI lifecycle |
+| Protocol compatibility | 3.9.1: 0.16.5 runtime preferences + safe official-MCP-auth fallback + legacy/V4; 3.8.1/3.7.7/3.7.6: 0.16.3 runtime preferences + legacy/V4; 3.5.3: legacy + V4; 3.3.6: legacy controls |
+| Current source verification | 160/160 Rust tests; zero-warning Clippy; native build; verified 0.16.5 app-server `session/create` handshake |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -93,10 +93,13 @@ for details.
   stream is retained while `v4/conversation/subscribe` provides the new
   control plane. Older kernels that do not expose V4 keep their legacy
   controls without losing streaming.
-- ZCode 3.7.6+ / CLI 0.16.3 adds a server-to-client
+- ZCode 3.7.6+ / CLI 0.16.3+ adds a server-to-client
   `session/requestRuntimePreferences` request during session startup. The TUI
   answers it automatically instead of timing out after 15 seconds and falling
-  back to the classic path.
+  back to the classic path. CLI 0.16.5 also adds
+  `interaction/requestOfficialMcpAuthHeaders`. Because this TUI owns no Desktop
+  official-MCP credential bridge, it explicitly returns the kernel's strict
+  `official_auth_unavailable` result instead of leaving the request hanging.
 - Any failure (spawn, handshake timeout, schema mismatch, disconnect)
   permanently and seamlessly downgrades the process to the classic
   `--prompt` path; set `ZCODE_TUI_APP_SERVER=0` to force the classic path.

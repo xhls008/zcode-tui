@@ -8,6 +8,13 @@
 
 ### 工程
 
+- **ZCode CLI 0.16.5 兼容**：官方 ZCode 3.9.1-5853 deb 经 feed SHA-512
+  校验，内置 kernel 为 0.16.5；真实 app-server 的 `session/create` 与既有
+  runtime-preferences 回复完成握手。新增官方 MCP 授权头反向请求时，TUI 按 strict
+  schema 返回 `official_auth_unavailable`，避免未知 server request 悬挂。
+- **0.16.5 差异基线**：相较 0.16.3，CLI 新增全局 `--surface`；app-server
+  无删除方法，新增 official MCP auth、workspace hook trust、model-I/O retention
+  和 generate-text cancel 四个方法。既有 runtime-preferences schema 未变化。
 - **PR/main 跨平台 CI**：Pull Request 与 `main` push 现在运行 Ubuntu 格式、
   Clippy、Rust 测试和安装脚本语法门禁，并在 GitHub 托管的 Windows x64、
   macOS Apple Silicon 与 macOS Intel Runner 上执行原生 Rust 测试。
@@ -22,7 +29,7 @@
 ### 文档
 
 - README 中英文版补充托管 Runner、fake app-server 与真实 ZCode 账号验证的边界；
-  设计文档的兼容基线同步为 ZCode 3.8.1 / CLI 0.16.3。
+  设计文档的兼容基线同步为 ZCode 3.9.1 / CLI 0.16.5。
 
 ## [0.6.6] - 2026-08-29
 
