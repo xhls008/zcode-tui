@@ -1,0 +1,33 @@
+{
+  "schema": "feature-verification/v1",
+  "feature_id": "feat-zcode-cli-0165-compat",
+  "status": "passed",
+  "verified_at": "2026-08-31T09:35:24Z",
+  "tasks": {
+    "total": 6,
+    "completed": 6,
+    "incomplete": 0
+  },
+  "quality": {
+    "status": "passed",
+    "passed": 7,
+    "failed": 0
+  },
+  "tests": {
+    "status": "passed",
+    "passed": 160,
+    "failed": 0,
+    "skipped": 0
+  },
+  "scenarios": {
+    "total": 6,
+    "passed": 6,
+    "failed": 0
+  },
+  "blocking_failures": [],
+  "warnings": [
+    "Desktop UI/installer and authenticated official-MCP/provider/model-network behavior were not tested.",
+    "One unversioned-feed request briefly returned 3.7.7 from a CDN edge; the versioned 3.9.1 URL and later feed requests were stable."
+  ],
+  "report": "features/active-feat-zcode-cli-0165-compat/evidence/verification-report.md"
+}

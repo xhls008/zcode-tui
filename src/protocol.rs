@@ -2102,6 +2102,11 @@ pub const PERMISSION_METHOD: &str = "interaction/requestPermission";
 /// create/resume session. Leaving this unanswered makes session/create time
 /// out after 15 seconds and disables app-server streaming.
 pub const RUNTIME_PREFERENCES_METHOD: &str = "session/requestRuntimePreferences";
+/// ZCode 0.16.5 asks a desktop-capable client to supply short-lived official
+/// MCP authentication headers. zcode-tui deliberately owns no such desktop
+/// credential bridge, so it must decline with the kernel's strict result shape
+/// instead of leaving the server request unanswered.
+pub const OFFICIAL_MCP_AUTH_HEADERS_METHOD: &str = "interaction/requestOfficialMcpAuthHeaders";
 
 /// Exact 0.16.3 runtime-preferences reply. These are the same compatibility
 /// defaults the kernel uses when an older client returns Method not found.
@@ -2122,6 +2127,28 @@ pub fn encode_runtime_preferences_reply(
                 "memoryEnabled": false,
                 "askUserQuestionAutoResolutionEnabled": true,
                 "modelContextBudgetStrategy": "preflight-v1",
+            }
+        })
+        .to_string(),
+    )
+}
+
+/// Safe CLI 0.16.5 fallback for official MCP authentication. The kernel's
+/// strict union accepts `{ok:false, reason}` and treats this reason as a normal
+/// unavailable capability; no credentials or request parameters are echoed.
+pub fn encode_official_mcp_auth_headers_reply(
+    envelope_id: &serde_json::Value,
+    method: &str,
+) -> Option<String> {
+    if method != OFFICIAL_MCP_AUTH_HEADERS_METHOD {
+        return None;
+    }
+    Some(
+        serde_json::json!({
+            "id": envelope_id,
+            "result": {
+                "ok": false,
+                "reason": "official_auth_unavailable",
             }
         })
         .to_string(),

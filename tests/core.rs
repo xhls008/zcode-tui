@@ -1815,6 +1815,44 @@ fn runtime_preferences_reply_matches_kernel_0163_schema() {
 }
 
 #[test]
+fn official_mcp_auth_request_matches_kernel_0165_safe_fallback() {
+    use zcode_tui::{
+        decode_app_message, encode_official_mcp_auth_headers_reply, AppServerMessage,
+        OFFICIAL_MCP_AUTH_HEADERS_METHOD,
+    };
+
+    let raw = include_str!("fixtures/zcode-0.16.5-official-mcp-auth-request.json");
+    let (id, method, params) = match decode_app_message(raw).unwrap() {
+        AppServerMessage::ServerRequest { id, method, params } => (id, method, params),
+        other => panic!("expected server request, got {other:?}"),
+    };
+    assert_eq!(method, OFFICIAL_MCP_AUTH_HEADERS_METHOD);
+    assert_eq!(params["requestId"], "official-mcp-auth:1");
+    assert_eq!(params["mcpKey"], "official-docs");
+    assert_eq!(params["pluginId"], "zcode-official");
+    assert_eq!(params["targetOrigin"], "https://api.z.ai");
+    assert_eq!(params["workspace"]["workspaceKey"], "/repo");
+
+    let line = encode_official_mcp_auth_headers_reply(&id, &method).unwrap();
+    let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(reply["id"], "server-2");
+    assert_eq!(
+        reply["result"],
+        serde_json::json!({
+            "ok": false,
+            "reason": "official_auth_unavailable"
+        })
+    );
+    assert_eq!(reply["result"].as_object().unwrap().len(), 2);
+    assert!(!line.contains('\n'));
+    assert!(encode_official_mcp_auth_headers_reply(
+        &serde_json::json!(9),
+        "interaction/requestPermission"
+    )
+    .is_none());
+}
+
+#[test]
 fn permission_request_parses_options_and_replies_response_verbatim() {
     use zcode_tui::{encode_interaction_reply, parse_interaction_request, PERMISSION_METHOD};
     // Shape captured live 2026-07-07: a build-mode Write triggers
