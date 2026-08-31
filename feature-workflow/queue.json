@@ -1,28 +1,10 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-31T07:28:12Z"
+    "last_updated": "2026-08-31T09:38:22Z"
   },
   "parents": [],
-  "active": [
-    {
-      "id": "feat-zcode-cli-0165-compat",
-      "name": "ZCode CLI 0.16.5 compatibility evidence",
-      "description": "The repository records the official CLI 0.16.5 protocol delta and has an executable regression test for every newly relevant wire shape.",
-      "priority": 90,
-      "workflow_mode": "deep",
-      "risk_signals": [
-        "external_dependency",
-        "compatibility"
-      ],
-      "dependencies": [],
-      "status": "active",
-      "created_at": "2026-08-31T06:48:36Z",
-      "branch": "feature/feat-zcode-cli-0165-compat",
-      "worktree": "/home/flybear/flybear_data/my_project/zcode_tui-feat-zcode-cli-0165-compat",
-      "started_at": "2026-08-31T07:28:12Z"
-    }
-  ],
+  "active": [],
   "pending": [],
   "blocked": [],
   "completed": [
@@ -590,6 +572,49 @@
           "The tag-only release matrix is structurally verified; native binary smoke checks execute on the next authorized release tag."
         ],
         "report": "features/archive/done-feat-cross-platform-ci-20260831/evidence/verification-report.md"
+      }
+    },
+    {
+      "id": "feat-zcode-cli-0165-compat",
+      "name": "ZCode CLI 0.16.5 compatibility evidence",
+      "status": "completed",
+      "completed_at": "2026-08-31T09:38:22Z",
+      "archive_path": "features/archive/done-feat-zcode-cli-0165-compat-20260831",
+      "tag": "v0.6.7",
+      "merge_commit": "162fd5a43f864a7af7ee76f94c0112e6952df524",
+      "workflow_mode": "deep",
+      "verification": {
+        "schema": "feature-verification/v1",
+        "feature_id": "feat-zcode-cli-0165-compat",
+        "status": "passed",
+        "verified_at": "2026-08-31T09:35:24Z",
+        "tasks": {
+          "total": 6,
+          "completed": 6,
+          "incomplete": 0
+        },
+        "quality": {
+          "status": "passed",
+          "passed": 7,
+          "failed": 0
+        },
+        "tests": {
+          "status": "passed",
+          "passed": 160,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scenarios": {
+          "total": 6,
+          "passed": 6,
+          "failed": 0
+        },
+        "blocking_failures": [],
+        "warnings": [
+          "Desktop UI/installer and authenticated official-MCP/provider/model-network behavior were not tested.",
+          "One unversioned-feed request briefly returned 3.7.7 from a CDN edge; the versioned 3.9.1 URL and later feed requests were stable."
+        ],
+        "report": "features/archive/done-feat-zcode-cli-0165-compat-20260831/evidence/verification-report.md"
       }
     }
   ]

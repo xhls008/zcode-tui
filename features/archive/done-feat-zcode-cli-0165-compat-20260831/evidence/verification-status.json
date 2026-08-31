@@ -29,5 +29,5 @@
     "Desktop UI/installer and authenticated official-MCP/provider/model-network behavior were not tested.",
     "One unversioned-feed request briefly returned 3.7.7 from a CDN edge; the versioned 3.9.1 URL and later feed requests were stable."
   ],
-  "report": "features/active-feat-zcode-cli-0165-compat/evidence/verification-report.md"
+  "report": "features/archive/done-feat-zcode-cli-0165-compat-20260831/evidence/verification-report.md"
 }
