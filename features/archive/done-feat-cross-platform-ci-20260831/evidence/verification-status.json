@@ -28,5 +28,5 @@
   "warnings": [
     "The tag-only release matrix is structurally verified; native binary smoke checks execute on the next authorized release tag."
   ],
-  "report": "features/active-feat-cross-platform-ci/evidence/verification-report.md"
+  "report": "features/archive/done-feat-cross-platform-ci-20260831/evidence/verification-report.md"
 }
