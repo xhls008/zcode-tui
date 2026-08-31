@@ -1,11 +1,26 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-31T01:29:13Z"
+    "last_updated": "2026-08-31T06:48:36Z"
   },
   "parents": [],
   "active": [],
-  "pending": [],
+  "pending": [
+    {
+      "id": "feat-zcode-cli-0165-compat",
+      "name": "ZCode CLI 0.16.5 compatibility evidence",
+      "description": "The repository records the official CLI 0.16.5 protocol delta and has an executable regression test for every newly relevant wire shape.",
+      "priority": 90,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "external_dependency",
+        "compatibility"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "created_at": "2026-08-31T06:48:36Z"
+    }
+  ],
   "blocked": [],
   "completed": [
     {

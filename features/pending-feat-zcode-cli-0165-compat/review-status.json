@@ -1,0 +1,8 @@
+{
+  "schema": "feature-review/v1",
+  "feature_id": "feat-zcode-cli-0165-compat",
+  "status": "passed",
+  "score": 94,
+  "reviewed_at": "2026-08-31T06:50:00Z",
+  "blocking_issues": []
+}
