@@ -1,0 +1,32 @@
+{
+  "schema": "feature-verification/v1",
+  "feature_id": "feat-cross-platform-ci",
+  "status": "passed",
+  "verified_at": "2026-08-30T14:55:12Z",
+  "tasks": {
+    "total": 7,
+    "completed": 7,
+    "incomplete": 0
+  },
+  "quality": {
+    "status": "passed",
+    "passed": 7,
+    "failed": 0
+  },
+  "tests": {
+    "status": "passed",
+    "passed": 159,
+    "failed": 0,
+    "skipped": 0
+  },
+  "scenarios": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0
+  },
+  "blocking_failures": [],
+  "warnings": [
+    "The tag-only release matrix is structurally verified; native binary smoke checks execute on the next authorized release tag."
+  ],
+  "report": "features/active-feat-cross-platform-ci/evidence/verification-report.md"
+}

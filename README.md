@@ -546,6 +546,16 @@ cargo test
 cargo clippy --all-targets --all-features
 ```
 
+Pull Request 和 `main` push 会在 GitHub Actions 中运行 Ubuntu 全量质量门禁，
+并在 `windows-latest`（x64）、`macos-latest`（Apple Silicon）与
+`macos-15-intel`（Intel）上执行原生 Rust 测试。tag 发布还会在四个平台分别
+构建二进制、实际运行 `--version` 并核对 tag 后才上传 Release 资产。
+
+托管 CI 不注入 ZCode 凭据或真实 API Key；app-server、认证、模型和会话协议由
+仓库内的确定性 fake/fixture 覆盖。需要验证桌面安装器、真实账号或供应商网络时，
+使用维护者自己的 Mac/Windows，或配置不接收外部 PR 的私有 self-hosted Runner，
+避免把长期凭据暴露给公共 CI。
+
 感谢 [@tastypear](https://github.com/tastypear) 贡献恢复会话模型配置兼容
 ([PR #1](https://github.com/xhls008/zcode-tui/pull/1)) 和斜杠命令 Enter 补全行为
 ([PR #2](https://github.com/xhls008/zcode-tui/pull/2))；感谢

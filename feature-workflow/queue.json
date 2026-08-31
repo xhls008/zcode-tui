@@ -1,10 +1,29 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-29T11:45:17Z"
+    "last_updated": "2026-08-30T13:06:51Z"
   },
   "parents": [],
-  "active": [],
+  "active": [
+    {
+      "id": "feat-cross-platform-ci",
+      "name": "Cross-platform CI and release validation",
+      "description": "Every pull request is quality-gated, Windows and macOS run native tests, and each release binary is executed on its native runner before publication.",
+      "priority": 90,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "multi_module",
+        "external_dependency",
+        "compatibility"
+      ],
+      "dependencies": [],
+      "status": "active",
+      "created_at": "2026-08-30T13:02:23Z",
+      "branch": "feature/feat-cross-platform-ci",
+      "worktree": "/home/flybear/flybear_data/my_project/zcode_tui-feat-cross-platform-ci",
+      "started_at": "2026-08-30T13:06:51Z"
+    }
+  ],
   "pending": [],
   "blocked": [],
   "completed": [

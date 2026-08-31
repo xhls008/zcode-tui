@@ -1048,7 +1048,9 @@ pub fn user_mcp_config_path_from(
 
 pub fn user_mcp_config_path() -> Result<PathBuf> {
     let xdg = std::env::var("XDG_CONFIG_HOME").ok();
-    let home = std::env::var("HOME").ok();
+    let home = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok());
     user_mcp_config_path_from(xdg.as_deref(), home.as_deref())
 }
 
