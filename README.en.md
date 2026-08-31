@@ -35,7 +35,7 @@ palette, and editor workflows are handled locally.
 |---|---|
 | ZCode Linux x64 desktop | **3.9.1-5853** (official deb, SHA-512 verified) |
 | Official CLI kernel | **0.16.5** (bundled with ZCode 3.9.1) |
-| zcode-tui | **0.6.6** |
+| zcode-tui | **0.6.7** |
 | Protocol compatibility | 3.9.1: 0.16.5 runtime preferences + safe official-MCP-auth fallback + legacy/V4; 3.8.1/3.7.7/3.7.6: 0.16.3 runtime preferences + legacy/V4; 3.5.3: legacy + V4; 3.3.6: legacy controls |
 | Current source verification | 160/160 Rust tests; zero-warning Clippy; native build; verified 0.16.5 app-server `session/create` handshake |
 

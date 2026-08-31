@@ -23,3 +23,5 @@
   consistently returned 3.9.1.
 - 2026-08-31: Passed formatting, 160/160 Rust tests, zero-warning Clippy,
   release build, and diff whitespace checks. Saved verification evidence.
+- 2026-08-31: Prepared the authorized v0.6.7 patch release and reran all gates,
+  including install-script syntax and exact release-binary version checks.

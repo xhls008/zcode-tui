@@ -29,7 +29,7 @@
 |---|---|
 | ZCode Linux x64 桌面包 | **3.9.1-5853**（官方 deb，SHA-512 已校验） |
 | 官方 CLI kernel | **0.16.5**（随 ZCode 3.9.1） |
-| zcode-tui | **0.6.6** |
+| zcode-tui | **0.6.7** |
 | 协议兼容 | 3.9.1：0.16.5 runtime preferences + official MCP auth 安全回退 + legacy/V4；3.8.1/3.7.7/3.7.6：0.16.3 runtime preferences + legacy/V4；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
 | 当前源码验证 | Rust 测试 160/160；Clippy 零告警；原生 build 通过；0.16.5 app-server `session/create` 握手正常 |
 

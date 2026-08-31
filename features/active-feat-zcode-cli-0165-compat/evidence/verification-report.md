@@ -1,6 +1,6 @@
 # Verification report: feat-zcode-cli-0165-compat
 
-Verified at 2026-08-31T07:32:25Z in the isolated feature worktree.
+Verified at 2026-08-31T09:35:24Z in the isolated feature worktree.
 
 ## Official package evidence
 
@@ -40,6 +40,8 @@ Verified at 2026-08-31T07:32:25Z in the isolated feature worktree.
 - `cargo test --locked`: passed; 160 tests, 0 failed, 0 ignored.
 - `cargo clippy --locked --all-targets --all-features -- -D warnings`: passed.
 - `cargo build --release --locked`: passed.
+- `bash -n install.sh`: passed.
+- `target/release/zcode-tui --version`: exactly `zcode-tui 0.6.7`.
 - `git diff --check`: passed.
 
 ## Acceptance scenarios and boundaries

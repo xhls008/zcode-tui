@@ -2,7 +2,7 @@
   "schema": "feature-verification/v1",
   "feature_id": "feat-zcode-cli-0165-compat",
   "status": "passed",
-  "verified_at": "2026-08-31T07:32:25Z",
+  "verified_at": "2026-08-31T09:35:24Z",
   "tasks": {
     "total": 6,
     "completed": 6,
@@ -10,7 +10,7 @@
   },
   "quality": {
     "status": "passed",
-    "passed": 5,
+    "passed": 7,
     "failed": 0
   },
   "tests": {

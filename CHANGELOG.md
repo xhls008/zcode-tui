@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-08-31
+
 ### 工程
 
 - **ZCode CLI 0.16.5 兼容**：官方 ZCode 3.9.1-5853 deb 经 feed SHA-512
