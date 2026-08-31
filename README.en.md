@@ -37,7 +37,7 @@ palette, and editor workflows are handled locally.
 | Official CLI kernel | **0.16.5** (bundled with ZCode 3.9.1) |
 | zcode-tui | **0.6.7** |
 | Protocol compatibility | 3.9.1: 0.16.5 runtime preferences + safe official-MCP-auth fallback + legacy/V4; 3.8.1/3.7.7/3.7.6: 0.16.3 runtime preferences + legacy/V4; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 164/164 Rust tests; zero-warning Clippy; native build; verified 0.16.5 app-server `session/create` handshake |
+| Current source verification | 166/166 Rust tests; zero-warning Clippy; native build; verified 0.16.5 app-server `session/create` handshake |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -134,7 +134,7 @@ for details.
   are parsed explicitly and routed to the official classic `zcode --prompt`
   path, because the strict app-server schema does not accept these fields.
 - The composer footer always shows parent-session `ctx used/window (%)` and
-  cumulative `tok`. Context follows `state.updated`, cumulative tokens refresh
+  cumulative `sess`. Context follows `state.updated`, cumulative tokens refresh
   silently after every turn, and `/usage [7d|30d]` remains immediately
   available while a response streams instead of entering the input queue.
 - `/update` self-updates the kernel from the official feed (sha512-verified).
@@ -174,7 +174,9 @@ for details.
 - Non-blocking streaming jobs for prompts, shell commands, and diffs.
 - Esc/Ctrl+C cancellation with process-group kill on Unix.
 - Busy input queueing.
-- Live slash-command suggestions and `@file` completion.
+- Live slash-command suggestions: arrows select, Enter runs the highlighted
+  command, and Tab completes it for additional arguments; plus `@file`
+  completion.
 - File mentions are translated into `--attach` after canonicalization, rejecting
   path traversal and symlink escapes.
 - Persistent prompt history from the ZCode kernel database, plus Ctrl+R reverse

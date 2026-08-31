@@ -1327,6 +1327,15 @@ impl UiState {
         self.after_input_change();
     }
 
+    /// Accept the highlighted slash command and submit it in one keystroke.
+    /// Tab remains completion-only so commands that need arguments can still
+    /// be expanded before the user finishes typing them.
+    fn submit_selected_slash_suggestion(&mut self) -> Option<UiEffect> {
+        self.accept_suggestion();
+        let input = self.input.trim().to_string();
+        self.handle_submit(&input)
+    }
+
     // ---- key handling --------------------------------------------------
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
@@ -1439,12 +1448,10 @@ impl UiState {
             }
             KeyCode::BackTab => self.cycle_mode(),
             KeyCode::Enter => {
-                if !self.suggestions.is_empty() && self.input.starts_with('/') {
-                    self.accept_suggestion();
-                    let input = self.input.trim().to_string();
-                    if let Some(effect) = self.handle_submit(&input) {
-                        return Some(effect);
-                    }
+                if self.input.starts_with('/')
+                    && self.suggestions.get(self.suggestion_index).is_some()
+                {
+                    return self.submit_selected_slash_suggestion();
                 } else if !self.suggestions.is_empty() && self.suggestion_nav {
                     self.accept_suggestion();
                 } else {
@@ -6152,7 +6159,11 @@ fn render_suggestions(frame: &mut Frame<'_>, input_area: Rect, state: &UiState) 
         .border_type(BorderType::Rounded)
         .border_style(t.frame())
         .title(Line::from(Span::styled(
-            " Tab accepts ".to_string(),
+            if state.input.starts_with('/') {
+                " Enter runs · Tab completes ".to_string()
+            } else {
+                " Tab accepts ".to_string()
+            },
             t.dim(),
         )));
     let list = List::new(items)
@@ -7256,5 +7267,21 @@ mod tests {
             .is_none());
         assert!(state.show_help);
         assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn enter_runs_the_highlighted_slash_command_after_navigation() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.set_input("/e");
+
+        assert_eq!(state.suggestions[0].insert.trim(), "/editor");
+        assert_eq!(state.suggestions[1].insert.trim(), "/exit");
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(UiEffect::Quit)
+        ));
+        assert_eq!(state.status, "bye");
     }
 }

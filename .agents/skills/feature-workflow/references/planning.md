@@ -3,6 +3,22 @@
 Use this reference for initialization, feature creation, splitting, enrichment,
 or specification review.
 
+## Creation boundary
+
+Read this reference only after the activation gate in `SKILL.md` selects a
+Managed Feature. Risk routing chooses Lite versus Deep **inside an authorized
+Feature**; it does not decide whether ordinary work becomes a Feature.
+
+Do not run `create` because a change is important, touches multiple related
+files, carries a configured risk signal, or would benefit from more planning.
+Feature creation requires an explicit Feature/workflow request, continuation of
+existing Feature state, or user-approved promotion from Direct work.
+
+If Direct work expands beyond its original recovery boundary, stop before
+creating persistent state. Explain what now needs scheduling/recovery and ask
+whether to promote it. Continue directly if the user prefers a single local
+implementation and that remains feasible.
+
 ## Create
 
 1. Extract a short feature name, user-facing outcome, priority, dependencies,

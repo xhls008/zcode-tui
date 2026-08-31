@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use zcode_tui::{
-    build_prompt_command, build_prompt_command_with_attachments, classify_input,
+    build_prompt_command, build_prompt_command_with_attachments, classify_input, command_catalog,
     command_palette_rows, context_watermark_warn, db_baseline, db_schema_supported,
     detect_auth_status_with, env_is_headless, extract_file_mentions, file_suggestions,
     format_context_watermark, handle_local_command, history_search, latest_assistant_text,
@@ -322,6 +322,25 @@ fn command_palette_exposes_common_commands() {
     assert!(rows.iter().any(|row| row.contains("/agents")));
     assert!(rows.iter().any(|row| row.contains("/update")));
     assert!(rows.iter().any(|row| row.contains("! <cmd>")));
+}
+
+#[test]
+fn command_catalog_has_unique_commands_and_local_model_route() {
+    let mut seen = std::collections::HashSet::new();
+    for item in command_catalog() {
+        assert!(
+            seen.insert(item.command),
+            "duplicate command catalog entry: {}",
+            item.command
+        );
+    }
+
+    let model = command_catalog()
+        .iter()
+        .find(|item| item.command == "/model")
+        .expect("/model command");
+    assert_eq!(model.route, "local");
+    assert!(model.summary.contains("app-server"));
 }
 
 #[test]

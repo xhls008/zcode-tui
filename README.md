@@ -31,7 +31,7 @@
 | 官方 CLI kernel | **0.16.5**（随 ZCode 3.9.1） |
 | zcode-tui | **0.6.7** |
 | 协议兼容 | 3.9.1：0.16.5 runtime preferences + official MCP auth 安全回退 + legacy/V4；3.8.1/3.7.7/3.7.6：0.16.3 runtime preferences + legacy/V4；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 164/164；Clippy 零告警；原生 build 通过；0.16.5 app-server `session/create` 握手正常 |
+| 当前源码验证 | Rust 测试 166/166；Clippy 零告警；原生 build 通过；0.16.5 app-server `session/create` 握手正常 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -114,7 +114,7 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   取消。ZCode 0.16.3 的非活跃 child transcript 只能经有状态 resume 读取，因此不
   自动恢复 child、不伪造定向消息，也不回退读取 SQLite；详情保留官方摘要和输出尾部。
 - **上下文与 Token 状态栏**：输入框旁始终显示父会话的 `ctx 已用/窗口 (%)` 与
-  累计 `tok`。Context 随 `state.updated` 持续更新，每轮完成后静默刷新
+  会话累计 `sess`。Context 随 `state.updated` 持续更新，每轮完成后静默刷新
   `session/usage`；`/usage [7d|30d]` 在回答流式生成期间也可立即查询，不进入队列。
 - **阶段流式（默认开启）**：接内核 `zcode app-server`
   协议（`session/create → subscribe → send`），助手正文经 `session/event`
@@ -171,7 +171,7 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   markdown 渲染，解析失败自动降级纯文本），状态栏常驻 `ctx 9.1k/200k (4%)`
   用量显示，≥80% 提示 `/compact` 或 `/new`。
 - **实时补全菜单**：输入 `/` 即弹出建议（前缀 > 子串 > 子序列模糊匹配），
-  上下键选择、`Tab`/`Enter` 接受、`Esc` 关闭。
+  上下键选择；`Enter` 直接执行高亮命令，`Tab` 仅补全以便继续填写参数，`Esc` 关闭。
 - **`@文件` 提及**：输入 `@` 补全项目内路径（跳过 .git/target/node_modules）；
   提交时存在的 `@路径` 在经典路径翻译成 `--attach`，在流式路径翻译成
   `session/send` 的 `attachments[]`（图片扩展名走 image、其余按扩展名给

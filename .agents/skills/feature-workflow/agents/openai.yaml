@@ -1,6 +1,6 @@
 interface:
   display_name: "Feature Workflow"
-  short_description: "Deliver features with adaptive, gated workflows"
-  default_prompt: "Use $feature-workflow to create and deliver this feature safely."
+  short_description: "Route small changes directly; manage explicit Features"
+  default_prompt: "Use $feature-workflow to choose Direct delivery or manage an explicit Feature without silently creating workflow state."
 policy:
   allow_implicit_invocation: true

@@ -1,16 +1,66 @@
 ---
 name: feature-workflow
-description: Manage feature-driven software delivery with persistent queue state, Lite/Deep risk routing, isolated Git worktrees, gated verification, resumable execution, and optional parallel agents. Use when creating, scheduling, implementing, verifying, completing, blocking, resuming, or auditing repository features. Do not use for a one-off code edit that does not need persistent feature state.
+description: Manage explicitly requested or existing repository Features with persistent queue state, Lite/Deep risk routing, isolated worktrees, gated verification, and resumable delivery. If considered implicitly for an ordinary change, route it to Direct delivery and never create Feature state.
 ---
 
 # Feature Workflow
 
-Use Feature as the unit of user value, context, recovery, and delivery. Keep the
-default path light; make state transitions and irreversible effects explicit.
+Use the smallest delivery boundary that preserves the user's intent. Direct
+changes are the default for ordinary work; Feature is the unit of persistent
+planning, recovery, scheduling, and delivery only when that lifecycle is
+actually wanted.
+
+## Activation gate
+
+Skill selection and Feature creation are separate decisions. Implicit selection
+must never create queue state, Feature documents, branches, worktrees, tags, or
+archives by itself.
+
+Use the **Direct path** when the user asks for a bounded implementation, fix,
+refactor, documentation update, build adjustment, or other coherent change and
+does not explicitly ask for a Feature/workflow lifecycle. Direct remains valid
+when the change touches several related files, needs tests, or is followed by a
+commit/build/install. Multiple small fixes in the same working context may also
+stay Direct.
+
+Use a **Managed Feature** only when at least one is true:
+
+- the user explicitly asks to create/use/start a Feature or the Feature
+  Workflow;
+- the request names or continues an existing queue Feature;
+- the user asks for persistent scheduling, a Feature Map/DAG, resumable staged
+  delivery, independent worktrees, Feature archives, or Feature-level parallel
+  delegation;
+- the task grows beyond a direct recovery boundary and the user agrees to
+  promote it.
+
+Merely calling product behavior a "feature" or "feature request" is not an
+explicit workflow request. The user must ask to create, initialize, schedule,
+start, or manage it as a Feature, or refer to existing Feature state.
+
+Complexity, risk signals, or the mere presence of `feature-workflow/` do not
+authorize silent promotion. If a request no longer fits Direct, explain the
+specific reason and ask before creating Feature state.
+
+### Direct path
+
+For Direct work:
+
+1. Inspect the relevant repository state and preserve unrelated user changes.
+2. Implement the smallest complete change in the current worktree.
+3. Verify proportionally to risk.
+4. Commit, build, install, push, or otherwise mutate external state only when
+   requested or already authorized by the task.
+
+Do not initialize the workflow, call `workflow.py`, mutate `queue.json`, create
+Feature documents, open a Feature worktree, run Feature review gates, create a
+Feature tag, or archive delivery evidence. Ordinary test output and a concise
+handoff are sufficient.
 
 ## First use
 
-If `feature-workflow/config.json` is absent, run the bundled script from this
+This section applies only after the activation gate selects Managed Feature. If
+`feature-workflow/config.json` is absent, run the bundled script from this
 plugin's `scripts/workflow.py`:
 
 ```bash
@@ -28,6 +78,8 @@ reinitialization.
 
 ## Route by intent
 
+- Direct implementation: use the Direct path above; do not read managed
+  lifecycle references.
 - Create, split, enrich, or review a feature: read
   [references/planning.md](references/planning.md).
 - Start, implement, verify, resume, or complete one feature: read
@@ -41,6 +93,9 @@ Read only the references needed for the current request.
 
 ## Invariants
 
+- Direct work has no Feature business state and must not appear in the queue or
+  archive.
+- Never silently promote Direct work into a Managed Feature.
 - `feature-workflow/queue.json` is the business-state source of truth.
 - Git is the code-state source of truth.
 - `features/archive/archive.json` and Git tags are persistent delivery records.

@@ -725,11 +725,6 @@ pub fn command_catalog() -> &'static [CommandSpec] {
             route: "local",
         },
         CommandSpec {
-            command: "/model",
-            summary: "forward model selection to ZCode",
-            route: "zcode",
-        },
-        CommandSpec {
             command: "/mode",
             summary: "show or switch permission mode; Shift+Tab cycles",
             route: "local",
