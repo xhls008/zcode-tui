@@ -1069,10 +1069,9 @@ impl UiState {
     /// delivery has become visible. A command response alone is not enough:
     /// live 3.5.3 reports guide/queue in the subsequent queue frame.
     fn apply_v4_frame(&mut self, params: serde_json::Value) {
-        self.agents
-            .merge_snapshots(zcode_tui::parse_v4_agent_snapshots(&params));
         let previous_revision = self.v4_state.revision;
         let effect = self.v4_state.apply_frame(&params);
+        self.agents.merge_snapshots(effect.agent_snapshots);
         if self.v4_state.revision != previous_revision {
             let revision = self.v4_state.revision.unwrap_or(0);
             self.log_debug(&format!("v4: frame revision={revision}"));
@@ -2190,7 +2189,6 @@ impl UiState {
                     match conn.send("session/subscribe", app_subscribe_params(&session_id)) {
                         Ok(sub_id) => {
                             self.app_session = Some(session_id);
-                            self.refresh_subagents();
                             if let Some(connect) = &mut self.app_connect {
                                 connect.phase = ConnectPhase::Subscribe(sub_id);
                             }
@@ -2575,6 +2573,10 @@ fi"#
                     // Retain checkpoint ids as /rewind targets (the turn
                     // itself only counts them for the files-changed note).
                     self.capture_rewind_event(&event);
+                    // Agent lifecycle/progress is an Inspector-only side
+                    // channel. Capture it during active turns without adding
+                    // anything to the Messenger transcript.
+                    self.capture_background_task_event(&event);
                     // ZCode 3.3.4 background tasks (subagent/bash backgrounding).
                     // Surface lifecycle events as a safe system line when an
                     // app-server version emits them.
@@ -2584,7 +2586,6 @@ fi"#
                             | "background_task_updated"
                             | "background_task_completed"
                     ) {
-                        self.capture_background_task_event(&event);
                         self.log.push(LogLine::new(
                             LogKind::System,
                             &format_background_task(&event),
@@ -2603,6 +2604,10 @@ fi"#
                         TurnDelta::Text => self.app_append_text(),
                         TurnDelta::ToolFinished(idx) => self.app_push_tool_entry(idx),
                         TurnDelta::Done => {
+                            // New kernels may place the authoritative final
+                            // response on turn.completed rather than emitting
+                            // every byte as text_delta.
+                            self.app_append_text();
                             self.finalize_app_turn();
                             return;
                         }
@@ -3111,6 +3116,7 @@ fi"#
                     ControlReq::CancelBackgroundTask { task_id } => {
                         self.agents.finish_cancel(&task_id);
                     }
+                    ControlReq::SubagentsRefresh => self.agents.finish_refresh(),
                     _ => {}
                 }
                 false
@@ -3165,6 +3171,7 @@ fi"#
                 true
             }
             Some(ControlReq::SubagentsRefresh) => {
+                self.agents.finish_refresh();
                 if message.contains("Method not found") {
                     self.log_debug("agents: session/subagents unavailable (legacy kernel)");
                     self.status = "agents: lifecycle events only".to_string();
@@ -3265,6 +3272,7 @@ fi"#
                 }
             }
             Some(ControlReq::SubagentsRefresh) => {
+                self.agents.finish_refresh();
                 if let Some(result) = result {
                     self.agents
                         .merge_snapshots(zcode_tui::parse_subagents_result(result));
@@ -4360,22 +4368,33 @@ fi"#
     }
 
     fn open_background_tasks(&mut self) {
-        self.refresh_subagents();
         self.agents.open();
         self.show_palette = false;
         self.show_help = false;
         self.status = "agent inspector: read-only · input target parent".to_string();
+        self.refresh_subagents();
+        if self.agents.is_refreshing() {
+            self.status =
+                "agent inspector: refreshing · read-only · input target parent".to_string();
+        }
     }
 
     fn refresh_subagents(&mut self) {
+        if !self.agents.begin_refresh() {
+            return;
+        }
         let Some(session_id) = self.app_session.clone() else {
+            self.agents.finish_refresh();
+            self.status = "agents unavailable: no active parent session".to_string();
             return;
         };
-        self.send_control(
+        if !self.send_control(
             "session/subagents",
             zcode_tui::app_subagents_params(&session_id),
             ControlReq::SubagentsRefresh,
-        );
+        ) {
+            self.agents.finish_refresh();
+        }
     }
 
     fn cancel_selected_background_task(&mut self) {
@@ -6936,6 +6955,7 @@ mod tests {
             child_session_id: Some("child-render".to_string()),
             title: Some("reviewer".to_string()),
             summary: Some("inspect state reconciliation".to_string()),
+            output_tail: Some("mapped parser → state → inspector".to_string()),
             status: Some("running".to_string()),
             ..Default::default()
         }]);
@@ -6950,7 +6970,8 @@ mod tests {
         let narrow = render_inspector_text(&state, 56, 18);
         assert!(narrow.contains("viewing: read-only"));
         assert!(narrow.contains("input target: parent"));
-        assert!(narrow.contains("child-render"));
+        assert!(narrow.contains("live progress"));
+        assert!(narrow.contains("mapped parser"));
     }
 
     #[test]
@@ -6992,10 +7013,7 @@ mod tests {
         assert_eq!(state.history.last().map(String::as_str), Some("/agents"));
         assert!(state.agents.selected_is_parent());
         assert_eq!(state.agents.visible_tasks().len(), 2);
-        assert_eq!(
-            state.status,
-            "agent inspector: read-only · input target parent"
-        );
+        assert_eq!(state.status, "agents unavailable: no active parent session");
     }
 
     #[test]

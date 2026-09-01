@@ -31,7 +31,7 @@
 | 官方 CLI kernel | **0.16.5**（随 ZCode 3.9.1） |
 | zcode-tui | **0.6.7** |
 | 协议兼容 | 3.9.1：0.16.5 runtime preferences + official MCP auth 安全回退 + legacy/V4；3.8.1/3.7.7/3.7.6：0.16.3 runtime preferences + legacy/V4；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 166/166；Clippy 零告警；原生 build 通过；0.16.5 app-server `session/create` 握手正常 |
+| 当前源码验证 | Rust 测试 170/170；Clippy 零告警；原生 build 通过；0.16.5 app-server `session/create` 与真实对话流正常 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
@@ -108,11 +108,13 @@ tmux、无桌面服务器和纯键盘工作流一个能立即使用的终端界�
   失败 ✗）和最新 reasoning；仅运行时显示、结束即清场；schema 不识别或库缺失
   时整组自动降级。
 - **Agent Inspector**：`/agents` 从官方 `session/subagents`、V4 状态和生命周期
-  事件归并父 Agent、Subagent 与 Background 工作。支持 Agents/Background 分页、
-  列表/详情、刷新与稳定选择；界面始终标明只读查看和 `input target: parent`。
+  事件归并父 Agent、Subagent 与 Background 工作。打开弹层即自动刷新，支持
+  Agents/Background 分页、列表/详情与稳定选择；ZCode 0.16.5 的 V4
+  `subagent` 行及 `summaryText` 增量会作为有界实时进度显示，最终结果仍以
+  `session/subagents.summary` 为准。界面始终标明只读查看和 `input target: parent`。
   只有官方声明 `cancellable=true` 且带真实 `taskId` 的 Background 记录可用 `x`
   取消。ZCode 0.16.3 的非活跃 child transcript 只能经有状态 resume 读取，因此不
-  自动恢复 child、不伪造定向消息，也不回退读取 SQLite；详情保留官方摘要和输出尾部。
+  自动恢复 child、不伪造定向消息，也不回退读取 SQLite；详情展示官方实时进度与摘要。
 - **上下文与 Token 状态栏**：输入框旁始终显示父会话的 `ctx 已用/窗口 (%)` 与
   会话累计 `sess`。Context 随 `state.updated` 持续更新，每轮完成后静默刷新
   `session/usage`；`/usage [7d|30d]` 在回答流式生成期间也可立即查询，不进入队列。
@@ -416,7 +418,8 @@ text                         通过 app-server 发送 prompt（不可用时回�
                              后回放最近对话
 /sessions                    浮层选择最近会话并接续
 /agents                      只读查看父 Agent、Subagent 与 Background；Tab 分页，
-                             Enter 详情，r 刷新，合格任务可按 x 取消
+                             打开时自动刷新，Enter 查看实时进度/摘要，r 手动刷新，
+                             合格任务可按 x 取消
 /new                         重开会话，上下文重置
 /diff [args]                 git diff 语法着色（--staged、路径等）
 /ide [path]                  在 IDE 中打开 cwd 或指定路径

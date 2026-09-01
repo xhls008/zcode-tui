@@ -155,7 +155,7 @@ def run(width, switch_background=False, cancel_scenario=False):
             dsr_tail = probe[-3:]
             visible = ANSI.sub("", raw.decode("utf-8", errors="replace")).replace("\r", "")
             screen = re.sub(r"\s+", "", visible)
-            if not sent_hello and "ctx--·tok--" in screen:
+            if not sent_hello and "ctx--·sess--" in screen:
                 os.write(master, b"interrupt me\r" if cancel_scenario else b"hello\r")
                 sent_hello = True
             elif cancel_scenario and not sent_escape and "ctx12k/200k" in screen:
@@ -166,7 +166,12 @@ def run(width, switch_background=False, cancel_scenario=False):
                 sent_second = True
             elif cancel_scenario and sent_second and "continued-parent-session" in screen:
                 break
-            elif not cancel_scenario and sent_hello and not sent_agents and "tok42k" in screen:
+            elif (
+                not cancel_scenario
+                and sent_hello
+                and not sent_agents
+                and "ctx12k/200k" in screen
+            ):
                 os.write(master, b"/agents\r")
                 sent_agents = True
             elif (
@@ -206,7 +211,7 @@ require(
     narrow,
 )
 require("80-column footer shows current context", "ctx12k/200k(6%)" in narrow, narrow)
-require("80-column footer shows refreshed tokens", "tok42k" in narrow, narrow)
+require("80-column footer shows refreshed tokens", "42k" in narrow, narrow)
 
 wide = run(120, switch_background=True)
 require("120-column Background tab shows Bash work", "buildcheck" in wide)
@@ -223,7 +228,11 @@ require(
 
 cancelled = run(100, cancel_scenario=True)
 require("Esc reports preserved parent session", "sessionpreserved" in cancelled, cancelled)
-require("ctx and tok refresh before thinking ends", "tok16k" in cancelled, cancelled)
+require(
+    "ctx and sess refresh before thinking ends",
+    "ctx12k/200k" in cancelled and "16k" in cancelled,
+    cancelled,
+)
 require(
     "prompt after Esc continues the same session",
     "continued-parent-session" in cancelled and "wrong-new-session" not in cancelled,

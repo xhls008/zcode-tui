@@ -39,7 +39,14 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     } else {
         "  Background  "
     };
-    let title = format!(" inspector · {agents_tab} {background_tab} · Tab switches · r refreshes ");
+    let refresh = if state.agents.is_refreshing() {
+        " · refreshing…"
+    } else {
+        ""
+    };
+    let title = format!(
+        " inspector · {agents_tab} {background_tab}{refresh} · Tab switches · r refreshes "
+    );
     let block = inspector_block(state, &title);
     let inner = block.inner(area);
     let parts = Layout::default()
@@ -67,8 +74,9 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             .filter(|title| !title.is_empty())
             .unwrap_or(&task.tool);
         let detail = task
-            .summary
+            .output_tail
             .as_deref()
+            .or(task.summary.as_deref())
             .or(task.command.as_deref())
             .unwrap_or(&task.id);
         items.push(ListItem::new(status_line(
@@ -80,7 +88,11 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     }
     if items.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled(
-            "No background work reported by the kernel.",
+            if state.agents.is_refreshing() {
+                "Refreshing official Agent state…"
+            } else {
+                "No work reported by the kernel. Press r to refresh."
+            },
             t.dim(),
         ))));
     }
@@ -179,12 +191,38 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
                 &mut lines,
                 state,
                 "transcript",
-                "unavailable without stateful child resume; showing official summary only",
+                "full child transcript unavailable; live progress follows the parent V4 stream",
             );
         }
         push_field(&mut lines, state, "status", &task.status);
         push_optional(&mut lines, state, "title", task.title.as_deref());
-        push_optional(&mut lines, state, "summary", task.summary.as_deref());
+        if let Some(output) = task.output_tail.as_deref() {
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if task.kind == AgentWorkKind::Subagent {
+                        "live progress"
+                    } else {
+                        "output tail"
+                    },
+                    t.accent(),
+                ),
+                Span::styled(" · newest 16k characters retained", t.dim()),
+            ]));
+            lines.extend(output.lines().map(|line| Line::from(line.to_string())));
+        } else if task.kind == AgentWorkKind::Subagent && !status_is_terminal(&task.status) {
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                "live progress: waiting for the next official Subagent update…",
+                t.dim(),
+            )));
+        }
+        if task.summary.is_some() {
+            lines.push(Line::default());
+            push_optional(&mut lines, state, "final summary", task.summary.as_deref());
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled("identity and controls", t.dim())));
         push_optional(&mut lines, state, "taskId", task.task_id.as_deref());
         push_optional(
             &mut lines,
@@ -234,11 +272,6 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
                 ]));
             }
         }
-        if let Some(output) = task.output_tail.as_deref() {
-            lines.push(Line::default());
-            lines.push(Line::from(Span::styled("output tail", t.dim())));
-            lines.extend(output.lines().map(|line| Line::from(line.to_string())));
-        }
     }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
@@ -252,6 +285,22 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             .scroll((state.agents.detail_scroll(), 0)),
         inner,
     );
+}
+
+fn status_is_terminal(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "completed"
+            | "complete"
+            | "success"
+            | "succeeded"
+            | "failed"
+            | "error"
+            | "lost"
+            | "cancelled"
+            | "canceled"
+            | "stopped"
+    )
 }
 
 fn push_optional<'a>(lines: &mut Vec<Line<'a>>, state: &UiState, label: &str, value: Option<&str>) {

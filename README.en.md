@@ -37,7 +37,7 @@ palette, and editor workflows are handled locally.
 | Official CLI kernel | **0.16.5** (bundled with ZCode 3.9.1) |
 | zcode-tui | **0.6.7** |
 | Protocol compatibility | 3.9.1: 0.16.5 runtime preferences + safe official-MCP-auth fallback + legacy/V4; 3.8.1/3.7.7/3.7.6: 0.16.3 runtime preferences + legacy/V4; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 166/166 Rust tests; zero-warning Clippy; native build; verified 0.16.5 app-server `session/create` handshake |
+| Current source verification | 170/170 Rust tests; zero-warning Clippy; native build; verified 0.16.5 app-server `session/create` and live conversation stream |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -183,8 +183,11 @@ for details.
   search.
 - `/agents` is a read-only Agent Inspector backed by official
   `session/subagents`, V4 state, and lifecycle events. It separates the parent,
-  Subagents, and Background work; supports tabs, details, refresh, and stable
-  selection; and always labels the composer target as the parent. Press `x`
+  Subagents, and Background work; refreshes automatically when opened; supports
+  tabs, details, manual refresh, and stable selection; and always labels the
+  composer target as the parent. ZCode 0.16.5 V4 `subagent` rows and
+  `summaryText` deltas provide a bounded live-progress view, while the final
+  result remains authoritative from `session/subagents.summary`. Press `x`
   only on Background records that the kernel marks `cancellable=true` and gives
   a real `taskId`. Inactive child transcripts on ZCode 0.16.3 require a stateful
   resume, so the TUI deliberately shows official summaries/output tails only,
@@ -355,7 +358,7 @@ text                         send through app-server (fallback: --prompt)
 /theme [list|dark|light|tsinghua|pku|solarized-dark|solarized-light|dracula|nord|gruvbox-dark|tokyo-night|accessible]
                              list or persistently switch built-in/custom themes
 /agents                      inspect parent, Subagents, and Background work
-                             (read-only; Tab/Enter/r; x cancels eligible work)
+                             (auto-refresh; Tab/Enter/r; x cancels eligible work)
 /mcp list                    list project and user MCP servers
 /mcp add <name> <cmd> [args] add stdio MCP server
 /mcp add --transport http|sse <name> <url>

@@ -2331,6 +2331,23 @@ fn turn_accumulates_text_deltas_and_ignores_unknown() {
 }
 
 #[test]
+fn zcode_0165_turn_completed_supplies_final_response_and_ends_turn() {
+    use zcode_tui::{decode_app_message, AppServerMessage, AppServerTurn, TurnDelta};
+
+    let raw = r#"{"method":"session/event","params":{"type":"turn.completed","payload":{"response":"你好，我是 GLM。","resultType":"success","duration":927}}}"#;
+    let Some(AppServerMessage::Event(event)) = decode_app_message(raw) else {
+        panic!("expected turn.completed event");
+    };
+    assert_eq!(event.kind, "turn.completed");
+    assert_eq!(event.output.as_deref(), Some("你好，我是 GLM。"));
+
+    let mut turn = AppServerTurn::default();
+    assert_eq!(turn.apply(&event), TurnDelta::Done);
+    assert_eq!(turn.text, "你好，我是 GLM。");
+    assert!(turn.done);
+}
+
+#[test]
 fn turn_tracks_tool_calls_start_to_result() {
     use zcode_tui::{decode_app_message, AppServerMessage, AppServerTurn, TurnDelta};
     let mut turn = AppServerTurn::default();
@@ -2490,6 +2507,19 @@ fn state_update_marks_turn_end_on_prompt_completed() {
     let started = serde_json::json!({"reason":"prompt_started","patch":{"status":"running"}});
     let completed =
         serde_json::json!({"reason":"prompt_completed","patch":{"mode":{"current":"build"}}});
+    // ZCode 0.16.5 emits this provider-settings acknowledgement immediately
+    // after session/send and before turn.started/model.streaming. Treating it
+    // as the turn terminator produces a false "(no output)" response.
+    let early_provider_ack = serde_json::json!({
+        "reason": "prompt_completed",
+        "patch": {
+            "appliedProviderRevision": 7,
+            "mode": {"current": "build"},
+            "model": {"current": {"modelId": "glm-5.3-flash"}},
+            "permission": {"current": "default"},
+            "thoughtLevel": {"current": "medium"}
+        }
+    });
     let status_completed = serde_json::json!({"reason":"whatever","patch":{"status":"completed"}});
     // `idle`/`ready` are a settling state the kernel can emit *before* tokens
     // flow on a reused session — they must NOT finalize the turn (would show
@@ -2498,6 +2528,7 @@ fn state_update_marks_turn_end_on_prompt_completed() {
     let ready = serde_json::json!({"patch":{"status":"ready"}});
     assert!(!app_state_is_turn_end(&started));
     assert!(app_state_is_turn_end(&completed));
+    assert!(!app_state_is_turn_end(&early_provider_ack));
     assert!(app_state_is_turn_end(&status_completed));
     assert!(!app_state_is_turn_end(&idle));
     assert!(!app_state_is_turn_end(&ready));
@@ -3045,6 +3076,53 @@ fn v4_frames_track_revision_rows_and_semantic_guide_delivery() {
 }
 
 #[test]
+fn v4_subagent_rows_accumulate_live_summary_text() {
+    use zcode_tui::V4ConversationState;
+
+    let mut state = V4ConversationState::default();
+    let snapshot = serde_json::json!({
+        "frame": {"payload": {"kind": "snapshot", "snapshot": {
+            "revision": 8,
+            "rows": {"window": [{
+                "rowId": 12,
+                "entityId": "agent-live",
+                "kind": "subagent",
+                "subagentType": "Explore",
+                "status": "running",
+                "childSessionId": "child-live",
+                "parentToolCallId": "call-live",
+                "summaryText": "Scanning"
+            }]}
+        }}}
+    });
+    let effect = state.apply_frame(&snapshot);
+    assert_eq!(effect.agent_snapshots.len(), 1);
+    assert_eq!(
+        effect.agent_snapshots[0].output_tail.as_deref(),
+        Some("Scanning")
+    );
+    assert_eq!(
+        effect.agent_snapshots[0].child_session_id.as_deref(),
+        Some("child-live")
+    );
+
+    let delta = serde_json::json!({
+        "frame": {"payload": {"kind": "deltas", "deltas": [{
+            "op": "row.delta",
+            "rowId": 12,
+            "path": "summaryText",
+            "append": " repository files"
+        }]}}
+    });
+    let effect = state.apply_frame(&delta);
+    assert_eq!(effect.agent_snapshots.len(), 1);
+    assert_eq!(
+        effect.agent_snapshots[0].output_tail.as_deref(),
+        Some("Scanning repository files")
+    );
+}
+
+#[test]
 fn v4_command_ack_requires_semantic_status() {
     use zcode_tui::parse_v4_command_ack;
     let accepted = parse_v4_command_ack(&serde_json::json!({
@@ -3363,4 +3441,26 @@ fn v4_snapshot_and_subagent_lifecycle_event_are_decoded() {
     assert_eq!(event.agent_id.as_deref(), Some("agent-event"));
     assert_eq!(event.summary.as_deref(), Some("inspect architecture"));
     assert_eq!(event.revision, Some(12));
+
+    let progress = serde_json::json!({
+        "method": "session/event",
+        "params": {
+            "type": "subagent_message",
+            "payload": {
+                "childSessionId": "child-event",
+                "agentId": "agent-event",
+                "text": "mapped the parser call chain"
+            }
+        }
+    })
+    .to_string();
+    let Some(zcode_tui::AppServerMessage::Event(event)) = zcode_tui::decode_app_message(&progress)
+    else {
+        panic!("expected decoded subagent progress event");
+    };
+    assert_eq!(event.kind, "subagent_message");
+    assert_eq!(
+        event.output.as_deref(),
+        Some("mapped the parser call chain")
+    );
 }

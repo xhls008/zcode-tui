@@ -340,7 +340,19 @@ pub fn v4_file_rewind_preview_params(
     })
 }
 
-/// A V4 conversation row reduced to the fields needed by `/rewind`.
+const AGENT_OUTPUT_TAIL_CHARS: usize = 16_000;
+
+fn bounded_text_tail(value: &str) -> String {
+    let count = value.chars().count();
+    value
+        .chars()
+        .skip(count.saturating_sub(AGENT_OUTPUT_TAIL_CHARS))
+        .collect()
+}
+
+/// A V4 conversation row reduced to the fields needed by `/rewind` and the
+/// read-only Agent Inspector. ZCode 0.16.5 publishes Subagent progress as a
+/// `kind:"subagent"` row whose `summaryText` grows through `row.delta`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V4ConversationRow {
     pub row_id: u64,
@@ -352,6 +364,11 @@ pub struct V4ConversationRow {
     pub deletions: u64,
     pub file_state: Option<String>,
     pub can_rewind_files: bool,
+    pub child_session_id: Option<String>,
+    pub subagent_type: Option<String>,
+    pub parent_tool_call_id: Option<String>,
+    pub work_id: Option<String>,
+    pub summary_text: Option<String>,
 }
 
 fn parse_v4_row(value: &serde_json::Value) -> Option<V4ConversationRow> {
@@ -360,7 +377,7 @@ fn parse_v4_row(value: &serde_json::Value) -> Option<V4ConversationRow> {
         row_id: value.get("rowId")?.as_u64()?,
         entity_id: value.get("entityId")?.as_str()?.to_string(),
         kind: str_at(value, "kind"),
-        state: str_at(value, "state"),
+        state: string_alias(value, &["state", "status"]).unwrap_or_default(),
         files: changes
             .and_then(|v| v.get("files"))
             .and_then(serde_json::Value::as_u64)
@@ -381,7 +398,28 @@ fn parse_v4_row(value: &serde_json::Value) -> Option<V4ConversationRow> {
             .pointer("/actions/canRewindFiles")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+        child_session_id: string_alias(value, &["childSessionId"]),
+        subagent_type: string_alias(value, &["subagentType", "agentType"]),
+        parent_tool_call_id: string_alias(value, &["parentToolCallId", "toolCallId"]),
+        work_id: string_alias(value, &["workId", "taskId"]),
+        summary_text: string_alias(value, &["summaryText"]).map(|text| bounded_text_tail(&text)),
     })
+}
+
+impl V4ConversationRow {
+    fn agent_snapshot(&self) -> Option<AgentSnapshot> {
+        (self.kind == "subagent").then(|| AgentSnapshot {
+            kind: "subagent".to_string(),
+            task_id: self.work_id.clone(),
+            child_session_id: self.child_session_id.clone(),
+            agent_id: Some(self.entity_id.clone()),
+            tool_call_id: self.parent_tool_call_id.clone(),
+            title: self.subagent_type.clone(),
+            status: (!self.state.is_empty()).then(|| self.state.clone()),
+            output_tail: self.summary_text.clone(),
+            ..Default::default()
+        })
+    }
 }
 
 /// Minimal snapshot/delta cache for the hybrid V4 control plane. The V4
@@ -403,6 +441,7 @@ pub struct V4ConversationState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct V4FrameEffect {
     pub deliveries: Vec<(String, String)>,
+    pub agent_snapshots: Vec<AgentSnapshot>,
 }
 
 impl V4ConversationState {
@@ -447,6 +486,7 @@ impl V4ConversationState {
         if let Some(queue) = patch.get("queue") {
             self.apply_queue(queue, effect);
         }
+        append_agent_container(&mut effect.agent_snapshots, patch);
     }
 
     fn upsert_row(&mut self, row: V4ConversationRow) {
@@ -492,6 +532,12 @@ impl V4ConversationState {
                     .and_then(|v| v.as_array())
                     .map(|rows| rows.iter().filter_map(parse_v4_row).collect())
                     .unwrap_or_default();
+                append_agent_container(&mut effect.agent_snapshots, snapshot);
+                effect.agent_snapshots.extend(
+                    self.rows
+                        .iter()
+                        .filter_map(V4ConversationRow::agent_snapshot),
+                );
                 self.input_deliveries.clear();
                 if let Some(queue) = snapshot.get("queue") {
                     self.apply_queue(queue, &mut effect);
@@ -510,7 +556,29 @@ impl V4ConversationState {
                         }
                         Some("row.appended") | Some("row.upserted") => {
                             if let Some(row) = delta.get("row").and_then(parse_v4_row) {
+                                if let Some(snapshot) = row.agent_snapshot() {
+                                    effect.agent_snapshots.push(snapshot);
+                                }
                                 self.upsert_row(row);
+                            }
+                        }
+                        Some("row.delta") => {
+                            let row_id = delta.get("rowId").and_then(serde_json::Value::as_u64);
+                            let path = delta.get("path").and_then(|value| value.as_str());
+                            let append = delta.get("append").and_then(|value| value.as_str());
+                            if let (Some(row_id), Some("summaryText"), Some(append)) =
+                                (row_id, path, append)
+                            {
+                                if let Some(row) =
+                                    self.rows.iter_mut().find(|row| row.row_id == row_id)
+                                {
+                                    let mut output = row.summary_text.take().unwrap_or_default();
+                                    output.push_str(append);
+                                    row.summary_text = Some(bounded_text_tail(&output));
+                                    if let Some(snapshot) = row.agent_snapshot() {
+                                        effect.agent_snapshots.push(snapshot);
+                                    }
+                                }
                             }
                         }
                         Some("row.removed") => {
@@ -1011,15 +1079,22 @@ fn string_alias(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
 fn parse_agent_snapshot(value: &serde_json::Value, kind: &str) -> Option<AgentSnapshot> {
     let snapshot = AgentSnapshot {
         kind: kind.to_string(),
-        task_id: string_alias(value, &["taskId", "task_id"]),
+        task_id: string_alias(value, &["taskId", "task_id", "workId"]),
         child_session_id: string_alias(value, &["childSessionId", "child_session_id", "sessionId"]),
-        agent_id: string_alias(value, &["agentId", "agent_id"]),
-        tool_call_id: string_alias(value, &["toolCallId", "tool_call_id"]),
-        title: string_alias(value, &["title", "name", "toolName"]),
+        agent_id: string_alias(value, &["agentId", "agent_id", "entityId"]),
+        tool_call_id: string_alias(value, &["toolCallId", "tool_call_id", "parentToolCallId"]),
+        title: string_alias(
+            value,
+            &["title", "name", "toolName", "subagentType", "agentType"],
+        ),
         summary: string_alias(value, &["summary", "description", "message"]),
         status: string_alias(value, &["status", "state"]),
         command: string_alias(value, &["command"]),
-        output_tail: string_alias(value, &["outputTail", "lastOutput", "output"]),
+        output_tail: string_alias(
+            value,
+            &["outputTail", "lastOutput", "output", "summaryText"],
+        )
+        .map(|text| bounded_text_tail(&text)),
         pid: value.get("pid").and_then(serde_json::Value::as_u64),
         cancellable: value
             .get("cancellable")
@@ -1110,6 +1185,15 @@ pub fn parse_v4_agent_snapshots(params: &serde_json::Value) -> Vec<AgentSnapshot
         Some("snapshot") => {
             if let Some(snapshot) = payload.get("snapshot") {
                 append_agent_container(&mut output, snapshot);
+                if let Some(rows) = snapshot.pointer("/rows/window").and_then(|v| v.as_array()) {
+                    output.extend(
+                        rows.iter()
+                            .filter(|row| {
+                                row.get("kind").and_then(|value| value.as_str()) == Some("subagent")
+                            })
+                            .filter_map(|row| parse_agent_snapshot(row, "subagent")),
+                    );
+                }
             }
         }
         Some("deltas") => {
@@ -1119,6 +1203,13 @@ pub fn parse_v4_agent_snapshots(params: &serde_json::Value) -> Vec<AgentSnapshot
                         append_agent_container(&mut output, patch);
                     }
                     if let Some(row) = delta.get("subagent") {
+                        if let Some(snapshot) = parse_agent_snapshot(row, "subagent") {
+                            output.push(snapshot);
+                        }
+                    }
+                    if let Some(row) = delta.get("row").filter(|row| {
+                        row.get("kind").and_then(|value| value.as_str()) == Some("subagent")
+                    }) {
                         if let Some(snapshot) = parse_agent_snapshot(row, "subagent") {
                             output.push(snapshot);
                         }
@@ -2032,6 +2123,24 @@ pub fn decode_app_message(line: &str) -> Option<AppServerMessage> {
                 .and_then(|k| k.as_str())
                 .or_else(|| value.pointer("/params/type").and_then(|t| t.as_str()))?
                 .to_string();
+            let output = payload
+                .pointer("/result/content")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    (kind == "turn.completed")
+                        .then(|| str_field("response"))
+                        .flatten()
+                })
+                .or_else(|| {
+                    matches!(kind.as_str(), "subagent_message" | "subagent_updated")
+                        .then(|| {
+                            ["summaryText", "text", "message"]
+                                .into_iter()
+                                .find_map(str_field)
+                        })
+                        .flatten()
+                });
             Some(AppServerMessage::Event(AppServerEvent {
                 kind,
                 delta: payload
@@ -2045,11 +2154,9 @@ pub fn decode_app_message(line: &str) -> Option<AppServerMessage> {
                     .unwrap_or(false),
                 tool_name: str_field("toolName"),
                 tool_call_id: str_field("toolCallId"),
-                // `result` events nest the tool output under /result/content.
-                output: payload
-                    .pointer("/result/content")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
+                // Tool results nest output under /result/content. Subagent
+                // progress uses summaryText/text/message on 0.16.5.
+                output,
                 success: payload
                     .pointer("/result/success")
                     .and_then(serde_json::Value::as_bool),
@@ -2066,7 +2173,9 @@ pub fn decode_app_message(line: &str) -> Option<AppServerMessage> {
                 status: str_field("status"),
                 pid: payload.get("pid").and_then(serde_json::Value::as_u64),
                 title: str_field("title").or_else(|| str_field("name")),
-                summary: str_field("summary").or_else(|| str_field("message")),
+                summary: str_field("summary")
+                    .or_else(|| str_field("summaryText"))
+                    .or_else(|| str_field("message")),
                 cancellable: payload
                     .get("cancellable")
                     .or_else(|| payload.get("canCancel"))
@@ -2498,16 +2607,17 @@ pub fn app_session_id_from_result(result: &serde_json::Value) -> Option<String> 
         .map(str::to_string)
 }
 
-/// Whether a `state.updated` marks the running turn as finished. The kernel
-/// signals turn completion with `reason == "prompt_completed"` — there is no
-/// `finish` session/event — so this is the authoritative turn terminator. A
-/// status patch to the unambiguous terminal `completed` is a version-tolerant
-/// fallback. `idle`/`ready` are deliberately NOT treated as turn-end: the
-/// kernel can emit them as a settling state on a reused session *before* tokens
-/// flow, which would finalize the turn prematurely as "(no output)".
+/// Whether a `state.updated` marks the running turn as finished. Older kernels
+/// use `reason == "prompt_completed"`; newer kernels also emit that reason for
+/// a provider-settings acknowledgement *before* `turn.started`. The latter is
+/// identified by `appliedProviderRevision` and must not finalize the turn as
+/// "(no output)". An explicit terminal status remains a version-tolerant end.
 pub fn app_state_is_turn_end(params: &serde_json::Value) -> bool {
     if params.get("reason").and_then(|r| r.as_str()) == Some("prompt_completed") {
-        return true;
+        let provider_settings_ack = params.pointer("/patch/appliedProviderRevision").is_some();
+        if !provider_settings_ack {
+            return true;
+        }
     }
     params.pointer("/patch/status").and_then(|s| s.as_str()) == Some("completed")
 }
@@ -2762,6 +2872,20 @@ impl AppServerTurn {
                 TurnDelta::Done
             }
             "text_end" if event.done => {
+                self.done = true;
+                TurnDelta::Done
+            }
+            "turn.completed" => {
+                // ZCode 0.16.5 terminates turns with this session-level event.
+                // `response` is the authoritative full-text fallback; retain
+                // streamed text when it already matches, otherwise fill or
+                // complete the accumulator from the final response.
+                if let Some(response) = event.output.as_deref().filter(|text| !text.is_empty()) {
+                    if self.text.is_empty() || response.starts_with(&self.text) {
+                        self.text.clear();
+                        self.text.push_str(response);
+                    }
+                }
                 self.done = true;
                 TurnDelta::Done
             }

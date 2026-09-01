@@ -23,6 +23,15 @@ pub(crate) enum InspectorView {
 }
 
 const PARENT_KEY: &str = "parent";
+const OUTPUT_TAIL_CHARS: usize = 16_000;
+
+fn bounded_tail(value: &str) -> String {
+    let count = value.chars().count();
+    value
+        .chars()
+        .skip(count.saturating_sub(OUTPUT_TAIL_CHARS))
+        .collect()
+}
 
 /// One child-agent or background-shell record. Protocol identifiers are kept
 /// distinct even though the UI also exposes a compact preferred `id`.
@@ -96,7 +105,9 @@ impl BackgroundTask {
         merge_option(&mut self.title, incoming.title);
         merge_option(&mut self.summary, incoming.summary);
         merge_option(&mut self.command, incoming.command);
-        merge_option(&mut self.output_tail, incoming.output_tail);
+        if let Some(output) = incoming.output_tail {
+            self.output_tail = Some(bounded_tail(&output));
+        }
         if incoming.pid.is_some() {
             self.pid = incoming.pid;
         }
@@ -135,6 +146,20 @@ impl BackgroundTask {
         }
         .cloned()
         .unwrap_or_else(|| self.id.clone());
+    }
+
+    fn append_output(&mut self, delta: &str) {
+        if delta.is_empty()
+            || self
+                .output_tail
+                .as_deref()
+                .is_some_and(|output| output.ends_with(delta))
+        {
+            return;
+        }
+        let mut output = self.output_tail.take().unwrap_or_default();
+        output.push_str(delta);
+        self.output_tail = Some(bounded_tail(&output));
     }
 
     fn inspector_key(&self) -> String {
@@ -194,6 +219,7 @@ pub(crate) struct AgentInspectorState {
     selected_key: Option<String>,
     detail_scroll: u16,
     cancel_in_flight: HashSet<String>,
+    refresh_in_flight: bool,
 }
 
 impl AgentInspectorState {
@@ -211,6 +237,22 @@ impl AgentInspectorState {
 
     pub(crate) fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub(crate) fn is_refreshing(&self) -> bool {
+        self.refresh_in_flight
+    }
+
+    pub(crate) fn begin_refresh(&mut self) -> bool {
+        if self.refresh_in_flight {
+            return false;
+        }
+        self.refresh_in_flight = true;
+        true
+    }
+
+    pub(crate) fn finish_refresh(&mut self) {
+        self.refresh_in_flight = false;
     }
 
     pub(crate) fn open(&mut self) -> bool {
@@ -231,6 +273,7 @@ impl AgentInspectorState {
     pub(crate) fn reset(&mut self) {
         self.tasks.clear();
         self.cancel_in_flight.clear();
+        self.refresh_in_flight = false;
         self.close();
     }
 
@@ -397,8 +440,9 @@ impl AgentInspectorState {
         }
     }
 
-    fn merge_task(&mut self, incoming: BackgroundTask) {
+    fn merge_task(&mut self, incoming: BackgroundTask) -> String {
         let mut settled_task_id = None;
+        let key;
         if let Some(existing) = self
             .tasks
             .iter_mut()
@@ -412,10 +456,12 @@ impl AgentInspectorState {
             if terminal_status(&existing.status) {
                 settled_task_id.clone_from(&existing.task_id);
             }
+            key = existing.inspector_key();
         } else {
             if terminal_status(&incoming.status) {
                 settled_task_id.clone_from(&incoming.task_id);
             }
+            key = incoming.inspector_key();
             self.tasks.insert(0, incoming);
         }
         if let Some(task_id) = settled_task_id {
@@ -424,6 +470,7 @@ impl AgentInspectorState {
         if self.open && self.selected().is_none() {
             self.selected_key = self.visible_keys().into_iter().next();
         }
+        key
     }
 
     /// Merge lifecycle events from both background Bash and Subagent domains.
@@ -437,14 +484,19 @@ impl AgentInspectorState {
             "subagent_stopped" | "subagent_completed" => ("subagent", "completed"),
             _ => return false,
         };
-        self.merge_snapshots(vec![AgentSnapshot {
+        let progress = matches!(event.kind.as_str(), "subagent_message" | "subagent_updated");
+        let output_delta = progress
+            .then(|| event.output.as_deref().or(event.summary.as_deref()))
+            .flatten()
+            .map(str::to_string);
+        let Some(task) = BackgroundTask::from_snapshot(AgentSnapshot {
             kind: kind.to_string(),
             task_id: event.task_id.clone(),
             child_session_id: event.child_session_id.clone(),
             agent_id: event.agent_id.clone(),
             tool_call_id: event.tool_call_id.clone(),
             title: event.title.clone().or_else(|| event.tool_name.clone()),
-            summary: event.summary.clone(),
+            summary: (!progress).then(|| event.summary.clone()).flatten(),
             status: Some(
                 event
                     .status
@@ -452,11 +504,23 @@ impl AgentInspectorState {
                     .unwrap_or_else(|| fallback_status.to_string()),
             ),
             command: event.command.clone(),
-            output_tail: event.output.clone(),
+            output_tail: (!progress).then(|| event.output.clone()).flatten(),
             pid: event.pid,
             cancellable: event.cancellable,
             revision: event.revision,
-        }]);
+        }) else {
+            return false;
+        };
+        let key = self.merge_task(task);
+        if let Some(delta) = output_delta {
+            if let Some(task) = self
+                .tasks
+                .iter_mut()
+                .find(|task| task.inspector_key() == key)
+            {
+                task.append_output(&delta);
+            }
+        }
         true
     }
 }
@@ -583,5 +647,57 @@ mod tests {
         assert!(!state.cancel_pending("task-exact"));
         assert!(state.task_is_terminal("task-exact"));
         assert!(!state.selected_cancel_eligible());
+    }
+
+    #[test]
+    fn subagent_progress_appends_without_replacing_final_summary() {
+        let mut state = AgentInspectorState::default();
+        state.merge_snapshots(vec![AgentSnapshot {
+            kind: "subagent".to_string(),
+            child_session_id: Some("child-live".to_string()),
+            agent_id: Some("agent-live".to_string()),
+            summary: Some("final result remains authoritative".to_string()),
+            status: Some("success".to_string()),
+            ..Default::default()
+        }]);
+
+        state.ingest(&AppServerEvent {
+            kind: "subagent_message".to_string(),
+            child_session_id: Some("child-live".to_string()),
+            agent_id: Some("agent-live".to_string()),
+            output: Some("first update".to_string()),
+            ..Default::default()
+        });
+        state.ingest(&AppServerEvent {
+            kind: "subagent_message".to_string(),
+            child_session_id: Some("child-live".to_string()),
+            agent_id: Some("agent-live".to_string()),
+            output: Some(" + second update".to_string()),
+            ..Default::default()
+        });
+
+        let task = &state.tasks[0];
+        assert_eq!(
+            task.summary.as_deref(),
+            Some("final result remains authoritative")
+        );
+        assert_eq!(
+            task.output_tail.as_deref(),
+            Some("first update + second update")
+        );
+        assert_eq!(task.status, "success");
+    }
+
+    #[test]
+    fn refresh_state_is_single_flight_and_resettable() {
+        let mut state = AgentInspectorState::default();
+        assert!(state.begin_refresh());
+        assert!(state.is_refreshing());
+        assert!(!state.begin_refresh());
+        state.finish_refresh();
+        assert!(!state.is_refreshing());
+        assert!(state.begin_refresh());
+        state.reset();
+        assert!(!state.is_refreshing());
     }
 }
