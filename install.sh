@@ -95,7 +95,8 @@ if $BUILD; then
     echo "building release binary..."
     cargo build --release --quiet --manifest-path "${REPO_DIR}/Cargo.toml"
 
-    install -Dm755 "${REPO_DIR}/target/release/zcode-tui" "$TUI_BIN"
+    mkdir -p "$BIN_DIR"
+    install -m755 "${REPO_DIR}/target/release/zcode-tui" "$TUI_BIN"
     echo "installed ${TUI_BIN} ($("$TUI_BIN" --version))"
 else
     if [ ! -x "$TUI_BIN" ]; then
@@ -241,7 +242,8 @@ echo "       was found (the kernel needs node:sqlite). Install Node.js >= 22.5 o
 echo "       Electron desktop libraries; ZCODE_FORCE_SYSTEM_NODE=1 forces system node." >&2
 exit 127
 WRAP
-    sed -i "s|__TUI_BIN__|${TUI_BIN}|" "$WRAPPER"
+    sed -i.bak "s|__TUI_BIN__|${TUI_BIN}|" "$WRAPPER"
+    rm -f "${WRAPPER}.bak"
     chmod +x "$WRAPPER"
     echo "installed ${WRAPPER}"
 fi
