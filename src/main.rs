@@ -902,6 +902,8 @@ enum ControlReq {
     /// Esc cancellation barrier. Its response means the stopped turn has
     /// settled and the same session can safely accept the next prompt.
     StopTurn,
+    /// V4 stop reaches the foreground runtime even after legacy admission.
+    V4StopTurn,
     /// /rewind: previewFileRewind in flight; the result feeds the preview
     /// stage of the overlay (dropped if the overlay was closed meanwhile).
     RewindPreview(RewindTarget),
@@ -2528,6 +2530,22 @@ fi"#
         }
         if self.app_turn.is_some() {
             let stop_sent = self.app_session.clone().is_some_and(|session_id| {
+                if self.v4_mode == V4Mode::Available {
+                    let command_id = self.next_v4_command_id("stop");
+                    return self.send_control(
+                        "v4/command",
+                        v4_command_params(
+                            &command_id,
+                            &self.v4_client_id,
+                            &session_id,
+                            "stop",
+                            serde_json::json!({}),
+                            V4CommandBase::None,
+                            unix_time_ms(),
+                        ),
+                        ControlReq::V4StopTurn,
+                    );
+                }
                 self.send_control(
                     "session/stop",
                     app_stop_params(&session_id),
@@ -2539,7 +2557,7 @@ fi"#
             }
             self.finalize_app_turn();
             // The kernel keeps emitting the stopped turn's tail (its own
-            // `prompt_completed` included). Swallow it before the next prompt
+            // admission acknowledgement included). Swallow it before the next prompt
             // reuses the session, or it would bleed into — and prematurely
             // finalize — the next turn.
             if stop_sent {
@@ -2551,7 +2569,7 @@ fi"#
     }
 
     /// Drain app-server events into the streaming turn each loop tick. Text
-    /// deltas grow the transcript entry live; a `finish` event finalizes; a
+    /// deltas grow the transcript entry live; a terminal event finalizes; a
     /// dead connection downgrades and either retries or keeps the partial.
     fn pump_app_turn(&mut self) {
         // A cancelled turn's tail is being swallowed before the next prompt.
@@ -2570,6 +2588,10 @@ fi"#
         while let Some(message) = self.app_conn.as_mut().and_then(AppServerConn::poll) {
             match message {
                 AppServerMessage::Event(event) => {
+                    if event.kind == "turn.failed" {
+                        self.end_app_turn_abnormally("turn.failed");
+                        return;
+                    }
                     // Retain checkpoint ids as /rewind targets (the turn
                     // itself only counts them for the files-changed note).
                     self.capture_rewind_event(&event);
@@ -2624,8 +2646,8 @@ fi"#
                     if let Some(todos) = parse_todos(&params) {
                         self.todos = todos;
                     }
-                    // The kernel ends a turn with a `prompt_completed` state
-                    // update, not a session/event — this is the terminator.
+                    // Admission acknowledgements are not completion in 3.11.2.
+                    // Prefer turn.completed; allow explicit terminal status.
                     if app_state_is_turn_end(&params) {
                         self.finalize_app_turn();
                         return;
@@ -2780,9 +2802,9 @@ fi"#
 
     /// Swallow a cancelled turn's trailing events until its terminator lands, so
     /// nothing bleeds into the next prompt on the reused session. Context
-    /// watermarks are still worth keeping; everything else is discarded. If the
-    /// kernel never sends a clean terminator, the stop response acts as the
-    /// barrier. A final timeout releases the UI but never discards sessionId.
+    /// watermarks are still worth keeping; everything else is discarded. The
+    /// legacy stop response can also act as a barrier, but V4 acceptance cannot.
+    /// A timeout kills the owned transport and retains a resumable session ID.
     fn drain_cancelled_turn(&mut self) {
         if !self.app_conn.as_ref().is_some_and(AppServerConn::is_alive) {
             self.app_draining = None;
@@ -2797,6 +2819,7 @@ fi"#
                     ) || (event.kind == "text_end" && event.done) =>
                 {
                     self.app_draining = None;
+                    self.status = "cancelled · session preserved".to_string();
                     self.request_context_refresh();
                     return;
                 }
@@ -2804,6 +2827,7 @@ fi"#
                     self.absorb_context_state(&params);
                     if app_state_is_turn_end(&params) || app_state_turn_error(&params).is_some() {
                         self.app_draining = None;
+                        self.status = "cancelled · session preserved".to_string();
                         self.request_context_refresh();
                         return;
                     }
@@ -2836,9 +2860,16 @@ fi"#
             .is_some_and(|started| started.elapsed() > Duration::from_secs(10))
         {
             self.app_draining = None;
-            self.status = "cancelled · session preserved".to_string();
-            self.log_debug("cancel drain timed out; preserving session for reconnect/reuse");
-            self.request_context_refresh();
+            // Do not reuse a possibly still-running runtime after a failed stop.
+            // Dropping the owned connection kills its process group, then resume
+            // the persisted session on the next prompt rather than losing it.
+            self.config.resume = self.app_session.take();
+            self.app_conn = None;
+            self.control_requests.clear();
+            self.context_refresh_in_flight = false;
+            self.context_refresh_pending = false;
+            self.status = "cancel timed out · reconnect on next prompt".to_string();
+            self.log_debug("cancel drain timed out; stopped transport, preserved resume id");
         }
     }
 
@@ -3166,6 +3197,12 @@ fi"#
                 self.log_debug(&format!("session/stop failed: {message}"));
                 true
             }
+            Some(ControlReq::V4StopTurn) => {
+                self.push_error(&format!(
+                    "V4 stop failed: {message}; waiting for turn to stop"
+                ));
+                true
+            }
             Some(ControlReq::Usage(tag)) => {
                 self.push_error(&format!("usage {tag} failed: {message}"));
                 true
@@ -3244,6 +3281,21 @@ fi"#
                 self.app_draining = None;
                 self.status = "cancelled · session preserved".to_string();
                 self.request_context_refresh();
+            }
+            Some(ControlReq::V4StopTurn) => {
+                if result
+                    .and_then(parse_v4_command_ack)
+                    .is_some_and(|ack| ack.accepted())
+                {
+                    // V4 acknowledges the stop request before the runtime has
+                    // finished cancelling. Only its terminal event releases the
+                    // drain barrier; otherwise the tail can end the next turn.
+                    if self.app_draining.is_some() {
+                        self.status = "cancelling · awaiting turn completion".to_string();
+                    }
+                } else {
+                    self.push_error("V4 stop was not accepted; waiting for turn to stop");
+                }
             }
             Some(ControlReq::V4SetGuide {
                 content,
@@ -7098,6 +7150,29 @@ mod tests {
         state.drain_cancelled_turn();
         assert!(state.app_draining.is_none());
         assert_eq!(state.app_session.as_deref(), Some("sess_keep"));
+    }
+
+    #[test]
+    fn v4_stop_ack_does_not_release_drain_barrier() {
+        let mut state = UiState::new(AppConfig::default(), "zcode".to_string());
+        state.app_session = Some("sess_keep".to_string());
+        for result in [
+            None,
+            Some(serde_json::json!({"commandId":"stop-1","status":"rejected"})),
+        ] {
+            state.app_draining = Some(Instant::now());
+            state.control_requests.insert(77, ControlReq::V4StopTurn);
+            state.on_control_ok(77, result.as_ref());
+            assert!(state.app_draining.is_some());
+            assert_eq!(state.app_session.as_deref(), Some("sess_keep"));
+        }
+        state.control_requests.insert(78, ControlReq::V4StopTurn);
+        state.on_control_ok(
+            78,
+            Some(&serde_json::json!({"commandId":"stop-2","status":"accepted"})),
+        );
+        assert!(state.app_draining.is_some());
+        assert_eq!(state.status, "cancelling · awaiting turn completion");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 > v0.6.0 界面实机截图：ZCode CLI kernel 0.16.3，macOS。展示自适应 ASCII
 > 品牌面板、终端原生 scrollback、app-server 阶段追加，以及只读的父 Agent /
-> Subagent / Background Inspector；当前源码另已实测适配 ZCode Linux 3.9.1。
+> Subagent / Background Inspector；当前源码另已实测适配 ZCode Linux 3.11.2。
 
 > **非官方声明**：`zcode-tui` 不是 ZCode / 智谱官方项目，也未获得官方背书。
 > 它是社区/个人维护的 Linux 终端 fallback，用来补齐官方包当前缺失的 TUI 体验。
@@ -27,14 +27,30 @@
 
 | 组件 | 当前版本 / 状态 |
 |---|---|
-| ZCode Linux x64 桌面包 | **3.9.1-5853**（官方 deb，SHA-512 已校验） |
-| 官方 CLI kernel | **0.16.5**（随 ZCode 3.9.1） |
-| zcode-tui | **0.6.7** |
-| 协议兼容 | 3.9.1：0.16.5 runtime preferences + official MCP auth 安全回退 + legacy/V4；3.8.1/3.7.7/3.7.6：0.16.3 runtime preferences + legacy/V4；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 170/170；Clippy 零告警；原生 build 通过；0.16.5 app-server `session/create` 与真实对话流正常 |
+| ZCode Linux x64 桌面包 | **3.11.2-6792**（官方 deb，SHA-512 已校验） |
+| 官方 CLI kernel | **0.16.5**（3.11.2 与 3.9.1 版本号相同，但内核文件和行为不同） |
+| zcode-tui | **0.6.8** |
+| 协议兼容 | 3.11.2：按真实 `turn.completed` 收尾 + V4 前台取消；3.9.1：0.16.5 runtime preferences + official MCP auth 安全回退 + legacy/V4；3.8.1/3.7.7/3.7.6：0.16.3 runtime preferences + legacy/V4；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
+| 当前源码验证 | Rust 测试 172/172；Clippy 零告警；原生 build；11/11 确定性 PTY；另有显式运行的真实内核隔离测试 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。
+
+**官方 TUI 状态（2026-09-05）**：3.11.2 Linux x64 包仍未交付 `@zcode/tui`，
+直接执行官方 `tui` 会报包缺失。托管 wrapper 仍优先探测官方 TUI，仅在不可用时
+回退；此结论不代表其他平台或独立 CLI 发行渠道。
+
+官方无版本号 Linux feed 此次仍返回 3.9.1，官网已发布 3.11.2；更新检测显示的
+“最新”仅指该 feed。3.11.2 校验使用官网链接的版本化 `linux-x64/latest.yml`，
+没有绕过 SHA-512，也没有修改系统安装。
+
+真实内核回归可用以下命令重跑（Node ≥ 22.5；临时 HOME + 本地模拟模型，无真实
+凭据或付费模型请求；覆盖流式输出、连续对话、取消后续接、关闭/恢复）：
+
+```bash
+ZCODE_TEST_CJS=/path/to/resources/glm/zcode.cjs \
+  cargo test --locked --test official_kernel -- --ignored --nocapture
+```
 
 ## 项目主题
 

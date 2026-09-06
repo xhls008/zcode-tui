@@ -1,0 +1,8 @@
+{
+  "schema": "feature-review/v1",
+  "feature_id": "feat-zcode-3112-compat",
+  "status": "passed",
+  "score": 90,
+  "reviewed_at": "2026-09-05T13:57:00Z",
+  "blocking_issues": []
+}

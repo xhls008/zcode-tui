@@ -68,6 +68,10 @@ for line in sys.stdin:
         send_count += 1
         result = {"accepted": True, "sessionId": "parent-pty", "stateRevision": 1}
         print(json.dumps({"id": ident, "result": result}), flush=True)
+        # ZCode 3.11.2 acknowledges admission before the first output token.
+        print(json.dumps({"method": "state.updated", "params": {
+            "sessionId": "parent-pty", "reason": "prompt_completed",
+            "patch": {"mode": {"current": "build"}}}}), flush=True)
         if cancel_scenario:
             delta = "partial-before-esc" if send_count == 1 else (
                 "continued-parent-session" if create_count == 1 else "wrong-new-session"
@@ -76,6 +80,8 @@ for line in sys.stdin:
                 "type": "model.streaming", "payload": {
                     "kind": "text_delta", "delta": delta, "done": False}}}), flush=True)
             if send_count > 1:
+                print(json.dumps({"method": "session/event", "params": {
+                    "type": "turn.completed", "payload": {}}}), flush=True)
                 context_used = 13000 if create_count == 1 else 14000
                 print(json.dumps({"method": "state.updated", "params": {
                     "sessionId": "parent-pty", "reason": "prompt_completed",
@@ -90,6 +96,8 @@ for line in sys.stdin:
         print(json.dumps({"method": "session/event", "params": {
             "type": "model.streaming", "payload": {
                 "kind": "text_delta", "delta": "ready", "done": False}}}), flush=True)
+        print(json.dumps({"method": "session/event", "params": {
+            "type": "turn.completed", "payload": {}}}), flush=True)
         print(json.dumps({"method": "state.updated", "params": {
             "sessionId": "parent-pty", "reason": "prompt_completed",
             "patch": {"status": "idle", "context": {

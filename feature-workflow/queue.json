@@ -1,10 +1,28 @@
 {
   "schema": "feature-workflow/v1",
   "meta": {
-    "last_updated": "2026-08-31T09:38:22Z"
+    "last_updated": "2026-09-05T13:56:14Z"
   },
   "parents": [],
-  "active": [],
+  "active": [
+    {
+      "id": "feat-zcode-3112-compat",
+      "name": "ZCode 3.11.2 CLI compatibility and official TUI verification",
+      "description": "Verify the latest official Linux CLI/TUI and preserve zcode-tui session and streaming compatibility with minimal changes.",
+      "priority": 50,
+      "workflow_mode": "deep",
+      "risk_signals": [
+        "compatibility",
+        "external_dependency"
+      ],
+      "dependencies": [],
+      "status": "active",
+      "created_at": "2026-09-05T13:55:23Z",
+      "branch": "feature/feat-zcode-3112-compat",
+      "worktree": "../zcode_tui-feat-zcode-3112-compat",
+      "started_at": "2026-09-05T13:56:14Z"
+    }
+  ],
   "pending": [],
   "blocked": [],
   "completed": [

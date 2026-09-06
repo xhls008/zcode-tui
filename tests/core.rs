@@ -2502,7 +2502,7 @@ fn skyline_graphics_wanted_defaults_on_and_yields_to_text_modes() {
 }
 
 #[test]
-fn state_update_marks_turn_end_on_prompt_completed() {
+fn state_update_does_not_end_turn_on_early_prompt_completed() {
     use zcode_tui::app_state_is_turn_end;
     let started = serde_json::json!({"reason":"prompt_started","patch":{"status":"running"}});
     let completed =
@@ -2523,11 +2523,11 @@ fn state_update_marks_turn_end_on_prompt_completed() {
     let status_completed = serde_json::json!({"reason":"whatever","patch":{"status":"completed"}});
     // `idle`/`ready` are a settling state the kernel can emit *before* tokens
     // flow on a reused session — they must NOT finalize the turn (would show
-    // "(no output)" prematurely). Only prompt_completed / status:completed do.
+    // "(no output)" prematurely). 3.11.2 prompt_completed is also an early ack.
     let idle = serde_json::json!({"reason":"whatever","patch":{"status":"idle"}});
     let ready = serde_json::json!({"patch":{"status":"ready"}});
     assert!(!app_state_is_turn_end(&started));
-    assert!(app_state_is_turn_end(&completed));
+    assert!(!app_state_is_turn_end(&completed));
     assert!(!app_state_is_turn_end(&early_provider_ack));
     assert!(app_state_is_turn_end(&status_completed));
     assert!(!app_state_is_turn_end(&idle));
@@ -2546,9 +2546,36 @@ fn state_update_flags_abnormal_turn_end() {
     assert_eq!(app_state_turn_error(&errored).as_deref(), Some("error"));
     assert_eq!(app_state_turn_error(&aborted).as_deref(), Some("Aborted"));
     assert_eq!(app_state_turn_error(&failed).as_deref(), Some("failed"));
+    // Wrapper notifications may trail the real turn.failed into a later turn.
+    assert!(app_state_turn_error(&serde_json::json!({"reason":"prompt_failed"})).is_none());
     assert!(app_state_turn_error(&running).is_none());
     // An abnormal end is not a normal completion.
     assert!(!app_state_is_turn_end(&errored));
+}
+
+#[test]
+fn zcode_3112_admission_ack_does_not_truncate_stream_or_empty_completion() {
+    use zcode_tui::{
+        app_state_is_turn_end, decode_app_message, AppServerMessage, AppServerTurn, TurnDelta,
+    };
+    let lines: Vec<_> = include_str!("fixtures/zcode-3.11.2-early-completion.jsonl")
+        .lines()
+        .collect();
+    let mut turn = AppServerTurn::default();
+    for (index, line) in lines.iter().enumerate() {
+        let done = match decode_app_message(line).unwrap() {
+            AppServerMessage::StateUpdated(state) => app_state_is_turn_end(&state),
+            AppServerMessage::Event(event) => turn.apply(&event) == TurnDelta::Done,
+            other => panic!("unexpected fixture message: {other:?}"),
+        };
+        assert_eq!(done, index == lines.len() - 1);
+    }
+    assert_eq!(turn.text, "compatibility-ok");
+    // A genuinely empty successful turn still completes; no text-length heuristic.
+    let AppServerMessage::Event(event) = decode_app_message(lines.last().unwrap()).unwrap() else {
+        panic!("terminal event")
+    };
+    assert_eq!(AppServerTurn::default().apply(&event), TurnDelta::Done);
 }
 
 #[test]
