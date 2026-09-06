@@ -37,7 +37,7 @@ palette, and editor workflows are handled locally.
 | Official CLI kernel | **0.16.5** (same version string as 3.9.1, different bundle and behavior) |
 | zcode-tui | **0.6.8** |
 | Protocol compatibility | 3.11.2: real `turn.completed` termination + V4 foreground cancellation; 3.9.1: 0.16.5 runtime preferences + safe official-MCP-auth fallback + legacy/V4; 3.8.1/3.7.7/3.7.6: 0.16.3 runtime preferences + legacy/V4; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 162/162 Rust tests; zero-warning Clippy; native build; 11/11 deterministic PTY checks; additional opt-in isolated real-kernel test |
+| Current source verification | 172/172 Rust tests; zero-warning Clippy; native build; 11/11 deterministic PTY checks; additional opt-in isolated real-kernel test |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated

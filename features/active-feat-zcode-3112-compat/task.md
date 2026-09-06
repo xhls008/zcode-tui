@@ -22,3 +22,8 @@
   Rechecked the official website and versioned feed: latest remains 3.11.2.
   Preparing v0.6.8 with repeat verification, merge, archive and tag publication;
   installed ZCode and zcode-tui binaries remain untouched.
+- 2026-09-06: Rebased onto remote main `90f27722`, preserving its three
+  unpublished changes and authoritative response recovery. Resolved overlap in
+  admission handling without a duplicate terminal-event branch. Repeated all
+  checks: 172 offline tests, three live-kernel runs, 11 PTY checks, real-kernel
+  PTY cancellation/continuation, v0.6.8 wrapper routing and quality gates passed.

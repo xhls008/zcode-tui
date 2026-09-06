@@ -49,7 +49,7 @@ identify 3.11.2 as latest on 2026-09-06.
 |---|---|
 | `cargo fmt --all --check` | passed |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | passed |
-| `cargo test --locked` | 162 passed; opt-in live test ignored in this default run |
+| `cargo test --locked` | 172 passed (3 library + 43 main + 126 core); opt-in live test ignored in this default run |
 | `cargo build --release --locked` and binary version | passed, zcode-tui 0.6.8 |
 | `bash -n install.sh`, `git diff --check` | passed |
 | `tests/official_kernel.rs`, explicitly run with 3.11.2 | passed |
@@ -82,3 +82,14 @@ weakened and no automated feed-scraping update mechanism was added.
 On 2026-09-06 the user authorized merging and publishing Release v0.6.8 after
 repeat verification. Release delivery uses the existing four-platform GitHub
 Actions workflow. Local installed packages and binaries are not changed.
+
+Before release, rebased onto remote main `90f27722`, retaining its continuous
+transcript layout, slash-command routing, live Agent Inspector updates and
+authoritative final-response recovery. Removed the overlapping completion
+handler rather than duplicating it. Both plain and provider-settings admission
+acks remain nonterminal. All checks above were repeated after conflict
+resolution; wrapper routing was also repeated with the v0.6.8 binary.
+
+GitHub's direct HTTPS route timed out; a command-local existing proxy allowed
+fetch/push without changing system DNS or persistent Git configuration. Fetch
+reported an unrelated existing v0.1.0 tag mismatch; that tag was left untouched.

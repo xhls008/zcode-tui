@@ -2,14 +2,14 @@
   "schema": "feature-verification/v1",
   "feature_id": "feat-zcode-3112-compat",
   "status": "passed",
-  "verified_at": "2026-09-05T14:44:01Z",
+  "verified_at": "2026-09-06T13:06:09Z",
   "tasks": {"total": 6, "completed": 6, "incomplete": 0},
   "quality": {"status": "passed", "passed": 6, "failed": 0},
-  "tests": {"status": "passed", "passed": 165, "failed": 0, "skipped": 0},
+  "tests": {"status": "passed", "passed": 175, "failed": 0, "skipped": 0},
   "scenarios": {"total": 6, "passed": 6, "failed": 0},
   "blocking_failures": [],
   "warnings": [
-    "Test execution count is 162 offline tests plus three explicit live runs of the opt-in test; the default cargo test run ignores that opt-in test.",
+    "Test execution count is 172 offline tests plus three explicit live runs of the opt-in test; the default cargo test run ignores that opt-in test.",
     "Desktop UI/installer, authenticated official MCP/OAuth, real remote models, attachment preview UI and non-Linux runtime behavior were not tested.",
     "The unversioned Linux feed remained stale at 3.9.1; 3.11.2 was verified against its official versioned feed.",
     "Release publication was authorized on 2026-09-06; local installed binaries remain unchanged."

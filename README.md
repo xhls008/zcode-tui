@@ -31,7 +31,7 @@
 | 官方 CLI kernel | **0.16.5**（3.11.2 与 3.9.1 版本号相同，但内核文件和行为不同） |
 | zcode-tui | **0.6.8** |
 | 协议兼容 | 3.11.2：按真实 `turn.completed` 收尾 + V4 前台取消；3.9.1：0.16.5 runtime preferences + official MCP auth 安全回退 + legacy/V4；3.8.1/3.7.7/3.7.6：0.16.3 runtime preferences + legacy/V4；3.5.3：legacy + V4；3.3.6：legacy 控制路径 |
-| 当前源码验证 | Rust 测试 162/162；Clippy 零告警；原生 build；11/11 确定性 PTY；另有显式运行的真实内核隔离测试 |
+| 当前源码验证 | Rust 测试 172/172；Clippy 零告警；原生 build；11/11 确定性 PTY；另有显式运行的真实内核隔离测试 |
 
 官方 x64 feed 若出现新版本，启动提示和 `/update` 会继续按 SHA-512 校验后更新；
 协议变化仍需重新做 app-server/V4 实机验证，不能只根据 CLI 版本号假定兼容。

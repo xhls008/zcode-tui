@@ -1,184 +1,180 @@
-14:41:15.997 app-server spawned
-14:41:15.997 -> workspace/updateProviderRegistry (id 1)
-14:41:17.842 <- state.updated reason=provider_registry_updated
-14:41:17.843 <- response id 1 ok
-14:41:17.843 -> workspace/readState (id 2)
-14:41:18.006 app-server spawned
-14:41:18.006 -> workspace/updateProviderRegistry (id 1)
-14:41:18.355 <- response id 2 ok
-14:41:19.754 <- state.updated reason=provider_registry_updated
-14:41:19.755 <- response id 1 ok
-14:41:19.775 -> session/create (id 2)
-14:41:19.778 <- server-request session/requestRuntimePreferences id "server-1"
-14:41:19.855 -> server-request reply
-14:41:19.855 session/requestRuntimePreferences replied
-14:41:20.485 <- response id 2 ok
-14:41:20.498 -> session/subscribe (id 3)
-14:41:20.498 -> session/subagents (id 4)
-14:41:20.683 <- response id 3 ok
-14:41:20.684 <- response id 4 ERR Session not found: sess_4e88c07c-cb8c-42a7-8c5c-eb80d90e77ed
-14:41:20.739 -> v4/conversation/subscribe (id 5)
-14:41:20.980 <- response id 5 ok
-14:41:20.980 <- v4/conversation/frame kind=snapshot rev=0
-14:41:21.060 v4: conversation controls available
-14:41:21.060 handshake: legacy+v4 negotiation complete, sending first prompt
-14:41:21.060 -> session/send (id 6)
-14:41:21.060 v4: frame revision=0
-14:41:21.131 <- server-request session/requestRuntimePreferences id "server-2"
-14:41:21.131 <- state.updated reason=prompt_started
-14:41:21.131 <- response id 6 ok
-14:41:21.141 -> server-request reply
-14:41:21.141 session/requestRuntimePreferences replied
-14:41:21.383 <- state.updated reason=prompt_completed
-14:41:21.422 <- event session.titleUpdated
-14:41:21.424 <- other
-14:41:21.425 <- other
-14:41:21.426 <- event turn.started
-14:41:21.541 <- v4/conversation/frame kind=deltas rev=2
-14:41:21.543 v4: frame revision=2
-14:41:24.456 <- other
-14:41:25.159 <- other
-14:41:25.160 <- other
-14:41:25.170 <- event session.updated
-14:41:25.186 <- other
-14:41:25.187 <- event session.updated
-14:41:25.222 <- v4/conversation/frame kind=deltas rev=-
-14:41:25.266 <- other
-14:41:25.267 <- event text_delta +12b
-14:41:25.280 <- other
-14:41:25.280 <- event session.updated
-14:41:25.290 <- other
-14:41:25.291 <- event session.updated
-14:41:25.297 <- other
-14:41:25.298 <- other
-14:41:25.299 <- event turn.completed
-14:41:25.307 <- v4/conversation/frame kind=deltas rev=5
-14:41:25.318 -> session/read (id 7)
-14:41:25.318 turn finalized (4.3s, cancelled=false)
-14:41:25.318 -> session/usage (id 8)
-14:41:25.318 v4: frame revision=5
-14:41:25.515 <- response id 7 ok
-14:41:25.515 <- response id 8 ok
-14:41:25.560 -> session/read (id 9)
-14:41:25.741 <- response id 9 ok
-14:41:26.173 -> session/send (id 10)
-14:41:26.244 <- state.updated reason=prompt_started
-14:41:26.244 <- response id 10 ok
-14:41:26.247 <- other
-14:41:26.247 <- other
-14:41:26.248 <- event turn.started
-14:41:26.523 <- event session.updated
-14:41:26.525 <- event session.updated
-14:41:26.528 <- other
-14:41:26.528 <- event session.updated
-14:41:26.533 <- v4/conversation/frame kind=deltas rev=7
-14:41:26.534 <- state.updated reason=prompt_completed
-14:41:26.541 <- other
-14:41:26.541 <- event text_delta +13b
-14:41:26.544 <- other
-14:41:26.544 <- event session.updated
-14:41:26.550 <- other
-14:41:26.550 <- event session.updated
-14:41:26.554 <- other
-14:41:26.554 <- other
-14:41:26.554 <- event turn.completed
-14:41:26.570 <- v4/conversation/frame kind=deltas rev=10
-14:41:26.575 v4: frame revision=7
-14:41:26.575 -> session/read (id 11)
-14:41:26.575 turn finalized (0.4s, cancelled=false)
-14:41:26.575 -> session/usage (id 12)
-14:41:26.575 v4: frame revision=10
-14:41:26.763 <- response id 11 ok
-14:41:26.763 <- response id 12 ok
-14:41:26.817 -> session/read (id 13)
-14:41:27.001 <- response id 13 ok
-14:41:27.461 -> session/send (id 14)
-14:41:27.536 <- state.updated reason=prompt_started
-14:41:27.536 <- response id 14 ok
-14:41:27.538 <- other
-14:41:27.538 <- other
-14:41:27.539 <- event turn.started
-14:41:27.807 <- event session.updated
-14:41:27.807 <- event session.updated
-14:41:27.809 <- other
-14:41:27.809 <- event session.updated
-14:41:27.814 <- v4/conversation/frame kind=deltas rev=12
-14:41:27.815 <- state.updated reason=prompt_completed
-14:41:27.825 <- other
-14:41:27.825 <- event session.updated
-14:41:27.834 <- event session.updated
-14:41:27.838 <- event session.updated
-14:41:27.841 <- other
-14:41:27.841 <- event session.updated
-14:41:27.847 <- event session.updated
-14:41:27.849 <- other
-14:41:27.849 <- event session.updated
-14:41:27.856 <- v4/conversation/frame kind=deltas rev=13
-14:41:27.860 <- other
-14:41:27.860 <- event text_delta +12b
-14:41:27.863 v4: frame revision=12
-14:41:27.863 v4: frame revision=13
-14:41:27.863 -> session/read (id 15)
-14:41:28.042 <- v4/conversation/frame kind=deltas rev=14
-14:41:28.043 <- response id 15 ok
-14:41:28.105 v4: frame revision=14
-14:41:28.266 -> v4/command type=stop rev=- (id 16)
-14:41:28.266 turn finalized (0.8s, cancelled=true)
-14:41:28.266 -> session/usage (id 17)
-14:41:28.266 -> session/read (id 18)
-14:41:28.275 <- other
-14:41:28.275 <- event session.updated
-14:41:28.275 <- response id 16 ok
-14:41:28.284 <- other
-14:41:28.284 <- other
-14:41:28.284 <- event turn.completed
-14:41:28.287 <- response id 17 ok
-14:41:28.485 <- v4/conversation/frame kind=deltas rev=15
-14:41:28.486 <- response id 18 ok
-14:41:28.508 v4: frame revision=15
-14:41:28.508 -> session/read (id 19)
-14:41:28.704 <- response id 19 ok
-14:41:30.277 -> session/send (id 20)
-14:41:30.350 <- state.updated reason=prompt_started
-14:41:30.350 <- response id 20 ok
-14:41:30.353 <- other
-14:41:30.353 <- other
-14:41:30.353 <- event turn.started
-14:41:30.631 <- event session.updated
-14:41:30.632 <- event session.updated
-14:41:30.633 <- other
-14:41:30.633 <- event session.updated
-14:41:30.638 <- v4/conversation/frame kind=deltas rev=17
-14:41:30.638 <- state.updated reason=prompt_completed
-14:41:30.679 v4: frame revision=17
-14:41:34.649 <- other
-14:41:34.649 <- event session.updated
-14:41:34.666 <- event session.updated
-14:41:34.671 <- event session.updated
-14:41:34.672 <- other
-14:41:34.677 <- event session.updated
-14:41:34.680 <- event session.updated
-14:41:34.682 <- other
-14:41:34.682 <- event session.updated
-14:41:34.685 <- v4/conversation/frame kind=deltas rev=18
-14:41:34.692 <- other
-14:41:34.692 <- event text_delta +15b
-14:41:34.695 <- other
-14:41:34.695 v4: frame revision=18
-14:41:34.695 -> session/read (id 21)
-14:41:34.696 <- event session.updated
-14:41:34.700 <- other
-14:41:34.701 <- event session.updated
-14:41:34.706 <- other
-14:41:34.706 <- other
-14:41:34.706 <- event turn.completed
-14:41:34.776 turn finalized (4.5s, cancelled=false)
-14:41:34.776 -> session/usage (id 22)
-14:41:34.898 <- v4/conversation/frame kind=deltas rev=21
-14:41:34.899 <- response id 21 ok
-14:41:34.899 <- response id 22 ok
-14:41:34.936 v4: frame revision=21
-14:41:34.937 -> session/read (id 23)
-14:41:35.124 <- response id 23 ok
-14:41:35.663 -> session/close (id 24)
-14:41:35.663 session/close sent (discarding live session)
+13:05:39.420 app-server spawned
+13:05:39.420 -> workspace/updateProviderRegistry (id 1)
+13:05:41.226 <- state.updated reason=provider_registry_updated
+13:05:41.227 <- response id 1 ok
+13:05:41.227 -> workspace/readState (id 2)
+13:05:41.429 app-server spawned
+13:05:41.429 -> workspace/updateProviderRegistry (id 1)
+13:05:41.728 <- response id 2 ok
+13:05:43.182 <- state.updated reason=provider_registry_updated
+13:05:43.183 <- response id 1 ok
+13:05:43.200 -> session/create (id 2)
+13:05:43.203 <- server-request session/requestRuntimePreferences id "server-1"
+13:05:43.280 -> server-request reply
+13:05:43.280 session/requestRuntimePreferences replied
+13:05:43.911 <- response id 2 ok
+13:05:43.924 -> session/subscribe (id 3)
+13:05:44.126 <- response id 3 ok
+13:05:44.166 -> v4/conversation/subscribe (id 4)
+13:05:44.410 <- response id 4 ok
+13:05:44.411 <- v4/conversation/frame kind=snapshot rev=0
+13:05:44.488 v4: conversation controls available
+13:05:44.488 handshake: legacy+v4 negotiation complete, sending first prompt
+13:05:44.488 -> session/send (id 5)
+13:05:44.488 v4: frame revision=0
+13:05:44.560 <- server-request session/requestRuntimePreferences id "server-2"
+13:05:44.561 <- state.updated reason=prompt_started
+13:05:44.561 <- response id 5 ok
+13:05:44.568 -> server-request reply
+13:05:44.568 session/requestRuntimePreferences replied
+13:05:44.829 <- state.updated reason=prompt_completed
+13:05:44.867 <- event session.titleUpdated
+13:05:44.868 <- other
+13:05:44.869 <- other
+13:05:44.871 <- event turn.started
+13:05:44.988 <- v4/conversation/frame kind=deltas rev=2
+13:05:45.051 v4: frame revision=2
+13:05:47.873 <- other
+13:05:48.506 <- other
+13:05:48.507 <- other
+13:05:48.517 <- event session.updated
+13:05:48.542 <- other
+13:05:48.544 <- event session.updated
+13:05:48.584 <- v4/conversation/frame kind=deltas rev=-
+13:05:48.632 <- other
+13:05:48.633 <- event text_delta +12b
+13:05:48.644 <- other
+13:05:48.644 <- event session.updated
+13:05:48.653 <- other
+13:05:48.654 <- event session.updated
+13:05:48.665 <- other
+13:05:48.666 <- other
+13:05:48.667 <- event turn.completed
+13:05:48.667 -> session/read (id 6)
+13:05:48.667 turn finalized (4.2s, cancelled=false)
+13:05:48.667 -> session/usage (id 7)
+13:05:48.670 <- v4/conversation/frame kind=deltas rev=5
+13:05:48.748 v4: frame revision=5
+13:05:48.868 <- response id 6 ok
+13:05:48.869 <- response id 7 ok
+13:05:48.909 -> session/read (id 8)
+13:05:49.100 <- response id 8 ok
+13:05:49.472 -> session/send (id 9)
+13:05:49.541 <- state.updated reason=prompt_started
+13:05:49.541 <- response id 9 ok
+13:05:49.544 <- other
+13:05:49.544 <- other
+13:05:49.545 <- event turn.started
+13:05:49.826 <- event session.updated
+13:05:49.828 <- event session.updated
+13:05:49.831 <- other
+13:05:49.831 <- event session.updated
+13:05:49.836 <- v4/conversation/frame kind=deltas rev=7
+13:05:49.837 <- state.updated reason=prompt_completed
+13:05:49.844 <- other
+13:05:49.844 <- event text_delta +13b
+13:05:49.848 <- other
+13:05:49.848 <- event session.updated
+13:05:49.854 <- other
+13:05:49.854 <- event session.updated
+13:05:49.859 <- other
+13:05:49.859 <- other
+13:05:49.859 <- event turn.completed
+13:05:49.873 <- v4/conversation/frame kind=deltas rev=10
+13:05:49.874 v4: frame revision=7
+13:05:49.874 -> session/read (id 10)
+13:05:49.874 turn finalized (0.4s, cancelled=false)
+13:05:49.874 -> session/usage (id 11)
+13:05:49.874 v4: frame revision=10
+13:05:50.051 <- response id 10 ok
+13:05:50.051 <- response id 11 ok
+13:05:50.116 -> session/read (id 12)
+13:05:50.300 <- response id 12 ok
+13:05:50.761 -> session/send (id 13)
+13:05:50.829 <- state.updated reason=prompt_started
+13:05:50.829 <- response id 13 ok
+13:05:50.832 <- other
+13:05:50.832 <- other
+13:05:50.833 <- event turn.started
+13:05:51.102 <- event session.updated
+13:05:51.103 <- event session.updated
+13:05:51.104 <- other
+13:05:51.104 <- event session.updated
+13:05:51.108 <- v4/conversation/frame kind=deltas rev=12
+13:05:51.110 <- state.updated reason=prompt_completed
+13:05:51.119 <- other
+13:05:51.119 <- event session.updated
+13:05:51.128 <- event session.updated
+13:05:51.131 <- event session.updated
+13:05:51.134 <- other
+13:05:51.134 <- event session.updated
+13:05:51.136 <- event session.updated
+13:05:51.140 <- other
+13:05:51.141 <- event session.updated
+13:05:51.150 <- other
+13:05:51.150 <- event text_delta +12b
+13:05:51.150 <- v4/conversation/frame kind=deltas rev=14
+13:05:51.163 v4: frame revision=12
+13:05:51.163 -> session/read (id 14)
+13:05:51.163 v4: frame revision=14
+13:05:51.343 <- response id 14 ok
+13:05:51.565 -> v4/command type=stop rev=- (id 15)
+13:05:51.566 turn finalized (0.8s, cancelled=true)
+13:05:51.566 -> session/usage (id 16)
+13:05:51.566 -> session/read (id 17)
+13:05:51.576 <- other
+13:05:51.576 <- event session.updated
+13:05:51.577 <- response id 15 ok
+13:05:51.585 <- other
+13:05:51.585 <- other
+13:05:51.585 <- event turn.completed
+13:05:51.588 <- response id 16 ok
+13:05:51.782 <- v4/conversation/frame kind=deltas rev=15
+13:05:51.783 <- response id 17 ok
+13:05:51.807 v4: frame revision=15
+13:05:51.807 -> session/read (id 18)
+13:05:52.001 <- response id 18 ok
+13:05:53.578 -> session/send (id 19)
+13:05:53.653 <- state.updated reason=prompt_started
+13:05:53.653 <- response id 19 ok
+13:05:53.655 <- other
+13:05:53.655 <- other
+13:05:53.656 <- event turn.started
+13:05:53.924 <- event session.updated
+13:05:53.925 <- event session.updated
+13:05:53.926 <- other
+13:05:53.926 <- event session.updated
+13:05:53.930 <- v4/conversation/frame kind=deltas rev=17
+13:05:53.934 <- state.updated reason=prompt_completed
+13:05:53.981 v4: frame revision=17
+13:05:57.940 <- other
+13:05:57.941 <- event session.updated
+13:05:57.958 <- event session.updated
+13:05:57.963 <- event session.updated
+13:05:57.965 <- other
+13:05:57.965 <- event session.updated
+13:05:57.972 <- event session.updated
+13:05:57.974 <- other
+13:05:57.974 <- event session.updated
+13:05:57.977 <- v4/conversation/frame kind=deltas rev=18
+13:05:57.984 <- other
+13:05:57.984 <- event text_delta +15b
+13:05:57.989 <- other
+13:05:57.989 <- event session.updated
+13:05:57.995 <- other
+13:05:57.995 <- event session.updated
+13:05:57.999 v4: frame revision=18
+13:05:57.999 -> session/read (id 20)
+13:05:58.002 <- other
+13:05:58.002 <- other
+13:05:58.002 <- event turn.completed
+13:05:58.080 turn finalized (4.5s, cancelled=false)
+13:05:58.080 -> session/usage (id 21)
+13:05:58.207 <- v4/conversation/frame kind=deltas rev=21
+13:05:58.208 <- response id 20 ok
+13:05:58.208 <- response id 21 ok
+13:05:58.241 v4: frame revision=21
+13:05:58.241 -> session/read (id 22)
+13:05:58.418 <- response id 22 ok
+13:05:58.967 -> session/close (id 23)
+13:05:58.967 session/close sent (discarding live session)
