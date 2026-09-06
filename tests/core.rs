@@ -541,11 +541,12 @@ fn streaming_job_delivers_all_output_with_eof_signals() {
     ];
     #[cfg(windows)]
     let command = [
-        "powershell.exe".to_string(),
-        "-NoProfile".to_string(),
-        "-Command".to_string(),
-        "1..500 | ForEach-Object { Write-Output $_ }; [Console]::Error.WriteLine('tail-marker')"
-            .to_string(),
+        // Test pipe drainage, not PowerShell startup on a cold hosted runner.
+        "cmd.exe".to_string(),
+        "/D".to_string(),
+        "/Q".to_string(),
+        "/C".to_string(),
+        "(for /L %i in (1,1,500) do @echo %i) & 1>&2 echo tail-marker".to_string(),
     ];
 
     let job = spawn_streaming_command(&command).unwrap();
