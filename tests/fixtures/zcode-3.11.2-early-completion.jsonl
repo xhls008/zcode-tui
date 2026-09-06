@@ -1,0 +1,5 @@
+{"method":"state.updated","params":{"sessionId":"sess_fixture","reason":"prompt_started","patch":{"status":"running"}}}
+{"method":"state.updated","params":{"sessionId":"sess_fixture","reason":"prompt_completed","patch":{"mode":{"current":"build"}}}}
+{"method":"session/event","params":{"sessionId":"sess_fixture","type":"turn.started","payload":{"turnNumber":0}}}
+{"method":"session/event","params":{"sessionId":"sess_fixture","type":"model.streaming","payload":{"kind":"text_delta","delta":"compatibility-ok","done":false}}}
+{"method":"session/event","params":{"sessionId":"sess_fixture","type":"turn.completed","payload":{"response":"compatibility-ok","tokenCount":13,"toolCallCount":0,"duration":100}}}

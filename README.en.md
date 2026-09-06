@@ -7,7 +7,7 @@
 > The v0.6.0 interface captured with ZCode CLI kernel 0.16.3 on macOS. It shows
 > the adaptive ASCII brand panel, native terminal scrollback, phased app-server
 > output, and the read-only parent Agent / Subagent / Background Inspector. The
-> current source is also verified against ZCode Linux 3.9.1.
+> current source is also verified against ZCode Linux 3.11.2.
 
 > **Unofficial notice**: `zcode-tui` is not an official ZCode / Zhipu project
 > and is not endorsed by ZCode or Zhipu. It is a community/personal Linux
@@ -33,16 +33,35 @@ palette, and editor workflows are handled locally.
 
 | Component | Current version / status |
 |---|---|
-| ZCode Linux x64 desktop | **3.9.1-5853** (official deb, SHA-512 verified) |
-| Official CLI kernel | **0.16.5** (bundled with ZCode 3.9.1) |
-| zcode-tui | **0.6.7** |
-| Protocol compatibility | 3.9.1: 0.16.5 runtime preferences + safe official-MCP-auth fallback + legacy/V4; 3.8.1/3.7.7/3.7.6: 0.16.3 runtime preferences + legacy/V4; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 170/170 Rust tests; zero-warning Clippy; native build; verified 0.16.5 app-server `session/create` and live conversation stream |
+| ZCode Linux x64 desktop | **3.11.2-6792** (official deb, SHA-512 verified) |
+| Official CLI kernel | **0.16.5** (same version string as 3.9.1, different bundle and behavior) |
+| zcode-tui | **0.6.8** |
+| Protocol compatibility | 3.11.2: real `turn.completed` termination + V4 foreground cancellation; 3.9.1: 0.16.5 runtime preferences + safe official-MCP-auth fallback + legacy/V4; 3.8.1/3.7.7/3.7.6: 0.16.3 runtime preferences + legacy/V4; 3.5.3: legacy + V4; 3.3.6: legacy controls |
+| Current source verification | 162/162 Rust tests; zero-warning Clippy; native build; 11/11 deterministic PTY checks; additional opt-in isolated real-kernel test |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
 against the real app-server/V4 behavior instead of being inferred from the CLI
 version alone.
+
+**Official TUI status (2026-09-05):** the 3.11.2 Linux x64 package still lacks
+`@zcode/tui`; invoking its `tui` command fails with a missing-package error.
+The managed wrapper still prefers a usable official TUI before falling back.
+This finding does not cover other platforms or standalone CLI distributions.
+
+The unversioned Linux update feed still returned 3.9.1 while the website listed
+3.11.2. Update detection only reports that feed's latest version. Verification
+used the website's versioned `linux-x64/latest.yml`, without bypassing SHA-512
+or changing the system installation.
+
+Run the real-kernel regression explicitly (Node ≥ 22.5, temporary HOME and a
+loopback fake model; no real credentials or paid model requests). It covers
+streaming, successive turns, cancellation/reuse, and close/resume:
+
+```bash
+ZCODE_TEST_CJS=/path/to/resources/glm/zcode.cjs \
+  cargo test --locked --test official_kernel -- --ignored --nocapture
+```
 
 ## Theme
 

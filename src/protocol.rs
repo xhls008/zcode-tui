@@ -2607,18 +2607,11 @@ pub fn app_session_id_from_result(result: &serde_json::Value) -> Option<String> 
         .map(str::to_string)
 }
 
-/// Whether a `state.updated` marks the running turn as finished. Older kernels
-/// use `reason == "prompt_completed"`; newer kernels also emit that reason for
-/// a provider-settings acknowledgement *before* `turn.started`. The latter is
-/// identified by `appliedProviderRevision` and must not finalize the turn as
-/// "(no output)". An explicit terminal status remains a version-tolerant end.
+/// Only an explicit terminal status ends a turn via state updates. In ZCode
+/// 3.11.2, `prompt_completed` can precede text and even turn.started;
+/// the real completion is the `turn.completed` session event. Neither that
+/// early acknowledgement nor idle/ready may truncate the active stream.
 pub fn app_state_is_turn_end(params: &serde_json::Value) -> bool {
-    if params.get("reason").and_then(|r| r.as_str()) == Some("prompt_completed") {
-        let provider_settings_ack = params.pointer("/patch/appliedProviderRevision").is_some();
-        if !provider_settings_ack {
-            return true;
-        }
-    }
     params.pointer("/patch/status").and_then(|s| s.as_str()) == Some("completed")
 }
 
