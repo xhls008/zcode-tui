@@ -15,7 +15,9 @@ use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+pub mod browser;
 pub mod theme_registry;
+pub mod upload_check;
 
 mod protocol;
 
@@ -514,6 +516,9 @@ pub fn build_prompt_command_with_attachments(
     }
     if let Some(mode) = &config.mode {
         command.extend(["--mode".to_string(), mode.clone()]);
+    } else {
+        // Headless CLI defaults to yolo; never silently elevate fallback tasks.
+        command.extend(["--mode".to_string(), "build".to_string()]);
     }
     if let Some(locale) = &config.locale {
         command.extend(["--locale".to_string(), locale.clone()]);
@@ -622,7 +627,9 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
         "exit" | "quit" => Ok(InputAction::Quit),
         "help" | "clear" | "editor" | "login" | "logout" | "auth" | "status" | "diff" | "ide"
         | "sessions" | "mode" | "theme" | "resume" | "new" | "model" | "think" | "compact"
-        | "usage" | "update" | "copy" | "rewind" | "agents" => Ok(InputAction::Local(parts)),
+        | "usage" | "update" | "copy" | "rewind" | "agents" | "check-zhipu-upload" => {
+            Ok(InputAction::Local(parts))
+        }
         "skills" => {
             let mut local = parts;
             if local.len() == 1 {
@@ -639,6 +646,11 @@ pub fn classify_input(input: &str) -> Result<InputAction> {
 
 pub fn command_catalog() -> &'static [CommandSpec] {
     &[
+        CommandSpec {
+            command: "/check-zhipu-upload",
+            summary: "read-only local Desktop upload evidence check",
+            route: "local",
+        },
         CommandSpec {
             command: "/goal",
             summary: "forward a goal to ZCode",
@@ -832,36 +844,6 @@ pub fn command_catalog() -> &'static [CommandSpec] {
     ]
 }
 
-pub fn slash_suggestions(input: &str, limit: usize) -> Vec<CommandSpec> {
-    let query = input.trim();
-    if query.is_empty() || !query.starts_with('/') || limit == 0 {
-        return Vec::new();
-    }
-    let bare = query.trim_start_matches('/');
-    let mut scored: Vec<(u8, usize, CommandSpec)> = Vec::new();
-    for (index, item) in command_catalog().iter().enumerate() {
-        if !item.command.starts_with('/') {
-            continue;
-        }
-        let rank = if item.command.starts_with(query) {
-            0
-        } else if !bare.is_empty() && item.command.contains(bare) {
-            1
-        } else if is_subsequence(query, item.command) {
-            2
-        } else {
-            continue;
-        };
-        scored.push((rank, index, *item));
-    }
-    scored.sort_by_key(|(rank, index, _)| (*rank, *index));
-    scored
-        .into_iter()
-        .take(limit)
-        .map(|(_, _, item)| item)
-        .collect()
-}
-
 fn is_subsequence(query: &str, candidate: &str) -> bool {
     let mut candidate_chars = candidate.chars().flat_map(char::to_lowercase);
     query
@@ -1047,15 +1029,6 @@ pub fn user_mcp_config_path() -> Result<PathBuf> {
         .ok()
         .or_else(|| std::env::var("USERPROFILE").ok());
     user_mcp_config_path_from(xdg.as_deref(), home.as_deref())
-}
-
-pub fn run_prompt(zcode_bin: &str, config: &AppConfig, prompt: &str) -> Result<String> {
-    let command = prompt_command_for(zcode_bin, config, prompt)?;
-    run_command(&command)
-}
-
-pub fn run_shell_command(command: &str) -> Result<String> {
-    run_command(&["sh".to_string(), "-lc".to_string(), command.to_string()])
 }
 
 pub fn run_command(command: &[String]) -> Result<String> {
@@ -1579,6 +1552,10 @@ pub fn help_text() -> &'static str {
 pub fn help_text_with_registry(registry: &theme_registry::ThemeRegistry) -> String {
     r#"zcode-tui help
 
+local privacy check (no kernel/network):
+  zcode-tui check-zhipu-upload [--json] [--list-files]
+  --home PATH / --data-base-dir PATH select data roots (see subcommand --help)
+
 keyboard shortcuts:
   Enter                        accept a suggestion or send the prompt
                                while thinking: plain text steers the answer
@@ -1611,6 +1588,7 @@ launch options:
                                deny these tools for the session
   --permission-mode <mode>     legacy alias for --mode (default = build)
   --browser-use headless       Browser Use via official classic --prompt path
+                               defaults to build; no interactive tool approvals
   --browser-executable <path>  browser binary (requires --browser-use headless)
 
   text                         send a prompt with zcode --prompt
@@ -2811,149 +2789,21 @@ pub fn context_watermark_warn(used: u64, window: u64) -> bool {
     window > 0 && used * 100 / window >= 80
 }
 
-/// A Beijing-skyline wireframe that stretches to fill `width`: four landmark
-/// motifs — 天坛 (Temple of Heaven), 鸟巢 (Bird's Nest), 长城 (Great Wall),
-/// 清华校门 (Tsinghua gate) — spread evenly over one continuous horizon with
-/// `ZhiPU` resting on it, mirroring the single-line brand mark. Pure and
-/// width-exact (every returned row has display width == `width`, all glyphs are
-/// single columns) so it can be unit-tested and re-fitted on terminal resize.
-/// Returns empty when `width` is too small to lay the motifs out without
-/// overflow — the caller then shows the wordmark alone.
-pub fn skyline_lines(width: usize) -> Vec<String> {
-    // Four Beijing landmarks in fine wireframe line-art, 8 silhouette rows each,
-    // every glyph a single column and each row left-aligned within its declared
-    // width (the layout draws onto a space-filled line, so short rows need no
-    // padding). Widths differ so the Bird's Nest and Wall read wider than the
-    // pagoda and gate, matching the real skyline's proportions.
-    #[rustfmt::skip]
-    const TIANTAN: [&str; 8] = [ // 天坛 · tiered pagoda + stepped base (13 cols)
-        "      ╷",
-        "     ╱╲",
-        "   ╭─┴─╮",
-        "   ╰┬─┬╯",
-        "  ╭┴───┴╮",
-        "  ╰─┬─┬─╯",
-        " ╭┴─────┴╮",
-        " ╘═══════╛",
-    ];
-    #[rustfmt::skip]
-    const NIAOCHAO: [&str; 8] = [ // 鸟巢 · flat woven-mesh ellipse (17 cols)
-        "",
-        "",
-        "   ╭─────────╮",
-        "  ╱╳╳╳╳╳╳╳╳╳╳╲",
-        " ╱╳╳╳╳╳╳╳╳╳╳╳╳╲",
-        " ╲╳╳╳╳╳╳╳╳╳╳╳╳╱",
-        "  ╲╳╳╳╳╳╳╳╳╳╳╱",
-        "   ╰─────────╯",
-    ];
-    #[rustfmt::skip]
-    const CHANGCHENG: [&str; 8] = [ // 长城 · watchtower + wall winding to the horizon (17 cols)
-        "  ╷ ╷ ╷",
-        " ╭┴─┴─┴╮",
-        " │ ╭─╮ │",
-        " │ │ │ │╷╷╷",
-        " │ │ │ ├┴┴┴╮",
-        " │ │ │ │   ╰─╮",
-        " │ │ │ │     ╰─╮",
-        " ╰─┴─┴─╯       ╰─",
-    ];
-    #[rustfmt::skip]
-    const XIAOMEN: [&str; 8] = [ // 清华二校门 · triple arch, tall centre, finial (13 cols)
-        "      ╷",
-        "    ╭─┴─╮",
-        "╭─────┴─────╮",
-        "│   ╭───╮   │",
-        "│╭─╮│   │╭─╮│",
-        "│││ │   │ │││",
-        "│││ │   │ │││",
-        "┴┴┴─┴───┴─┴┴┴",
-    ];
-    const MOTIFS: [&[&str]; 4] = [&TIANTAN, &NIAOCHAO, &CHANGCHENG, &XIAOMEN];
-    const WIDTHS: [usize; 4] = [13, 17, 17, 13];
-    const BRAND: &str = "ZhiPU";
-    const SILH: usize = 8; // silhouette rows above the horizon
-    let n = MOTIFS.len();
-    let motif_total: usize = WIDTHS[0] + WIDTHS[1] + WIDTHS[2] + WIDTHS[3];
-    let min_width = motif_total + (n + 1) * 2; // motifs + min 2-col gaps
-    if width < min_width {
-        return Vec::new();
-    }
-    let slack = width - motif_total;
-    let base = slack / (n + 1);
-    let extra = slack % (n + 1); // remainder spread onto the leftmost gaps
-    let gap = |i: usize| base + usize::from(i < extra);
-    // Start column of each motif (each ends at start + its own width).
-    let mut xs = Vec::with_capacity(n);
-    let mut cur = 0usize;
-    for (i, &motif_width) in WIDTHS.iter().enumerate() {
-        cur += gap(i);
-        xs.push(cur);
-        cur += motif_width;
-    }
-    let mut rows = Vec::with_capacity(SILH + 1);
-    for r in 0..SILH {
-        let mut line = vec![' '; width];
-        for (i, motif) in MOTIFS.iter().enumerate() {
-            for (j, ch) in motif[r].chars().enumerate() {
-                line[xs[i] + j] = ch;
-            }
-        }
-        rows.push(line.into_iter().collect());
-    }
-    // Continuous horizon with the brand mark resting at the centre (which, with
-    // four evenly-spread motifs, always lands in the middle gap).
-    let mut horizon = vec!['─'; width];
-    let brand_len = BRAND.chars().count();
-    let at = width / 2 - brand_len / 2;
-    for (k, ch) in BRAND.chars().enumerate() {
-        horizon[at + k] = ch;
-    }
-    rows.push(horizon.into_iter().collect());
-    rows
-}
-
-/// Fixed display width of the braille skyline and the wordmark it sits under —
-/// they render as one centred logo block (matching the reference art).
-pub const SKYLINE_LOGO_W: usize = 45;
-
-/// A higher-fidelity skyline drawn in Braille dots (2×4 sub-cells per glyph),
-/// pre-rendered at the fixed logo width so it centres under the ZCODE wordmark.
-/// Braille resolves smooth curves the box-drawing wireframe can't (the pagoda
-/// domes, the nest ellipse, the wall's winding ridge). Returns 7 silhouette rows
-/// + 1 horizon row, every row exactly `SKYLINE_LOGO_W` display columns.
-pub fn skyline_braille() -> Vec<String> {
-    // Pre-rendered (see the design prototype); every row is 45 columns wide, all
-    // glyphs single-column (braille U+28xx + box-drawing horizon).
-    const ROWS: [&str; 8] = [
-        "⠀⠀⠀⠀⠀⠀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
-        "⠀⠀⠀⠀⠰⠟⠿⠻⠆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣶⣄⠀⠀⠀⠀",
-        "⠀⠀⠀⣴⠞⠋⠉⠙⠳⣦⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠀⠀⠀⠀⠀",
-        "⠀⠀⢀⣀⣤⠤⠤⠤⣤⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣤⠀⣤⢠⡄⠀⠀⠀⠀⠀⠀⣿⠉⠉⢉⣽⠛⣯⡉⠉⠉⣿",
-        "⠀⠐⠛⠁⠀⠀⠀⠀⠀⠈⠛⠂⢀⣤⣴⠖⣶⠒⣶⠲⣦⣤⡀⣿⠉⠉⢹⣇⣒⣂⡤⠄⠀⠀⣿⣀⣀⣾⠃⠀⠘⣷⣀⣀⣿",
-        "⠀⠀⢀⣀⣀⣀⣀⣀⣀⣀⡀⢰⡏⠤⣿⠤⣿⠤⣿⠤⣿⠤⢹⣿⠀⣶⢸⡇⠀⠈⠉⠛⠿⣅⣿⡏⢹⣿⠀⠀⠀⣿⡏⢹⣿",
-        "⠀⠠⠤⠤⠤⠤⠤⠤⠤⠤⠤⠄⠙⠶⢿⣄⣿⣀⣿⣠⡿⠶⠋⣿⠀⣿⢸⡇⠀⠀⠀⠀⠀⢈⣿⣂⣀⣿⣀⣀⣀⣿⣀⣀⣿",
-        "────────────────────ZhiPU────────────────────",
-    ];
-    ROWS.iter().map(|s| (*s).to_string()).collect()
-}
-
-/// How to render the welcome skyline. `Graphics` (Sixel/Kitty true image) is a
-/// planned stage-two enhancement and not produced yet.
+/// Legacy logo preference retained for `ZCODE_TUI_SKYLINE` compatibility.
+/// The current text wordmark treats both enabled modes identically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkylineMode {
-    /// Braille-dot art — smoother curves; the default on capable terminals.
+    /// Legacy `braille` setting; enables the text wordmark.
     Braille,
-    /// Box-drawing wireframe — the widest-compatible fallback.
+    /// Legacy `wire` setting; enables the text wordmark.
     Wire,
-    /// Skyline suppressed (wordmark shows alone).
+    /// Suppress the standalone wordmark.
     None,
 }
 
-/// Pick the skyline renderer. `ZCODE_TUI_SKYLINE=braille|wire|off` forces it;
-/// otherwise `auto` prefers the smoother Braille dots when the locale is UTF-8
-/// (they need a Unicode font) and falls back to the wireframe when it clearly
-/// is not. Set `wire` if your font renders the dots as tofu/blur.
+/// Parse the legacy logo setting, preserving existing environment semantics.
+/// `braille` and `wire` now both render the same text wordmark; `off` disables
+/// the standalone logo. Locale selection is retained for API compatibility.
 pub fn skyline_mode<F>(env_lookup: F) -> SkylineMode
 where
     F: Fn(&str) -> Option<String>,
@@ -2975,20 +2825,6 @@ where
             }
         }
     }
-}
-
-/// Whether to attempt the true graphics-protocol logo (Sixel/Kitty/iTerm2). It
-/// is the default; a terminal-capability probe decides if it actually renders,
-/// falling back to the text skyline ([`skyline_mode`]) otherwise. Forcing any
-/// text mode (`wire`/`braille`/`off`) opts out of the probe entirely.
-pub fn skyline_graphics_wanted<F>(env_lookup: F) -> bool
-where
-    F: Fn(&str) -> Option<String>,
-{
-    !matches!(
-        env_lookup("ZCODE_TUI_SKYLINE").as_deref().map(str::trim),
-        Some("wire") | Some("braille") | Some("off") | Some("none") | Some("0")
-    )
 }
 
 // ---- session picker / history / ui config ---------------------------------

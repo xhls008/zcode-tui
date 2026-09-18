@@ -763,6 +763,10 @@ browser_dir = tempfile.mkdtemp(prefix="zcode-smoke-browser-")
 browser_args = os.path.join(browser_dir, "args.txt")
 browser_app_server = os.path.join(browser_dir, "app-server-called")
 browser_fake = os.path.join(browser_dir, "fake-zcode")
+browser_executable = os.path.join(browser_dir, "fake-chrome")
+with open(browser_executable, "w") as fh:
+    fh.write("#!/bin/sh\nexit 0\n")
+os.chmod(browser_executable, 0o755)
 with open(browser_fake, "w") as fh:
     fh.write(
         "#!/bin/sh\n"
@@ -784,7 +788,7 @@ out = run_pty(
         (0.5, b"\r"),
     ],
     timeout=20,
-    args=["--browser-use", "headless", "--browser-executable", "/tmp/fake-chrome"],
+    args=["--browser-use", "headless", "--browser-executable", browser_executable],
 )
 plain = strip_ansi(out)
 browser_argv = open(browser_args).read().splitlines() if os.path.exists(browser_args) else []
@@ -793,7 +797,7 @@ check("s24: Browser Use limitation is visible",
 check("s24: classic prompt returned", "browser route ok" in plain)
 check("s24: browser flags reached official CLI",
       "--browser-use" in browser_argv and "headless" in browser_argv
-      and "--browser-executable" in browser_argv and "/tmp/fake-chrome" in browser_argv)
+      and "--browser-executable" in browser_argv and browser_executable in browser_argv)
 check("s24: prompt reached official CLI",
       "--prompt" in browser_argv and "open the example page" in browser_argv)
 check("s24: app-server was not spawned", not os.path.exists(browser_app_server))

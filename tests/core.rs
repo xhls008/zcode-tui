@@ -10,7 +10,7 @@ use zcode_tui::{
     live_tool_chips, load_mcp_config, login_command, logout_command, mask_secret,
     open_kernel_db_ro, pad_display, parse_cli_args, parse_hex_color, parse_part_data,
     parse_prompt_summary, parse_ui_config, path_tail, recent_input_history, relative_age,
-    save_mcp_config, save_ui_theme_to, single_line, slash_suggestions, strip_ansi,
+    save_mcp_config, save_ui_theme_to, single_line, slash_suggestions_merged, strip_ansi,
     theme_registry::{built_in_theme, theme_name_list, theme_names, BUILT_IN_THEMES},
     tool_result_summary, user_home_dir_from, user_mcp_config_path_from, AppConfig, AuthStatus,
     InputAction, LeaderAction, McpServer, PartEvent, ToolChipStatus, KNOWN_DB_MIGRATIONS,
@@ -116,6 +116,8 @@ fn browser_use_is_explicit_and_preserved_on_classic_prompt() {
         command,
         vec![
             "zcode",
+            "--mode",
+            "build",
             "--browser-use",
             "headless",
             "--browser-executable",
@@ -128,6 +130,10 @@ fn browser_use_is_explicit_and_preserved_on_classic_prompt() {
     assert!(parse_cli_args(["--browser-use", "invalid"]).is_err());
     assert!(parse_cli_args(["--browser-executable", "/opt/chrome"]).is_err());
     assert!(parse_cli_args(["--browser-use="]).is_err());
+    let explicit = parse_cli_args(["--browser-use", "headless", "--mode", "plan"]).unwrap();
+    let command = build_prompt_command("zcode", &explicit, "read page");
+    assert!(command.windows(2).any(|args| args == ["--mode", "plan"]));
+    assert!(!command.iter().any(|arg| arg == "yolo"));
 }
 
 #[test]
@@ -143,6 +149,8 @@ fn classic_prompt_preserves_tool_policy_rules() {
         command,
         vec![
             "zcode",
+            "--mode",
+            "build",
             "--allowed-tools",
             "Read",
             "Glob",
@@ -169,6 +177,8 @@ fn build_prompt_command_appends_mention_attachments() {
         command,
         vec![
             "zcode",
+            "--mode",
+            "build",
             "--attach",
             "src/lib.rs",
             "--json",
@@ -274,7 +284,7 @@ fn classify_bang_commands_as_local_shell() {
 
 #[test]
 fn slash_suggestions_filter_by_prefix() {
-    let suggestions = slash_suggestions("/mc", 5);
+    let suggestions = slash_suggestions_merged("/mc", 5, &[]);
 
     assert_eq!(suggestions[0].command, "/mcp list");
     assert!(suggestions.iter().any(|item| item.command == "/mcp add"));
@@ -285,11 +295,26 @@ fn slash_suggestions_filter_by_prefix() {
 
 #[test]
 fn slash_suggestions_fall_back_to_fuzzy_matches() {
-    let suggestions = slash_suggestions("/mrm", 10);
+    let suggestions = slash_suggestions_merged("/mrm", 10, &[]);
     assert!(suggestions.iter().any(|item| item.command == "/mcp remove"));
 
-    let suggestions = slash_suggestions("/lgn", 10);
+    let suggestions = slash_suggestions_merged("/lgn", 10, &[]);
     assert!(suggestions.iter().any(|item| item.command == "/login"));
+}
+
+#[test]
+fn slash_suggestions_local_only_respect_input_and_limit() {
+    for input in ["", "  ", "help", "!"] {
+        assert!(slash_suggestions_merged(input, 10, &[]).is_empty());
+    }
+    assert!(slash_suggestions_merged("/", 0, &[]).is_empty());
+    let all = slash_suggestions_merged("/", usize::MAX, &[]);
+    assert!(all.iter().all(|item| item.command.starts_with('/')));
+    assert_eq!(slash_suggestions_merged("/", 2, &[]), all[..2]);
+    assert_eq!(
+        slash_suggestions_merged("  /mc  ", 5, &[]),
+        slash_suggestions_merged("/mc", 5, &[])
+    );
 }
 
 #[test]
@@ -2430,45 +2455,6 @@ fn app_server_default_on_with_explicit_opt_out() {
 }
 
 #[test]
-fn skyline_stretches_to_fill_width_exactly() {
-    use unicode_width::UnicodeWidthStr;
-    use zcode_tui::skyline_lines;
-    for width in [70usize, 80, 100, 137] {
-        let rows = skyline_lines(width);
-        assert_eq!(rows.len(), 9, "8 silhouette rows + 1 horizon");
-        for row in &rows {
-            assert_eq!(row.width(), width, "row must fill exactly `width` columns");
-        }
-        // ZhiPU rests on the continuous horizon (last row); the nest mesh shows.
-        assert!(rows[8].contains("ZhiPU"));
-        assert!(rows.iter().any(|r| r.contains('╳')));
-    }
-    // Too narrow to lay out without overflow -> nothing (wordmark shows alone).
-    assert!(skyline_lines(20).is_empty());
-    assert!(skyline_lines(69).is_empty());
-}
-
-#[test]
-fn braille_skyline_is_fixed_logo_width_with_brand() {
-    use unicode_width::UnicodeWidthStr;
-    use zcode_tui::{skyline_braille, SKYLINE_LOGO_W};
-    let rows = skyline_braille();
-    assert_eq!(rows.len(), 8, "7 silhouette rows + 1 horizon");
-    for row in &rows {
-        assert_eq!(
-            row.width(),
-            SKYLINE_LOGO_W,
-            "every braille row is exactly the logo width so it centres under the wordmark"
-        );
-    }
-    // Brand mark rests on the horizon; silhouette uses braille dots (U+28xx).
-    assert!(rows[7].contains("ZhiPU"));
-    assert!(rows
-        .iter()
-        .any(|r| r.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c))));
-}
-
-#[test]
 fn skyline_mode_forces_and_autodetects() {
     use zcode_tui::{skyline_mode, SkylineMode};
     let force =
@@ -2481,25 +2467,6 @@ fn skyline_mode_forces_and_autodetects() {
     let auto_c = |key: &str| (key == "LANG").then(|| "C".to_string());
     assert_eq!(skyline_mode(auto_utf8), SkylineMode::Braille);
     assert_eq!(skyline_mode(auto_c), SkylineMode::Wire);
-}
-
-#[test]
-fn skyline_graphics_wanted_defaults_on_and_yields_to_text_modes() {
-    use zcode_tui::skyline_graphics_wanted;
-    let force =
-        |val: &'static str| move |key: &str| (key == "ZCODE_TUI_SKYLINE").then(|| val.to_string());
-    // Unset / auto / explicit `image` -> attempt the graphics protocol.
-    assert!(skyline_graphics_wanted(|_: &str| None));
-    assert!(skyline_graphics_wanted(force("auto")));
-    assert!(skyline_graphics_wanted(force("image")));
-    // Forcing a text/off mode opts out of the probe entirely.
-    assert!(!skyline_graphics_wanted(force("wire")));
-    assert!(!skyline_graphics_wanted(force("braille")));
-    assert!(!skyline_graphics_wanted(force("off")));
-    assert!(!skyline_graphics_wanted(force("none")));
-    assert!(!skyline_graphics_wanted(force("0")));
-    // Whitespace around a forced mode is tolerated.
-    assert!(!skyline_graphics_wanted(force("  wire  ")));
 }
 
 #[test]

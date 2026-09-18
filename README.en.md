@@ -29,15 +29,82 @@ terminal shell around the official ZCode CLI path: normal prompts prefer
 commands, MCP config, shell escapes, session selection, phased output, command
 palette, and editor workflows are handled locally.
 
+## Privacy: use the kernel without the Desktop repository-snapshot uploader
+
+**You can use ZCode's coding kernel through this project without starting the
+official Desktop application.** The managed CLI path runs
+`resources/glm/zcode.cjs` directly, not Desktop's `app.asar/out/host/index.js`,
+and does not integrate the Desktop snapshot-upload service described below.
+This is a verified architectural distinction, not a promise of zero data egress.
+
+**Audit findings (2026-09-18):** the official Linux **3.11.2-6792 / 3.12.3-7463**
+Desktop host contains a complete workspace-and-`.git` collection, compression,
+encryption, local staging and OSS upload pipeline wired into ordinary conversation
+flows. Execution also requires an account token, server-issued upload credentials
+and other conditions. Git internals are explicitly included; ordinary sensitive
+filename filters do not protect committed history. This snapshot-upload
+implementation was not found in either inspected CLI kernel.
+
+**We oppose and condemn repository collection without adequate disclosure and
+explicit authorization.** Asking an AI to help with code must not be treated as
+blanket permission to collect Git history. We specifically criticize wiring this
+collection into ordinary Desktop conversations: the traced pipeline has no
+separate upload-confirmation gate and does not use the experience-improvement or
+repository-indexing settings as enable/disable gates. Upstream should provide
+clear disclosure, a verifiable dedicated opt-in control that is off by default,
+and export/deletion channels. Encryption is no substitute for informed user
+control. This criticism concerns verifiable design, not an unproven allegation
+about actual transfers, downstream use or illegality.
+
+**What you can—and cannot—rely on:**
+
+- **Avoiding this Desktop pipeline does not mean offline operation.** Model
+  requests may transmit code, diffs, attachments and tool output. MCP servers,
+  plugins, shell commands and Browser Use may also access the network.
+- **This project is not currently a network or filesystem sandbox.** Tool
+  approvals are not an OS-level data-egress control. Restrict readable paths,
+  model services and network destinations for sensitive projects.
+- **A separately running Desktop app is outside this TUI's control.** The
+  findings cover the audited versions and managed CLI path, not custom launchers,
+  future official TUIs or subsequently updated kernels.
+- **Static analysis does not establish that anyone's files were uploaded.** The
+  3.12.3 privacy audit is not a protocol-compatibility certification; the tested
+  runtime baseline remains the one below.
+
+See the [privacy audit record](docs/privacy-audit-2026-09-18.md) for package hashes,
+function-level evidence and reproduction guidance.
+
+### Local upload evidence check
+
+```bash
+zcode check-zhipu-upload
+zcode-tui check-zhipu-upload --json  # works without the official application
+# In the TUI: /check-zhipu-upload
+```
+
+Read-only; distinguishes client acceptance records, attempts and staged artifacts.
+**No evidence does not mean never uploaded.** See [scope/options](docs/check-zhipu-upload.md).
+
+[Reporting](https://www.aizws.net/news/detail/12690) attributes a September 18 apology,
+fix announcement and open-source/third-party-review plans to ZCode. We have not
+independently verified the fix scope or data destruction. This audit concerns the
+fingerprinted historical packages, not a claim about current server behavior.
+
+![Editorial satire: a programmer asks for a one-line fix; a robot encrypts the Git history, but the cloud alone holds the key.](output/imagegen/privacy-comic.png)
+
+*Original adaptation of [ferstar's commentary](https://blog.ferstar.org/posts/zcode-silent-workspace-snapshot-upload/)
+about owners being unable to decrypt their own ciphertext. The dialogue is fictional,
+not a verbatim quote or evidence of current server behavior.*
+
 ## Current compatibility baseline
 
 | Component | Current version / status |
 |---|---|
-| ZCode Linux x64 desktop | **3.11.2-6792** (official deb, SHA-512 verified) |
+| ZCode Linux x64 desktop | **3.12.3-7463 / 3.11.2-6792** (official deb, SHA-512 verified) |
 | Official CLI kernel | **0.16.5** (same version string as 3.9.1, different bundle and behavior) |
-| zcode-tui | **0.6.8** |
-| Protocol compatibility | 3.11.2: real `turn.completed` termination + V4 foreground cancellation; 3.9.1: 0.16.5 runtime preferences + safe official-MCP-auth fallback + legacy/V4; 3.8.1/3.7.7/3.7.6: 0.16.3 runtime preferences + legacy/V4; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 172/172 Rust tests; zero-warning Clippy; native build; 11/11 deterministic PTY checks; additional opt-in isolated real-kernel test |
+| zcode-tui | **0.7.0** |
+| Protocol compatibility | **3.12.3: classic CLI create/resume; no app-server/V4/in-session model picker yet**; 3.11.2: real `turn.completed` termination + V4 foreground cancellation; 3.9.1: 0.16.5 runtime preferences + safe official-MCP-auth fallback + legacy/V4; 3.8.1/3.7.7/3.7.6: 0.16.3 runtime preferences + legacy/V4; 3.5.3: legacy + V4; 3.3.6: legacy controls |
+| Current source verification | 185/185 Rust tests; zero-warning Clippy; native build; 11/11 Agent PTY checks; 8 browser-runtime + 4 browser PTY checks; opt-in isolated real-kernel/browser tests |
 
 When the official x64 feed changes, startup update detection and `/update`
 continue to use SHA-512 verification. Protocol compatibility is revalidated
@@ -49,14 +116,15 @@ version alone.
 The managed wrapper still prefers a usable official TUI before falling back.
 This finding does not cover other platforms or standalone CLI distributions.
 
-The unversioned Linux update feed still returned 3.9.1 while the website listed
-3.11.2. Update detection only reports that feed's latest version. Verification
+During the 3.11.2 compatibility checks, the unversioned Linux update feed still
+returned 3.9.1 while the website listed 3.11.2. Update detection only reports that
+feed's latest version. Verification
 used the website's versioned `linux-x64/latest.yml`, without bypassing SHA-512
 or changing the system installation.
 
 Run the real-kernel regression explicitly (Node ≥ 22.5, temporary HOME and a
 loopback fake model; no real credentials or paid model requests). It covers
-streaming, successive turns, cancellation/reuse, and close/resume:
+3.11.2 streaming/V4/cancellation/resume, or 3.12.3 classic CLI create/resume:
 
 ```bash
 ZCODE_TEST_CJS=/path/to/resources/glm/zcode.cjs \
@@ -149,9 +217,15 @@ for details.
   `{rowId,entityId}` target, and applies safe workspace file rewind through
   `v4/command applyFileRewind`. Older kernels retain the checkpoint-based
   legacy path; neither path overwrites externally modified unsafe files.
-- Browser Use: `--browser-use headless` and optional `--browser-executable`
-  are parsed explicitly and routed to the official classic `zcode --prompt`
-  path, because the strict app-server schema does not accept these fields.
+- Browser Use (tested with ZCode 3.11.2): `--browser-use headless` and optional
+  `--browser-executable <absolute-path>` use the official classic CLI, with
+  executable checks, tool progress, actionable errors and cancellation. The
+  managed wrapper resolves missing Playwright from the matching official
+  `app.asar`, without modifying the package or downloading npm dependencies.
+  Browser tasks explicitly default to build mode; permissions are never silently
+  relaxed. Token streaming, steer and interactive approvals are unavailable on
+  this route. Re-run `install.sh` to update the wrapper;
+  see [usage and verification](docs/browser-use.md).
 - The composer footer always shows parent-session `ctx used/window (%)` and
   cumulative `sess`. Context follows `state.updated`, cumulative tokens refresh
   silently after every turn, and `/usage [7d|30d]` remains immediately

@@ -4,6 +4,54 @@
 构建 Linux x86_64-musl、Windows x86_64、macOS Intel/Apple Silicon 二进制，
 连同 SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版本段。
 
+## [0.7.0] - 2026-09-18
+
+### 隐私自查
+
+- 新增 `zcode-tui check-zhipu-upload` / `zcode check-zhipu-upload` / 本地
+  `/check-zhipu-upload`：只读检查官方 3.11.2/3.12.3 的 checkpoint 状态与残留文件，
+  区分客户端成功记录、尝试、打包/排队及证据不足，不启动内核或访问上传接口。
+- 支持自定义数据目录、旧 repo-snapshots、JSON 与显式文件名清单；默认不展示项目名、
+  令牌或密钥。限制读取体积与目录数量，跳过内部符号链接和外部 manifest 引用。
+  未发现证据不等于从未上传，也不能独立证明服务端保留情况。
+- README/审计文章补充版本哈希、证据边界、媒体转述的官方回应，以及有出处的原创讽刺漫画。
+
+### 官方 3.12.3 兼容
+
+- 修正官方 Linux 包 `resources/config/provider/zcode-builtin.json` 的定位，保留用户覆盖。
+- 按协议特征而非不变的 `0.16.5` 版本号识别新内核，使用官方经典 CLI 处理原生
+  provider 配置、账号认证及旧配置迁移，不再向新协议注入旧 runtimeModel。
+- **支持边界**：3.12.3 走经典 CLI，暂不支持 app-server token 流式、V4、会话内模型
+  切换或交互审批；旧 3.11.2 保持流式路径。经典路径默认显式 build，绝不隐式 yolo。
+- 隔离验证 3.12.3 的创建/连续恢复对话、3.11.2 的流式/V4/取消/恢复；真实模型测试
+  使用临时 HOME 和 loopback 模拟服务，Linux 网络命名空间禁止外网。
+
+### Browser Use
+
+- 真实验证 3.11.2 内核 → 官方 Browser Use → Chrome → 本地页面的读取和点击，
+  使用临时 HOME、模拟模型与随机 DOM 校验值，不使用真实账户或付费模型。
+- 托管 wrapper 在缺少 Playwright 模块时，从同一官方 `app.asar` 提取配套运行时
+  到用户缓存，保留文件校验；不改官方内核、不下载 npm 包、不覆盖已有模块解析。
+- 新增浏览器路径检测、任务计时/工具进度、运行时及权限失败诊断；首次创建的
+  内核数据库也可接续进度，工具失败不会被 CLI exit 0 掩盖。
+- 浏览器任务默认显式使用 build 模式，不继承官方经典 CLI 的隐式 yolo；
+  禁止静默放宽权限，清晰提示经典路径不支持交互审批。
+- CI/Release 加入离线 wrapper/runtime 与浏览器 PTY 回归，真实浏览器测试保持 opt-in。
+
+### 清理
+
+- 删除已被文本字标替代的旧天际线绘图、未接入的图形协议开关及对应测试；
+  保留 `ZCODE_TUI_SKYLINE` 兼容设置和现有字标行为。
+- 移除仅测试使用的旧 slash 补全实现，将前缀、模糊匹配和边界测试统一到
+  实际使用的 `slash_suggestions_merged` 入口。
+- 移除无调用的同步 prompt/shell 包装函数及 transcript 渲染的无效参数；
+  保留流式执行、经典回退和协议兼容路径。
+
+### 修复
+
+- `/update` 明确提示“当前更新源没有更高版本”，并提供官网日志链接；
+  不再将可能滞后的 feed 判断为“官方已经最新”。下载校验与安装逻辑不变。
+
 ## [0.6.8] - 2026-09-06
 
 ### 修复

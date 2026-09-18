@@ -25,6 +25,18 @@ jobs:
           cargo test --locked
           bash -n install.sh
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.22.0"
+
+      - name: Offline Browser Use regression checks
+        run: |
+          cargo build --locked
+          python3 -m venv "$RUNNER_TEMP/browser-tests"
+          "$RUNNER_TEMP/browser-tests/bin/pip" install pyte==0.8.2
+          python3 tests/browser_runtime_test.py
+          ZCODE_TEST_BIN=target/debug/zcode-tui "$RUNNER_TEMP/browser-tests/bin/python" tests/browser_smoke.py
+
   native-tests:
     name: native tests (${{ matrix.name }})
     strategy:

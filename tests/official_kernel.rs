@@ -169,12 +169,72 @@ fn official_kernel_session_lifecycle() {
     let wrapper = temp.path().join("kernel");
     // Sanitize only the child environment; do not mutate the test runner's HOME.
     let quote = shell_words::quote;
+    let builtin = kernel
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("config/provider/zcode-builtin.json");
+    let provider_env = if builtin.is_file() {
+        format!(
+            "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE={} ZCODE_BASE_URL=http://127.0.0.1:1",
+            quote(builtin.to_str().unwrap())
+        )
+    } else {
+        String::new()
+    };
     fs::write(&wrapper, format!(
-        "#!/bin/sh\ncd {home} || exit 1\nexec env -i HOME={home} XDG_CONFIG_HOME={home}/.config XDG_DATA_HOME={home}/.local/share XDG_CACHE_HOME={home}/.cache PATH={path} node {kernel} \"$@\"\n",
+        "#!/bin/sh\ncd {home} || exit 1\nexec env -i HOME={home} XDG_CONFIG_HOME={home}/.config XDG_DATA_HOME={home}/.local/share XDG_CACHE_HOME={home}/.cache PATH={path} {provider_env} node {kernel} \"$@\"\n",
         home=quote(home), path=quote(&std::env::var("PATH").unwrap()),
         kernel=quote(kernel.to_str().unwrap()),
+        provider_env=provider_env,
     )).unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    if fs::read_to_string(&kernel)
+        .unwrap()
+        .contains("\"workspace/readPresentation\"")
+    {
+        // New kernels removed runtimeModel. Exercise the supported standalone
+        // path, which imports legacy custom config and owns authentication.
+        let mut session: Option<String> = None;
+        for turn in 0..3 {
+            let mut cmd = std::process::Command::new(&wrapper);
+            cmd.args([
+                "--cwd",
+                home,
+                "--mode",
+                "build",
+                "--json",
+                "--prompt",
+                "Reply with compatibility-ok, no tools.",
+            ]);
+            if let Some(id) = &session {
+                cmd.args(["--resume", id]);
+            }
+            let output = cmd.output().unwrap();
+            assert!(
+                output.status.success(),
+                "classic turn {turn}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let raw = String::from_utf8(output.stdout).unwrap();
+            let result: Value =
+                serde_json::from_str(raw.trim()).unwrap_or_else(|_| panic!("expected JSON: {raw}"));
+            assert!(
+                result.to_string().contains("compatibility-ok"),
+                "missing reply: {result}"
+            );
+            let id = result["sessionId"].as_str().expect("sessionId").to_string();
+            if let Some(previous) = &session {
+                assert_eq!(previous, &id);
+            }
+            session = Some(id);
+            println!("3.12.x classic create/resume turn {turn}: passed");
+        }
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+        return;
+    }
     let mut conn = AppServerConn::spawn(wrapper.to_str().unwrap()).unwrap();
     let mut preferences = 0;
     let created = request(

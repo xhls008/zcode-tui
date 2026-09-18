@@ -1,4 +1,5 @@
 /target/
+__pycache__/
 /.mcp.json
 *.log
 *.tmp

@@ -3088,6 +3088,7 @@ impl AppServerConn {
     pub fn spawn(zcode_bin: &str) -> std::result::Result<Self, AppServerUnavailable> {
         let mut process = Command::new(zcode_bin);
         process
+            .env("ZCODE_TUI_CLIENT", "1")
             .arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

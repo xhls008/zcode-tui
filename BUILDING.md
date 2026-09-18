@@ -63,7 +63,23 @@ mkdir -p "$HOME/.local/bin"
 install -m 755 target/release/zcode-tui "$HOME/.local/bin/zcode-tui"
 ```
 
-上游 `install.sh` 面向 Linux，包含 GNU `install -D`、GNU `sed -i` 和 `/opt/ZCode` 路径处理。macOS 上应使用上面的手动安装命令；本机适配的 `zcode` wrapper 位于 `~/.local/bin/zcode`，它连接 `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`。
+`install.sh` 已使用兼容 BSD/macOS 的安装及 sed 语法；应用目录发现仍以 Linux
+布局为主。macOS 的手动 wrapper 连接
+`/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`，需要另行验证平台行为。
+Linux Browser Use 的运行时兼容桥随托管 wrapper 安装，不能仅复制 TUI 二进制来更新它。
+参见 [Browser Use 支持范围与验证](docs/browser-use.md)。
+
+## Browser Use 回归检查
+
+```sh
+python3 -m venv /tmp/zcode-browser-tests
+/tmp/zcode-browser-tests/bin/pip install pyte==0.8.2
+python3 tests/browser_runtime_test.py
+/tmp/zcode-browser-tests/bin/python tests/browser_smoke.py
+```
+
+需要 Node ≥22.5；上述默认检查不使用官方内核、浏览器或账户。真实内核及本地页面
+端到端测试需显式添加 `--official --kernel /path/to/resources/glm/zcode.cjs`，详见上述文档。
 
 ## Linux x86_64 静态发布产物
 
@@ -144,3 +160,17 @@ git push origin vX.Y.Z
 ```
 
 Release notes 会从 `CHANGELOG.md` 中对应的 `## [X.Y.Z]` 段落提取。
+
+## v0.7.0 本地隐私自查与真实内核门禁
+
+```sh
+cargo test --locked --test upload_check
+./target/release/zcode-tui check-zhipu-upload --json
+# Linux：只允许 loopback，临时 HOME、模拟模型，禁止真实账号/仓库
+unshare -Urn sh -c 'ip link set lo up && ZCODE_TEST_CJS=/path/to/resources/glm/zcode.cjs cargo test --locked --test official_kernel -- --ignored --nocapture'
+```
+
+分别对 3.11.2（app-server/V4 生命周期）和 3.12.3（经典 CLI 三轮创建/恢复）运行。
+跨平台 CI 不下载、执行未知官方包；真实内核和真实 Browser Use 是显式 opt-in 门禁。
+`tests/pty_smoke.py` 是需要真实账号的人工检查，不要把它当作离线回归；离线 Agent
+PTY 回归为 `tests/agents_pty_smoke.py`。

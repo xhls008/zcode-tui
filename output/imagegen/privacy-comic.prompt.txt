@@ -1,0 +1,10 @@
+Use case: illustration-story
+Asset type: editorial satirical three-panel comic appended to an open-source privacy audit article.
+Primary request: Original Chinese comic satirizing the distinction between encrypting a user's repository and giving that user control of the decryption key. This is a fictional visual metaphor, not a photograph or allegation of a new event. Inspired by ferstar's September 17 2026 comment that the owner cannot decrypt their own local ciphertext; not a verbatim quote.
+Style: sharp newspaper editorial cartoon, expressive tired programmer and over-helpful generic cloud robot, crisp black ink, warm ivory paper, minimal muted orange and blue, sophisticated and readable, wide horizontal three panels.
+Panel 1: programmer at laptop requests a tiny edit; behind the laptop the robot packs a huge box with small labels .git and history. Bubble programmer: “帮我改一行代码。”
+Panel 2: robot locks the oversized box and sends it toward a cloud. Robot bubble: “放心，加密了！” Programmer bubble: “那钥匙呢？”
+Panel 3: programmer holds the locked box at bottom left, cloud robot far above holds a giant golden key. Robot bubble: “安全到你自己也打不开。”
+Title exactly: “到底在防谁？”
+Small bottom caption exactly: “原创讽刺漫画 · 历史版本机制的艺术化表达”
+Constraints: accurate readable Chinese lettering; exactly three panels; no company logos, no real people, no claims of theft/criminality, no fabricated attributed quotes, no extra text.

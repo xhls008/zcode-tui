@@ -24,6 +24,9 @@ use ratatui::widgets::{
 };
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use zcode_tui::browser::{
+    browser_failure_from_db, browser_failure_hint, browser_preflight, browser_progress,
+};
 use zcode_tui::{
     app_close_params, app_compact_params, app_create_params, app_file_rewind_params,
     app_resume_params, app_rewind_params, app_send_params_with_attachments, app_server_enabled,
@@ -134,6 +137,10 @@ fn inline_viewport_rows(terminal_rows: u16) -> u16 {
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "check-zhipu-upload") {
+        println!("{}", zcode_tui::upload_check::run(&args[1..])?);
+        return Ok(());
+    }
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         println!("{}", help_text_with_registry(&load_ui_config().themes));
         return Ok(());
@@ -152,7 +159,14 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
     let mut state = UiState::new(config, zcode_bin.to_string());
     let mut terminal = TerminalGuard::enter()?;
     state.push_startup_frame();
-    let probe = spawn_startup_probe(zcode_bin.to_string(), state.app_workspace());
+    if let Ok(reason) = env::var("ZCODE_TUI_CLASSIC_REASON") {
+        state.push_system(&reason);
+    }
+    let probe = spawn_startup_probe(
+        zcode_bin.to_string(),
+        state.app_workspace(),
+        state.config.browser_use.is_some(),
+    );
 
     for prompt in state.config.initial_prompts.clone() {
         state.queued.push_back(prompt);
@@ -572,10 +586,15 @@ fn refresh_model_catalog(zcode_bin: &str, workspace: &str) -> Option<ModelCatalo
 fn spawn_startup_probe(
     zcode_bin: String,
     workspace: String,
+    browser_use: bool,
 ) -> std::sync::mpsc::Receiver<StartupReport> {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let model_catalog = refresh_model_catalog(&zcode_bin, &workspace);
+        let model_catalog = if browser_use {
+            cached_model_catalog()
+        } else {
+            refresh_model_catalog(&zcode_bin, &workspace)
+        };
         let kernel = run_command(&[zcode_bin, "version".to_string()])
             .ok()
             .and_then(|output| {
@@ -650,6 +669,7 @@ struct Suggestion {
 /// cosmetic: it renders in the work panel while the job runs and vanishes
 /// at finalize, never entering the transcript.
 struct LiveProgress {
+    db_path: PathBuf,
     directory: String,
     session_id: Option<String>,
     /// Latest session for the directory at spawn time. A fresh (non-continue)
@@ -684,6 +704,8 @@ struct ActiveJob {
     /// finalize instead of polluting the summary buffer.
     errs: Vec<String>,
     live: Option<LiveProgress>,
+    browser: bool,
+    browser_hint: Option<&'static str>,
 }
 
 impl ActiveJob {
@@ -962,11 +984,12 @@ impl UiState {
             .unwrap_or_else(|| "dark".to_string());
         let notify_enabled = ui_config.notify != Some(false);
         let config_errors = ui_config.errors.clone();
-        let app_mode = if app_server_enabled(|key| env::var(key).ok()) {
-            AppMode::Ready
-        } else {
-            AppMode::Off
-        };
+        let app_mode =
+            if config.browser_use.is_none() && app_server_enabled(|key| env::var(key).ok()) {
+                AppMode::Ready
+            } else {
+                AppMode::Off
+            };
         let mut state = Self {
             config,
             zcode_bin,
@@ -1647,6 +1670,14 @@ impl UiState {
                 self.status = "help toggled".to_string();
                 return None;
             }
+            Some("check-zhipu-upload") => {
+                if let Ok(exe) = env::current_exe() {
+                    let mut args = vec![exe.to_string_lossy().into_owned()];
+                    args.extend(command.iter().cloned());
+                    self.start_job(args, LogKind::Diff, "local upload evidence check");
+                }
+                return None;
+            }
             Some("editor") => return Some(UiEffect::Editor),
             Some("login") => return Some(UiEffect::Login),
             Some("sessions") => {
@@ -1764,11 +1795,21 @@ impl UiState {
         // strict session/create+send reject a guessed browserUse field. Route
         // these turns explicitly to --prompt so the flags are never ignored.
         if self.config.browser_use.is_some() {
+            let check = match browser_preflight(self.config.browser_executable.as_deref()) {
+                Ok(check) => check,
+                Err(error) => {
+                    self.push_error(&error.to_string());
+                    self.status = "browser unavailable".to_string();
+                    return;
+                }
+            };
             if !self.browser_route_noted {
+                self.push_system(&check);
                 self.push_system(
                     "Browser Use is running through the classic ZCode CLI; token streaming, \
                      in-turn steer, and app-server controls are unavailable for these turns",
                 );
+                self.push_system("Browser Use: classic CLI cannot request interactive approval; default browser mode is build. Use the official desktop client when approval is needed.");
                 self.browser_route_noted = true;
             }
             self.start_prompt_job_via_cli(prompt);
@@ -2335,17 +2376,27 @@ impl UiState {
     /// rows created by this run. Any failure means no live progress — the
     /// job itself is unaffected.
     fn prepare_live_progress(&self) -> Option<LiveProgress> {
-        let DbState::Enabled(path) = &self.db_state else {
-            return None;
+        let path = kernel_db_path_from(&user_home_dir()?);
+        let conn = if path.exists() {
+            let conn = open_kernel_db_ro(&path).ok()?;
+            if !db_schema_supported(&conn) {
+                return None;
+            }
+            Some(conn)
+        } else {
+            // A first-ever classic turn creates the database after it starts.
+            // Only a missing file gets a zero baseline; never reset one on error.
+            None
         };
-        let conn = open_kernel_db_ro(path).ok()?;
         let directory = self
             .resolve_cwd()
             .canonicalize()
             .unwrap_or_else(|_| self.resolve_cwd())
             .to_string_lossy()
             .into_owned();
-        let latest = latest_session_for_dir(&conn, &directory);
+        let latest = conn
+            .as_ref()
+            .and_then(|conn| latest_session_for_dir(conn, &directory));
         let (session_id, prior_session) = if let Some(resume) = &self.config.resume {
             (Some(resume.clone()), None)
         } else if self.config.continue_session || self.session_active {
@@ -2356,10 +2407,11 @@ impl UiState {
             (None, latest)
         };
         Some(LiveProgress {
+            db_path: path,
             directory,
             session_id,
             prior_session,
-            baseline: db_baseline(&conn),
+            baseline: conn.as_ref().map(db_baseline).unwrap_or_default(),
             chips: Vec::new(),
             reasoning: None,
             text: None,
@@ -2372,18 +2424,21 @@ impl UiState {
         if !self.tick.is_multiple_of(5) {
             return;
         }
-        let DbState::Enabled(path) = &self.db_state else {
-            return;
-        };
-        let path = path.clone();
+        self.refresh_live_progress();
+    }
+
+    fn refresh_live_progress(&mut self) {
         let Some(active) = &mut self.job else { return };
         if active.kind != LogKind::Assistant {
             return;
         }
         let Some(live) = &mut active.live else { return };
-        let Ok(conn) = open_kernel_db_ro(&path) else {
+        let Ok(conn) = open_kernel_db_ro(&live.db_path) else {
             return;
         };
+        if !db_schema_supported(&conn) {
+            return;
+        }
         if live.session_id.is_none() {
             live.session_id = latest_session_for_dir(&conn, &live.directory)
                 .filter(|candidate| Some(candidate) != live.prior_session.as_ref());
@@ -2393,6 +2448,10 @@ impl UiState {
         };
         if let Ok(chips) = live_tool_chips(&conn, &session_id, live.baseline) {
             live.chips = chips;
+        }
+        if active.browser {
+            active.browser_hint =
+                browser_failure_from_db(&conn, &session_id, live.baseline).or(active.browser_hint);
         }
         if let Ok(Some(reasoning)) = latest_reasoning(&conn, &session_id, live.baseline) {
             live.reasoning = Some(reasoning);
@@ -2440,9 +2499,10 @@ DEB_ENTRY=$(printf '%s' "$YML" | sed -n 's/^[[:space:]]*-*[[:space:]]*url:[[:spa
 DEB=$(basename "$DEB_ENTRY")
 SHA=$(printf '%s' "$YML" | awk '/url:.*\.deb$/{{f=1;next}} f&&/sha512:/{{sub(/^[[:space:]]*sha512:[[:space:]]*/,"");print;exit}}')
 INSTALLED={installed_arg}
-echo "installed: $INSTALLED   latest: $VER"
+echo "installed: $INSTALLED   feed latest: $VER"
 if ! dpkg --compare-versions "$VER" gt "$INSTALLED"; then
-  echo "already up to date"
+  echo "this update feed offers no newer version; it may lag behind official releases"
+  echo "official releases: https://zcode.z.ai/en/changelog"
   exit 0
 fi
 [ -n "$DEB" ] && [ -n "$SHA" ] || {{ echo "feed carries no deb entry/sha512 - aborting"; exit 1; }}
@@ -2499,6 +2559,8 @@ fi"#
                     raw: Vec::new(),
                     errs: Vec::new(),
                     live: None,
+                    browser: kind == LogKind::Assistant && self.config.browser_use.is_some(),
+                    browser_hint: None,
                 });
                 self.status = format!("running {label}");
             }
@@ -3577,6 +3639,10 @@ fi"#
                         // replays these lines). stderr goes to its own buffer
                         // so an interleaved warning can't corrupt the parse.
                         if let Some(active) = &mut self.job {
+                            if active.browser && stderr {
+                                active.browser_hint =
+                                    browser_failure_hint(&text).or(active.browser_hint);
+                            }
                             if stderr {
                                 active.errs.push(text);
                             } else {
@@ -3776,6 +3842,10 @@ fi"#
 
     /// /model — list models reported by the ZCode app-server.
     fn open_model_picker(&mut self) {
+        if self.app_mode != AppMode::Ready {
+            self.push_system("/model requires the supported app-server protocol. Classic CLI uses the official provider configuration; no model change was applied.");
+            return;
+        }
         if self.controls.models.is_empty() {
             self.push_system("model catalog is not available from the ZCode app-server yet");
             return;
@@ -4703,6 +4773,8 @@ fi"#
     }
 
     fn finalize_job(&mut self) {
+        // Capture the final tool result even if the process exits between polls.
+        self.refresh_live_progress();
         let Some(active) = self.job.take() else {
             return;
         };
@@ -4741,6 +4813,32 @@ fi"#
             self.log.remove(active.log_index);
         }
         let elapsed = active.started.elapsed().as_secs_f32();
+        let browser_errors = active.browser
+            && (active.browser_hint.is_some()
+                || active.live.as_ref().is_some_and(|live| {
+                    live.chips
+                        .iter()
+                        .any(|chip| chip.status == ToolChipStatus::Failed)
+                }));
+        if active.browser && !active.cancel_requested {
+            if let Some(hint) = active.browser_hint {
+                self.push_error(hint);
+            } else if let Some(live) = &active.live {
+                if !live.chips.is_empty() {
+                    let completed = live
+                        .chips
+                        .iter()
+                        .filter(|chip| chip.status == ToolChipStatus::Completed)
+                        .count();
+                    let failed = live
+                        .chips
+                        .iter()
+                        .filter(|chip| chip.status == ToolChipStatus::Failed)
+                        .count();
+                    self.push_system(&format!("Browser task tools: {completed} completed, {failed} failed (all tools, not page success)"));
+                }
+            }
+        }
         let (success, detail) = active
             .finished
             .unwrap_or((false, "job ended unexpectedly".to_string()));
@@ -4753,7 +4851,11 @@ fi"#
             self.status = "cancelled".to_string();
             self.push_system(&format!("{} cancelled", active.label));
         } else if success {
-            self.status = format!("done ({elapsed:.1}s)");
+            self.status = if browser_errors {
+                format!("done with tool errors ({elapsed:.1}s)")
+            } else {
+                format!("done ({elapsed:.1}s)")
+            };
             // A prompt landed in a kernel session: keep the conversation
             // going by resuming that session on subsequent prompts.
             if active.kind == LogKind::Assistant && !self.session_active {
@@ -5476,10 +5578,35 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
     let Some(active) = &state.job else {
         return todo_lines;
     };
-    let Some(live) = &active.live else {
-        return todo_lines;
-    };
     let mut lines = todo_lines;
+    if active.browser {
+        let chips = active
+            .live
+            .as_ref()
+            .map(|live| live.chips.as_slice())
+            .unwrap_or_default();
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {} {}",
+                SPINNER_FRAMES[state.tick % SPINNER_FRAMES.len()],
+                browser_progress(
+                    chips,
+                    active.started.elapsed().as_secs_f32(),
+                    active.cancel_requested
+                )
+            ),
+            t.accent(),
+        )));
+        if active.browser_hint.is_some() {
+            lines.push(Line::from(Span::styled(
+                " Browser runtime error; diagnostic will remain in the transcript",
+                t.bad(),
+            )));
+        }
+    }
+    let Some(live) = &active.live else {
+        return lines;
+    };
     if !live.chips.is_empty() {
         let mut spans = vec![Span::raw(" ".to_string())];
         // Keep the newest chips in view when a turn runs many tools.
@@ -5640,7 +5767,7 @@ fn format_usage_stats(result: &serde_json::Value) -> String {
 
 fn rendered_log_entry(state: &UiState, index: usize, width: usize) -> Vec<ListItem<'static>> {
     let entry = &state.log[index];
-    log_to_items(entry, width, &state.theme, state.skyline_mode)
+    log_to_items(entry, width, &state.theme)
 }
 
 /// Split a line into (matches, chunk) runs so adjacent chars of the same
@@ -5704,12 +5831,7 @@ fn ascii_logo_fits(width: usize, height: u16, mode: SkylineMode) -> bool {
     mode != SkylineMode::None && width >= ascii_logo_width() && height >= LOGO_ROWS
 }
 
-fn log_to_items(
-    entry: &LogLine,
-    width: usize,
-    theme: &Theme,
-    _mode: SkylineMode,
-) -> Vec<ListItem<'static>> {
+fn log_to_items(entry: &LogLine, width: usize, theme: &Theme) -> Vec<ListItem<'static>> {
     let mut items: Vec<ListItem<'static>> = Vec::new();
     match entry.kind {
         LogKind::Banner => {
@@ -6701,7 +6823,14 @@ fn centered_rect_height(percent_x: u16, desired_height: u16, area: Rect) -> Rect
 }
 
 fn display_mode(config: &AppConfig) -> &str {
-    config.mode.as_deref().unwrap_or("default")
+    config
+        .mode
+        .as_deref()
+        .unwrap_or(if config.browser_use.is_some() {
+            "build"
+        } else {
+            "default"
+        })
 }
 
 fn display_cwd(config: &AppConfig) -> String {
@@ -6716,6 +6845,23 @@ fn display_cwd(config: &AppConfig) -> String {
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    #[test]
+    fn browser_mode_rejects_missing_executable_without_starting_a_job() {
+        let config = AppConfig {
+            browser_use: Some("headless".into()),
+            browser_executable: Some("relative-chrome".into()),
+            ..AppConfig::default()
+        };
+        let mut state = UiState::new(config, "must-not-execute".into());
+        assert_eq!(display_mode(&state.config), "build");
+        assert!(state.app_mode == AppMode::Off);
+        state.start_prompt_job("open local page");
+        assert!(state.job.is_none());
+        assert!(state.app_conn.is_none());
+        assert_eq!(state.status, "browser unavailable");
+        assert!(state.log.last().unwrap().text.contains("absolute"));
+    }
 
     #[test]
     fn theme_command_lists_and_rejects_from_the_registry() {
@@ -7295,7 +7441,7 @@ mod tests {
     fn user_message_spaces_share_the_message_band_background() {
         let theme = Theme::named("dark", false);
         let entry = LogLine::new(LogKind::User, "hello   world");
-        let items = log_to_items(&entry, 40, &theme, SkylineMode::None);
+        let items = log_to_items(&entry, 40, &theme);
         let area = Rect::new(0, 0, 40, items.len() as u16);
         let mut buffer = ratatui::buffer::Buffer::empty(area);
         Widget::render(List::new(items), area, &mut buffer);
@@ -7311,7 +7457,7 @@ mod tests {
     fn assistant_output_has_symmetric_vertical_padding() {
         let theme = Theme::named("dark", false);
         let entry = LogLine::new(LogKind::Assistant, "answer");
-        let items = log_to_items(&entry, 40, &theme, SkylineMode::None);
+        let items = log_to_items(&entry, 40, &theme);
 
         assert_eq!(items.len(), 2);
         let log = vec![entry, LogLine::new(LogKind::System, "next")];
