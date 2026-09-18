@@ -113,6 +113,11 @@ fn safe_metadata(path: &Path) -> std::io::Result<fs::Metadata> {
             return Err(std::io::Error::other("parent traversal"));
         }
         current.push(part);
+        // A Windows drive/UNC prefix alone (especially canonical \\?\ paths)
+        // is not a directory. Inspect it only after the following RootDir.
+        if matches!(part, Component::Prefix(_)) {
+            continue;
+        }
         if fs::symlink_metadata(&current)?.file_type().is_symlink() {
             return Err(std::io::Error::other("symlink"));
         }

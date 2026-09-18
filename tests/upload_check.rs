@@ -225,3 +225,13 @@ fn linked_manifest_and_parent_traversal_hash_never_reveal_external_files() {
     assert!(r.findings[0].filenames.is_empty());
     assert!(!r.warnings.is_empty());
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_verbatim_home_prefix_is_not_probed_as_a_directory() {
+    let t = tempfile::tempdir().unwrap();
+    let home = fs::canonicalize(t.path()).unwrap();
+    let report = scan(&options(&home), None);
+    assert_eq!(report.status, "no_local_evidence", "{report:?}");
+    assert!(report.warnings.is_empty());
+}
