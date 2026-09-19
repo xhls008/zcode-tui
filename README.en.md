@@ -129,11 +129,12 @@ the dialogue is fictional and is not evidence of current server behavior.*
 
 | Component | Status |
 |---|---|
+| Official desktop 3.14.0 | Linux x86_64 static audit complete; classic CLI create/resume verified; standalone Browser Use remains blocked by the official `ZCode Built-in missing` error |
 | Official Desktop packages | 3.12.3-7463 and 3.11.2-6792 audited |
 | 3.12.3 | Classic CLI create/resume; no app-server/V4/in-session model picker yet |
 | 3.11.2 | app-server streaming, V4 controls, cancellation, and resume verified |
 | Browser Use | Classic official CLI route on 3.11.2/3.12.3; no in-turn steer/interactive approval |
-| Release | `zcode-tui 0.7.0` |
+| Release | `zcode-tui 0.7.1` |
 
 Equal CLI version strings do not imply equal protocols. Release assets include
 Linux, Windows, macOS Intel, Apple Silicon binaries, and `SHA256SUMS`.
@@ -203,6 +204,16 @@ For theme syntax, wrapper behavior, and build/release gates see
 This project is a terminal shell and compatibility layer, not a recreation of
 the Desktop app or the missing official `@zcode/tui`. Tool approval is not an OS
 sandbox; restrict workspace, network egress, MCP, and plugin access for sensitive projects.
+
+## New open-source replica subproject
+
+`zcode-open/` is an independent clean-room compatibility and cross-platform
+distribution boundary. It does not include the official `app.asar`,
+`zcode.cjs`, or decompiled vendor code. The static audit of the official 3.12.3
+package is documented in
+[`zcode-open/docs/official-3.12.3-audit.md`](zcode-open/docs/official-3.12.3-audit.md).
+Until official source and licensing are verifiable, it must not be advertised
+as an official complete mirror.
 
 ## Development
 

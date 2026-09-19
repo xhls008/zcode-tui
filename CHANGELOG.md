@@ -4,6 +4,19 @@
 构建 Linux x86_64-musl、Windows x86_64、macOS Intel/Apple Silicon 二进制，
 连同 SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版本段。
 
+## [0.7.1] - 2026-09-19
+
+### 官方 3.14.0 兼容
+
+- 适配官方 3.14.0 / CLI 0.16.9 的经典 provider-config 路径；隔离创建/连续恢复
+  测试通过，不注入旧版 `runtimeModel`。
+- Browser Use wrapper 检测 `--surface` 能力后为 3.14.x headless 调用补上
+  `--surface terminal`，并将 `ZCODE_APP` 传递给嵌套 node_repl 主机，确保它能定位
+  对应的官方 `app.asar`。
+- 上传检查和文档覆盖 3.14.0。官方 standalone Browser Use 仍可能报告
+  `ZCode Built-in missing`；项目保留诊断，不绕过官方插件注册或伪造成功。
+- 增加“内置服务缺失”错误提示和 3.14 wrapper 回归测试。
+
 ## [0.7.0] - 2026-09-18
 
 ### 隐私自查

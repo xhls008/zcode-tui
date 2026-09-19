@@ -102,6 +102,8 @@ pub fn browser_failure_hint(message: &str) -> Option<&'static str> {
         Some("Browser Use: Chromium launch failed. Check browser/OS runtime dependencies and sandbox support; no sandbox flags are changed automatically.")
     } else if message.contains("Browser plugin root is unavailable") {
         Some("Browser Use: official browser plugin unavailable. Check the browser-use plugin in the matching official ZCode package.")
+    } else if message.contains("ZCode Built-in missing") {
+        Some("Browser Use: the official kernel could not register its built-in node_repl/browser service. Re-run install.sh to refresh the wrapper and plugin cache; if it persists on ZCode 3.14.x, use the official Desktop client or downgrade to a verified kernel.")
     } else if message.contains("MCP tool returned an error:") {
         Some("Browser Use: the official browser tool reported an error. Check the tool result and browser-use skill; a successful CLI exit does not prove browser success.")
     } else {
@@ -205,6 +207,7 @@ mod tests {
             ("No installed Chrome or Chromium executable was found.", "absolute"),
             ("Managed headless Chromium is unavailable: launch failed.", "sandbox"),
             ("Browser plugin root is unavailable in the node_repl host", "plugin"),
+            ("ZCode Built-in missing", "built-in node_repl/browser service"),
         ] {
             assert!(browser_failure_hint(error).unwrap().contains(hint));
         }

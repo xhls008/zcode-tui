@@ -16,7 +16,7 @@ CLI 分派发生在配置加载和内核启动之前；TUI 命令通过本地子
 
 ## 检查范围
 
-兼容已审计官方 Linux **3.11.2-6792 / 3.12.3-7463** 的状态结构；同结构的 macOS /
+兼容已审计官方 Linux **3.11.2-6792 / 3.12.3-7463 / 3.14.0** 的状态结构；同结构的 macOS /
 Windows 数据可读，但没有在这两平台做真实 Desktop 取证验证。
 
 - 默认 HOME；`HOME/.zcode/v2/setting.json` 的 `dataBaseDir`；`ZCODE_DATA_BASE_DIR`；
@@ -25,7 +25,8 @@ Windows 数据可读，但没有在这两平台做真实 Desktop 取证验证。
   `--data-base-dir` 补充。配置中的绝对路径仍可能指向原目录，应留意检查范围。
 - 各根的 `.zcode/v2/checkpoints/*/state.json` 和旧 `repo-snapshots`；
   已接受 manifest；`pending/*.tar.gz.enc`、envelope 和 `tmp/*.tar.gz` 残留。
-- 覆盖 3.12.3 的 `activeUpload` / `pendingUpload` 别名和 `latestPendingUpload`。
+- 覆盖 3.12.3/3.14.0 的 `activeUpload` / `pendingUpload` 别名和
+  `latestPendingUpload`；未知字段只作为覆盖警告，不作成功推断。
 - 单个 JSON 最多 8 MiB、总 JSON 预算 64 MiB、目录条目预算 4096；错误或超限会提示
   coverage warning。显式数据根规范化后，拒绝其内部符号链接和 `..`，不跟随状态里
   指向外部的 manifest 路径。不是抵御并发恶意替换文件的取证沙箱。

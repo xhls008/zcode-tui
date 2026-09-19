@@ -1,4 +1,4 @@
-//! Read-only inspection of official Desktop 3.11.2 / 3.12.3 snapshot state.
+//! Read-only inspection of official Desktop 3.11.2 / 3.12.3 / 3.14.0 snapshot state.
 //! No kernel, network, credential access, archive extraction, or decryption.
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -12,7 +12,7 @@ use std::{
 
 const MAX_JSON: u64 = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4096;
-pub const HELP: &str = "Usage: zcode-tui check-zhipu-upload [--home PATH] [--data-base-dir PATH] [--json] [--list-files]\nRead-only local evidence check for official ZCode Desktop 3.11.2/3.12.3.\nDoes not start ZCode, contact servers, read file contents from your workspace, or decrypt archives.\nNo evidence is NOT proof that nothing was uploaded. --list-files reveals manifest filenames.\nExit: 0 completed (inspect findings), 1 invalid arguments/fatal error. Coverage warnings are in the report.";
+pub const HELP: &str = "Usage: zcode-tui check-zhipu-upload [--home PATH] [--data-base-dir PATH] [--json] [--list-files]\nRead-only local evidence check for official ZCode Desktop 3.11.2/3.12.3/3.14.0.\nDoes not start ZCode, contact servers, read file contents from your workspace, or decrypt archives.\nNo evidence is NOT proof that nothing was uploaded. --list-files reveals manifest filenames.\nExit: 0 completed (inspect findings), 1 invalid arguments/fatal error. Coverage warnings are in the report.";
 
 #[derive(Default)]
 pub struct Options {
@@ -187,7 +187,7 @@ fn children(path: &Path, report: &mut Report, budget: &mut usize) -> Vec<PathBuf
 pub fn scan(opt: &Options, env_root: Option<&Path>) -> Report {
     let mut report = Report {
         schema_version: 1,
-        scope: "official Desktop checkpoint state (3.11.2 / 3.12.3); local only",
+        scope: "official Desktop checkpoint state (3.11.2 / 3.12.3 / 3.14.0); local only",
         status: "no_local_evidence",
         conclusion: "no_local_evidence / 未发现本地证据",
         roots_checked: 0,
@@ -283,7 +283,8 @@ pub fn scan(opt: &Options, env_root: Option<&Path>) -> Report {
                             .and_then(Value::as_u64)
                             .unwrap_or(0)
                             > 0;
-                        // activeUpload and pendingUpload are aliases in 3.12.3. Booleans cannot double count.
+                        // activeUpload and pendingUpload are aliases in the
+                        // 3.12.x/3.14.x checkpoint schema. Booleans cannot double count.
                         for key in ["activeUpload", "pendingUpload", "latestPendingUpload"] {
                             if let Some(p) = state.get(key).filter(|p| p.is_object()) {
                                 f.staged = true;

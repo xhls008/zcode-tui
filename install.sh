@@ -155,8 +155,16 @@ const fs = process.versions.electron ? createRequire(import.meta.url)('original-
 let settings;
 export function initialize(data) { settings = data; }
 if (isMainThread && process.argv[1]) {
+  // Browser Use's node_repl host is a second Node process whose argv[1] is
+  // inside the seeded plugin cache, not the official Desktop package.  The
+  // wrapper exports ZCODE_APP so nested MCP hosts still resolve the matching
+  // app.asar instead of reporting a missing built-in browser runtime.
+  const appDir = process.env.ZCODE_APP;
+  const resources = appDir && fs.existsSync(join(appDir, 'resources'))
+    ? join(appDir, 'resources')
+    : dirname(dirname(fs.realpathSync(process.argv[1])));
   register(import.meta.url, { data: {
-    resources: dirname(dirname(fs.realpathSync(process.argv[1]))),
+    resources,
     cache: join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'zcode-tui', 'browser-runtime'),
   }});
 }
@@ -283,6 +291,9 @@ fi
 
 ZCODE_CJS="${APP_DIR}/resources/glm/zcode.cjs"
 ELECTRON_BIN="${APP_DIR}/zcode"
+# Keep the resolved package root available to Browser Use's nested node_repl
+# host.  The helper must not infer resources from the plugin-cache argv path.
+export ZCODE_APP="$APP_DIR"
 
 # 3.12.x moved the bundled provider configuration outside resources/glm.
 # Keep explicit user overrides, and let the kernel manage its own user cache.
@@ -351,6 +362,14 @@ fi
 # Only Browser Use needs the missing-module bridge. It extracts the matching
 # official runtime into the user cache, never into /opt or the project.
 BROWSER_ARGS=()
+browser_requested=false
+surface_requested=false
+for arg in "$@"; do
+    case "$arg" in
+        --browser-use|--browser-use=*) browser_requested=true ;;
+        --surface|--surface=*) surface_requested=true ;;
+    esac
+done
 if [ "${ZCODE_TUI_BROWSER_RUNTIME:-}" != off ]; then
     for arg in "$@"; do
         case "$arg" in
@@ -364,6 +383,12 @@ if [ "${ZCODE_TUI_BROWSER_RUNTIME:-}" != off ]; then
                 break ;;
         esac
     done
+fi
+# ZCode 3.14's headless Browser Use surface is explicit.  Older kernels do
+# not advertise --surface, so only add it when the exact kernel exposes the
+# option; callers may still override it explicitly.
+if $browser_requested && ! $surface_requested && grep -Fq -- '--surface' "$ZCODE_CJS"; then
+    set -- --surface terminal "$@"
 fi
 if electron_usable; then
     ELECTRON_RUN_AS_NODE=1 exec "$ELECTRON_BIN" "${BROWSER_ARGS[@]}" "$ZCODE_CJS" "$@"

@@ -111,10 +111,11 @@ zcode-tui check-zhipu-upload --json       # 机器可读结果
 | 组件 | 状态 |
 |---|---|
 | 官方桌面包 | 3.12.3-7463、3.11.2-6792 已审计 |
+| 官方桌面包 3.14.0 | Linux x86_64 静态审计完成；经典 CLI 创建/连续恢复已验证；standalone Browser Use 仍受官方 `ZCode Built-in missing` 阻塞 |
 | 3.12.3 | 经典 CLI 创建/连续恢复；暂不支持 app-server/V4/会话内模型切换 |
 | 3.11.2 | app-server 流式、V4 控制、取消和恢复已验证 |
 | Browser Use | 3.11.2/3.12.3 使用官方经典 CLI 路径；不提供途中 steer 或交互审批 |
-| 发布版本 | `zcode-tui 0.7.0` |
+| 发布版本 | `zcode-tui 0.7.1` |
 
 内核版本号相同不代表协议相同；更新官方包后应重新验证。Release 包含 Linux、Windows、
 macOS Intel 和 Apple Silicon 二进制，并提供 `SHA256SUMS`。
@@ -180,6 +181,13 @@ accent = #6088ff             # 主题 token 覆盖
 
 本项目只提供终端壳和兼容层，不重建官方桌面端或缺失的官方 `@zcode/tui`。
 工具权限不能替代操作系统隔离；处理敏感项目时请限制工作区、网络出口和 MCP/插件权限。
+
+## 新的开源复刻子项目
+
+`zcode-open/` 是独立的洁净室兼容项目与跨平台发行边界。它不携带官方
+`app.asar`、`zcode.cjs` 或反编译代码；3.12.3 官方安装包的静态审计记录见
+[`zcode-open/docs/official-3.12.3-audit.md`](zcode-open/docs/official-3.12.3-audit.md)。
+在官方源码和许可证可验证前，不将本项目宣传为官方完整镜像。
 
 ## 开发
 

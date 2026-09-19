@@ -125,6 +125,25 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 64)
         self.assertIn("classic CLI", result.stderr)
 
+    def test_new_headless_kernel_gets_terminal_surface_and_app_root(self):
+        """3.14.x needs an explicit terminal surface for CLI Browser Use.
+
+        The wrapper also exports ZCODE_APP because the official node_repl host
+        is spawned from the plugin cache and cannot infer app.asar from its
+        own argv[1].
+        """
+        write_archive(self.resources / "app.asar")
+        (self.resources / "glm/zcode.cjs").write_text(
+            "// --surface is advertised by the 3.14.x kernel\n"
+            "console.log(JSON.stringify({args: process.argv.slice(2), app: process.env.ZCODE_APP}));\n"
+        )
+        result = self.run_kernel("--browser-use", "headless")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["app"], str(self.resources.parent))
+        self.assertEqual(payload["args"][:2], ["--surface", "terminal"])
+        self.assertIn("--browser-use", payload["args"])
+
     def test_upload_check_bypasses_kernel_detection_and_execution(self):
         (self.resources / "glm/zcode.cjs").write_text('throw Error("must not run");')
         self.env["ZCODE_APP"] = "/not-installed"

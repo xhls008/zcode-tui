@@ -100,3 +100,17 @@ e9f1868c0fdb863537ed910ee3828b9be96b8c2fd805473f63b439e1113266b8
 本版本主动使用经典 CLI；暂不提供 V4/途中 steer/会话内模型切换，`/model` 明确提示而
 不假装切换成功。原生 provider 配置与旧 CLI 配置迁移由官方经典 CLI 管理，不改写
 官方包或代替它迁移用户凭据。更新时必须同时更新 wrapper（重新运行 install.sh）。
+
+### 3.14.0 适配（2026-09-19）
+
+官方 3.14.0 的 CLI 版本为 **0.16.9**，继续使用不注入旧 `runtimeModel` 的经典
+provider-config 路径；项目的隔离创建/连续恢复测试已通过。3.14.x 新增了
+`--surface terminal` 选项，托管 wrapper 在检测到官方内核声明该选项且请求
+`--browser-use` 时自动补上它，并向嵌套的 `node_repl` 进程导出 `ZCODE_APP`，避免从
+插件缓存的 argv 错误推导 `app.asar`。
+
+官方发行说明称修复了远程内置浏览器标签页无法关闭；但在本地临时 HOME、loopback
+模型和 Chrome 的真实复测中，3.14.0 仍返回 `ZCode Built-in missing`，未达到本项目
+将真实 Browser Use 标为通过的门槛。这看起来是官方 3.14.0 standalone/插件注册链路
+的问题，不由 TUI 静默绕过；项目会保留可诊断错误，并建议重新运行 `install.sh` 刷新
+wrapper/插件缓存，或改用已验证的官方桌面端。该失败不影响经典文本会话适配。

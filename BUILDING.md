@@ -170,7 +170,7 @@ cargo test --locked --test upload_check
 unshare -Urn sh -c 'ip link set lo up && ZCODE_TEST_CJS=/path/to/resources/glm/zcode.cjs cargo test --locked --test official_kernel -- --ignored --nocapture'
 ```
 
-分别对 3.11.2（app-server/V4 生命周期）和 3.12.3（经典 CLI 三轮创建/恢复）运行。
+分别对 3.11.2（app-server/V4 生命周期）、3.12.3 和 3.14.0（经典 CLI 三轮创建/恢复）运行。
 跨平台 CI 不下载、执行未知官方包；真实内核和真实 Browser Use 是显式 opt-in 门禁。
 `tests/pty_smoke.py` 是需要真实账号的人工检查，不要把它当作离线回归；离线 Agent
 PTY 回归为 `tests/agents_pty_smoke.py`。
