@@ -1,612 +1,186 @@
 # zcode-tui
 
-[Chinese](README.md) | [English](README.en.md) | [Releases](https://github.com/xhls008/zcode-tui/releases) | [Design](docs/2026-07-04-design.md)
+[中文](README.md) · [Releases](https://github.com/xhls008/zcode-tui/releases) · [Design](docs/2026-07-04-design.md)
 
-![Current zcode-tui interface with ASCII branding, phased output, and the Agent Inspector](assets/zcode-tui-auenger.png)
+![zcode-tui](assets/zcode-tui-auenger.png)
 
-> The v0.6.0 interface captured with ZCode CLI kernel 0.16.3 on macOS. It shows
-> the adaptive ASCII brand panel, native terminal scrollback, phased app-server
-> output, and the read-only parent Agent / Subagent / Background Inspector. The
-> current source is also verified against ZCode Linux 3.11.2.
+> An unofficial community TUI for ZCode Linux installations that do not ship a
+> usable `@zcode/tui`. It runs the official CLI kernel; it is not the Desktop app.
 
-> **Unofficial notice**: `zcode-tui` is not an official ZCode / Zhipu project
-> and is not endorsed by ZCode or Zhipu. It is a community/personal Linux
-> terminal fallback for the TUI experience currently missing from the official
-> package.
+`zcode-tui` is a Rust/Ratatui terminal interface for SSH, tmux, headless servers,
+and keyboard-first workflows. Prompts use the official `app-server` stream when
+available and fall back to `zcode --prompt` when the protocol is unavailable.
 
-> **Usage benefit**: zcode-tui continues to use your official ZCode account and
-> kernel rather than a separate billing path, so it inherits ZCode's **1.5x
-> (150%) usage benefit**. Eligibility and exact terms remain subject to ZCode's
-> official account policy.
+## Quick start
 
-`zcode-tui` is a Rust terminal-first fallback TUI for ZCode on Linux. It exists
-for the gap where the official Linux package exposes a `tui` command, but does
-not ship the terminal UI runtime (`@zcode/tui`).
-
-It does not pretend to be an official implementation. It is a practical
-terminal shell around the official ZCode CLI path: normal prompts prefer
-`zcode app-server` and automatically fall back to `zcode --prompt`, while slash
-commands, MCP config, shell escapes, session selection, phased output, command
-palette, and editor workflows are handled locally.
-
-## Privacy: use the kernel without the Desktop repository-snapshot uploader
-
-**You can use ZCode's coding kernel through this project without starting the
-official Desktop application.** The managed CLI path runs
-`resources/glm/zcode.cjs` directly, not Desktop's `app.asar/out/host/index.js`,
-and does not integrate the Desktop snapshot-upload service described below.
-This is a verified architectural distinction, not a promise of zero data egress.
-
-**Audit findings (2026-09-18):** the official Linux **3.11.2-6792 / 3.12.3-7463**
-Desktop host contains a complete workspace-and-`.git` collection, compression,
-encryption, local staging and OSS upload pipeline wired into ordinary conversation
-flows. Execution also requires an account token, server-issued upload credentials
-and other conditions. Git internals are explicitly included; ordinary sensitive
-filename filters do not protect committed history. This snapshot-upload
-implementation was not found in either inspected CLI kernel.
-
-**We oppose and condemn repository collection without adequate disclosure and
-explicit authorization.** Asking an AI to help with code must not be treated as
-blanket permission to collect Git history. We specifically criticize wiring this
-collection into ordinary Desktop conversations: the traced pipeline has no
-separate upload-confirmation gate and does not use the experience-improvement or
-repository-indexing settings as enable/disable gates. Upstream should provide
-clear disclosure, a verifiable dedicated opt-in control that is off by default,
-and export/deletion channels. Encryption is no substitute for informed user
-control. This criticism concerns verifiable design, not an unproven allegation
-about actual transfers, downstream use or illegality.
-
-**What you can—and cannot—rely on:**
-
-- **Avoiding this Desktop pipeline does not mean offline operation.** Model
-  requests may transmit code, diffs, attachments and tool output. MCP servers,
-  plugins, shell commands and Browser Use may also access the network.
-- **This project is not currently a network or filesystem sandbox.** Tool
-  approvals are not an OS-level data-egress control. Restrict readable paths,
-  model services and network destinations for sensitive projects.
-- **A separately running Desktop app is outside this TUI's control.** The
-  findings cover the audited versions and managed CLI path, not custom launchers,
-  future official TUIs or subsequently updated kernels.
-- **Static analysis does not establish that anyone's files were uploaded.** The
-  3.12.3 privacy audit is not a protocol-compatibility certification; the tested
-  runtime baseline remains the one below.
-
-See the [privacy audit record](docs/privacy-audit-2026-09-18.md) for package hashes,
-function-level evidence and reproduction guidance.
-
-### Local upload evidence check
-
-```bash
-zcode check-zhipu-upload
-zcode-tui check-zhipu-upload --json  # works without the official application
-# In the TUI: /check-zhipu-upload
-```
-
-Read-only; distinguishes client acceptance records, attempts and staged artifacts.
-**No evidence does not mean never uploaded.** See [scope/options](docs/check-zhipu-upload.md).
-
-[Reporting](https://www.aizws.net/news/detail/12690) attributes a September 18 apology,
-fix announcement and open-source/third-party-review plans to ZCode. We have not
-independently verified the fix scope or data destruction. This audit concerns the
-fingerprinted historical packages, not a claim about current server behavior.
-
-![Editorial satire: a programmer asks for a one-line fix; a robot encrypts the Git history, but the cloud alone holds the key.](output/imagegen/privacy-comic.png)
-
-*Original adaptation of [ferstar's commentary](https://blog.ferstar.org/posts/zcode-silent-workspace-snapshot-upload/)
-about owners being unable to decrypt their own ciphertext. The dialogue is fictional,
-not a verbatim quote or evidence of current server behavior.*
-
-## Current compatibility baseline
-
-| Component | Current version / status |
-|---|---|
-| ZCode Linux x64 desktop | **3.12.3-7463 / 3.11.2-6792** (official deb, SHA-512 verified) |
-| Official CLI kernel | **0.16.5** (same version string as 3.9.1, different bundle and behavior) |
-| zcode-tui | **0.7.0** |
-| Protocol compatibility | **3.12.3: classic CLI create/resume; no app-server/V4/in-session model picker yet**; 3.11.2: real `turn.completed` termination + V4 foreground cancellation; 3.9.1: 0.16.5 runtime preferences + safe official-MCP-auth fallback + legacy/V4; 3.8.1/3.7.7/3.7.6: 0.16.3 runtime preferences + legacy/V4; 3.5.3: legacy + V4; 3.3.6: legacy controls |
-| Current source verification | 185/185 Rust tests; zero-warning Clippy; native build; 11/11 Agent PTY checks; 8 browser-runtime + 4 browser PTY checks; opt-in isolated real-kernel/browser tests |
-
-When the official x64 feed changes, startup update detection and `/update`
-continue to use SHA-512 verification. Protocol compatibility is revalidated
-against the real app-server/V4 behavior instead of being inferred from the CLI
-version alone.
-
-**Official TUI status (2026-09-05):** the 3.11.2 Linux x64 package still lacks
-`@zcode/tui`; invoking its `tui` command fails with a missing-package error.
-The managed wrapper still prefers a usable official TUI before falling back.
-This finding does not cover other platforms or standalone CLI distributions.
-
-During the 3.11.2 compatibility checks, the unversioned Linux update feed still
-returned 3.9.1 while the website listed 3.11.2. Update detection only reports that
-feed's latest version. Verification
-used the website's versioned `linux-x64/latest.yml`, without bypassing SHA-512
-or changing the system installation.
-
-Run the real-kernel regression explicitly (Node ≥ 22.5, temporary HOME and a
-loopback fake model; no real credentials or paid model requests). It covers
-3.11.2 streaming/V4/cancellation/resume, or 3.12.3 classic CLI create/resume:
-
-```bash
-ZCODE_TEST_CJS=/path/to/resources/glm/zcode.cjs \
-  cargo test --locked --test official_kernel -- --ignored --nocapture
-```
-
-## Theme
-
-The premise is simple: if the official Linux package does not provide a usable
-terminal interface, build one.
-
-The project is designed for SSH, tmux, headless servers, and keyboard-first
-workflows. It does not try to recreate the desktop application. It focuses on
-the part Linux terminal users need immediately: a responsive TUI that starts
-fast, streams output, keeps session state visible, and can be installed without
-a desktop environment.
-
-## Features
-
-The interaction model is influenced by Claude Code, Codex CLI, Gemini CLI,
-OpenCode, and Crush. See [the research notes](docs/references/tui-research-2026-07.md)
-for details.
-
-**Visuals and rendering**
-
-- Codex-like transcript layout: borderless scrollback, user message bands,
-  assistant output as flat markdown, and a compact footer.
-- Eleven built-in themes: `dark`, `light`, `tsinghua` (Tsinghua Purple), `pku`
-  (PKU Red), plus the classic editor-inspired `solarized-dark`,
-  `solarized-light`, `dracula`, `nord`, `gruvbox-dark`, and `tokyo-night`, and
-  the Okabe-Ito color-vision-friendly `accessible`. Config files can also define
-  one or more named custom themes. `/theme` lists built-ins and `(custom)`
-  entries together, while `/theme <name>` switches immediately and persists the
-  choice. Names and palettes come from one dynamic registry. Dark keeps the
-  Zhipu-inspired cool gray palette with GLM-blue accents.
-- Markdown rendering via `pulldown-cmark`: headings, emphasis, inline code,
-  fenced code blocks, lists, quotes, rules, and display-width aligned tables.
-- Syntax highlighting for fenced code blocks via `syntect`; light themes
-  darken the dark-source syntax colors for readable contrast, while `diff`
-  fences and `/diff` output remain colored by line role.
-- Startup banner with kernel/TUI versions, cwd, mode, session, and auth status.
-- Optional official update check using the same Linux update feed as the
-  desktop app.
-
-**Phased streaming (default on)**
-
-- Prompts run through the kernel's `zcode app-server` protocol and the answer
-  accumulates from text deltas. A tool start commits the preceding text phase,
-  a tool result appends when complete, and turn completion appends the final
-  text phase. Rows already in terminal scrollback are never rewritten or
-  reordered.
-- On ZCode 3.5.3, the proven legacy create/resume/subscribe/send/event body
-  stream is retained while `v4/conversation/subscribe` provides the new
-  control plane. Older kernels that do not expose V4 keep their legacy
-  controls without losing streaming.
-- ZCode 3.7.6+ / CLI 0.16.3+ adds a server-to-client
-  `session/requestRuntimePreferences` request during session startup. The TUI
-  answers it automatically instead of timing out after 15 seconds and falling
-  back to the classic path. CLI 0.16.5 also adds
-  `interaction/requestOfficialMcpAuthHeaders`. Because this TUI owns no Desktop
-  official-MCP credential bridge, it explicitly returns the kernel's strict
-  `official_auth_unavailable` result instead of leaving the request hanging.
-- Any failure (spawn, handshake timeout, schema mismatch, disconnect)
-  permanently and seamlessly downgrades the process to the classic
-  `--prompt` path; set `ZCODE_TUI_APP_SERVER=0` to force the classic path.
-- Tool permission approval: gated side-effect tools (Write in build mode,
-  plan approval in plan mode) raise an approval overlay (arrows + Enter to
-  answer, Esc to decline) instead of hanging; approved tools continue within
-  the same turn.
-- Session controls on the live session: `/model` picker, `/think` thought
-  level, `/compact` in-place context compaction; `/mode` and Shift+Tab apply
-  immediately via `session/setMode`.
-- Dynamic model catalog: at startup, the TUI reads ZCode's resolved catalog
-  through `workspace/readState`, merges matching Desktop metadata from
-  `~/.zcode/v2/config.json` into the active CLI provider, and registers it with
-  `workspace/updateProviderRegistry`. This exposes Desktop-provided entries such
-  as `GLM-5.3-Flash` even when the standalone CLI catalog has not listed them.
-  Authentication and endpoints still come from `~/.zcode/cli/config.json`;
-  credentials are handed only in memory to the same local app-server, never
-  logged, persisted, or used by the TUI to contact the provider directly.
-  Public metadata is cached for outages. `/model` works before the first prompt,
-  excludes inactive providers, and stores only `{providerId, modelId}` in
-  `~/.config/zcode-tui/model.json` so the selection survives a restart and is
-  applied to created or resumed sessions.
-- Steering: on ZCode 3.5.3, plain text typed during a turn uses V4
-  `setFollowupMode:guide` followed by `sendText`; success is shown only after
-  the subsequent frame admits `delivery=guide`. Older kernels retain
-  `session/steer`.
-- `/rewind`: ZCode 3.5.3 lists V4 turn rows, previews a stable
-  `{rowId,entityId}` target, and applies safe workspace file rewind through
-  `v4/command applyFileRewind`. Older kernels retain the checkpoint-based
-  legacy path; neither path overwrites externally modified unsafe files.
-- Browser Use (tested with ZCode 3.11.2): `--browser-use headless` and optional
-  `--browser-executable <absolute-path>` use the official classic CLI, with
-  executable checks, tool progress, actionable errors and cancellation. The
-  managed wrapper resolves missing Playwright from the matching official
-  `app.asar`, without modifying the package or downloading npm dependencies.
-  Browser tasks explicitly default to build mode; permissions are never silently
-  relaxed. Token streaming, steer and interactive approvals are unavailable on
-  this route. Re-run `install.sh` to update the wrapper;
-  see [usage and verification](docs/browser-use.md).
-- The composer footer always shows parent-session `ctx used/window (%)` and
-  cumulative `sess`. Context follows `state.updated`, cumulative tokens refresh
-  silently after every turn, and `/usage [7d|30d]` remains immediately
-  available while a response streams instead of entering the input queue.
-- `/update` self-updates the kernel from the official feed (sha512-verified).
-- ZCode 3.3.6 tool-policy flags (`--allowed-tools`, `--disallowed-tools`, and
-  `--disallowedTools`) apply to both classic prompts and app-server
-  create/resume sessions; `--permission-mode` is accepted as a legacy alias
-  for `--mode` (`default` maps to `build`).
-- `@file` mentions become `session/send` attachments (image/file kinds,
-  `localPath`-based), so the model reads them on the streaming path too.
-- Project `.mcp.json` and user-level MCP config are passed to
-  `session/create`/`resume` as `mcpServers` — the kernel does not read
-  project `.mcp.json` on its own, so this is what makes MCP servers work in
-  streaming sessions.
-- Turn comfort: a terminal bell after >30s turns (`notify = off` disables),
-  a `N file(s) changed · /diff to review` note when a turn wrote files, and
-  the current model + mode in the footer (e.g. `glm-5.1 · build`).
-
-**Sessions**
-
-- Multi-turn continuity: after the first successful prompt, later prompts
-  reuse the live streaming session (classic path: `--continue`).
-- `/new`, `/resume [sess_id]`, `/mode`, and Shift+Tab mode cycling.
-- `/sessions` picker for recent kernel sessions, sorted with current-directory
-  sessions first; streaming resumes go through `session/resume` with the
-  runtime-model fix (bare resumes used to fail their first send).
-- After a resume, the last few exchanges replay as dim compact lines so the
-  restored context is visible.
-- Discarded live sessions (`/new`, clean exit) get a best-effort
-  `session/close`.
-
-**Interaction**
-
-- Rust + Ratatui + Crossterm, shipped as a single static Linux binary in
-  GitHub Releases.
-- CJK-aware transcript and composer wrapping; long input grows to five rows,
-  then keeps the cursor visible in a scrolling composer viewport.
-- Non-blocking streaming jobs for prompts, shell commands, and diffs.
-- Esc/Ctrl+C cancellation with process-group kill on Unix.
-- Busy input queueing.
-- Live slash-command suggestions: arrows select, Enter runs the highlighted
-  command, and Tab completes it for additional arguments; plus `@file`
-  completion.
-- File mentions are translated into `--attach` after canonicalization, rejecting
-  path traversal and symlink escapes.
-- Persistent prompt history from the ZCode kernel database, plus Ctrl+R reverse
-  search.
-- `/agents` is a read-only Agent Inspector backed by official
-  `session/subagents`, V4 state, and lifecycle events. It separates the parent,
-  Subagents, and Background work; refreshes automatically when opened; supports
-  tabs, details, manual refresh, and stable selection; and always labels the
-  composer target as the parent. ZCode 0.16.5 V4 `subagent` rows and
-  `summaryText` deltas provide a bounded live-progress view, while the final
-  result remains authoritative from `session/subagents.summary`. Press `x`
-  only on Background records that the kernel marks `cancellable=true` and gives
-  a real `taskId`. Inactive child transcripts on ZCode 0.16.3 require a stateful
-  resume, so the TUI deliberately shows official summaries/output tails only,
-  never auto-resumes a child, and never falls back to SQLite.
-- The TUI uses a normal-screen Ratatui inline viewport. The latest immutable
-  turn that fits stays next to the composer together with unfinished thinking;
-  previous or overflowing stable rows append to terminal scrollback. Mouse
-  capture is never enabled, so wheel scrolling,
-  ordinary drag selection, and system Cmd+C/Ctrl+Shift+C work natively. Sparse
-  scrolling-region writes keep trailing spaces out of history so terminal
-  reflow remains stable after a window resize.
-- Structured summaries for internal tool calls; failures retain a bounded
-  diagnostic tail, while explicit user-requested output remains complete.
-- Bracketed paste support.
-- Ctrl+P command palette, Ctrl+X leader shortcuts, Ctrl+G external editor.
-- `/copy` (or Ctrl+X then y) copies the last assistant reply to the system
-  clipboard via OSC52 — works over SSH; in tmux enable
-  `set -g set-clipboard on`.
-
-**Live progress**
-
-- While a prompt is running, `zcode-tui` can read the ZCode kernel SQLite
-  database in a read-only way and render live tool progress as compact status
-  chips.
-- If the database schema is missing or unsupported, this feature degrades
-  silently and normal streaming still works.
-- JSON prompt results are parsed when available; plain text remains supported.
-
-**Auth**
-
-- `/auth` distinguishes complete kernel configuration from partial env-key or
-  credential-file setups.
-- The unauthenticated startup screen gives browserless login paths for headless
-  machines.
-- `/login` runs `zcode login`; on headless machines it adds `--no-browser` so
-  the OAuth URL is visible in the terminal.
-- `/logout` runs `zcode logout`.
-
-**MCP config**
-
-- Project scope `.mcp.json` and user scope `~/.config/zcode/mcp.json`.
-- stdio, http, and sse transports.
-- `/mcp add`, `/mcp add-json`, `/mcp get`, `/mcp enable`, `/mcp disable`,
-  `/mcp remove`.
-- Runtime commands such as `/mcp status` are forwarded to ZCode.
-
-## Install
-
-### Option 1: Download the release binary
-
-Recommended for SSH servers and machines without a Rust toolchain.
-
-Each [GitHub Release](https://github.com/xhls008/zcode-tui/releases) contains:
-
-| Platform | Release asset |
-|---|---|
-| Linux x86_64 | `zcode-tui-x86_64-unknown-linux-musl` (statically linked) |
-| Windows x86_64 | `zcode-tui-x86_64-pc-windows-msvc.exe` |
-| macOS Intel | `zcode-tui-x86_64-apple-darwin` |
-| macOS Apple Silicon | `zcode-tui-aarch64-apple-darwin` |
-
-Linux installation:
+### Download a Linux release
 
 ```bash
 mkdir -p ~/.local/bin
 curl -fL -o ~/.local/bin/zcode-tui \
   https://github.com/xhls008/zcode-tui/releases/latest/download/zcode-tui-x86_64-unknown-linux-musl
 chmod +x ~/.local/bin/zcode-tui
-```
 
-If you also want the `zcode` wrapper:
-
-```bash
+# Optional: install the managed `zcode` wrapper too.
 curl -fLO https://github.com/xhls008/zcode-tui/releases/latest/download/install.sh
 bash install.sh --no-build
 ```
 
-On macOS, download the asset matching the machine architecture, save it as
-`zcode-tui`, and run `chmod +x zcode-tui`. On Windows, download the `.exe`.
-Both platforms need a `zcode` command that can invoke the official kernel on
-`PATH`, or an explicit `ZCODE_TUI_ZCODE_BIN`. `install.sh` and the built-in
-`/update` command remain Linux-only.
-
-> **macOS auth and model configuration:** with ZCode 3.8.1 / CLI 0.16.3,
-> upstream `zcode login` OAuth may still fail with
-> `OAuth response is not valid JSON`; see the
-> [upstream issue](https://github.com/zai-org/feedback/issues/51). Prefer
-> `zcode login zai-coding-plan-api-key <key>` (global) or
-> `zcode login bigmodel-coding-plan-api-key <key>` (China). Desktop sign-in is
-> stored under `~/.zcode/v2/`, while the CLI still requires
-> `~/.zcode/cli/config.json` with an explicit `provider/model`; desktop sign-in
-> alone does not create that CLI model configuration.
-
-### Option 2: Build from source
+### Build from source
 
 ```bash
-./install.sh
+./install.sh                 # build and install TUI + wrapper
+./install.sh --no-wrapper
+./install.sh --uninstall
 ```
 
-The installer builds the release binary, installs it to
-`~/.local/bin/zcode-tui`, and installs a managed `~/.local/bin/zcode` wrapper.
-The managed wrapper enables app-server true streaming for the fallback TUI by
-default; use `ZCODE_TUI_APP_SERVER=0 zcode` to force the classic `--prompt`
-path.
+Log in with `zcode login`, or run `/login` inside the TUI. Headless machines need
+Node ≥ 22.5 unless the official Electron runtime is usable. See
+[Browser Use and runtime notes](docs/browser-use.md) for the longer SSH guide.
 
-Manual build:
+## Why this exists
+
+The official Linux package once advertised a `tui` entry without shipping a usable
+`@zcode/tui`. This project supplies a terminal shell for SSH/tmux/headless use; it
+does not claim to reproduce every Desktop capability.
+
+![ZCode launched. Where is the TUI?](assets/zcode-no-tui-satire.png)
+
+*Product satire: the menu advertises a TUI, while the package is missing the entry point.*
+
+![A menu promises beef noodles and serves hot water](assets/beef-noodle-hot-water-satire.png)
+
+*Product satire: users should not have to finish the product integration themselves.*
+
+## Privacy boundary
+
+### What this project does
+
+- The managed path runs `resources/glm/zcode.cjs`; it does not start the Desktop
+  host at `app.asar/out/host/index.js`.
+- The audited official CLI kernels (3.11.2 and 3.12.3) did not contain the
+  Desktop repository-snapshot uploader.
+- `check-zhipu-upload` is local and read-only: no kernel, network, credentials,
+  decryption, extraction, deletion, or upload is triggered.
+
+### What it does not guarantee
+
+- Model requests, attachments, tools, MCP servers, plugins, and Browser Use may
+  still send content over the network.
+- This is not an OS-level filesystem/network sandbox and cannot control a
+  separately running Desktop app.
+- No local evidence does **not** mean nothing was ever uploaded; a client success
+  state is not an independent server receipt.
 
 ```bash
-cargo build --release
-./target/release/zcode-tui
+zcode check-zhipu-upload
+zcode-tui check-zhipu-upload --json
+# Inside the TUI: /check-zhipu-upload
 ```
 
-Or point an existing wrapper at a custom fallback binary:
+See [the checker documentation](docs/check-zhipu-upload.md) for scope and status
+semantics, and [the audit](docs/privacy-audit-2026-09-18.md) for fixed-package evidence.
 
-```bash
-export ZCODE_FALLBACK_TUI="$PWD/target/release/zcode-tui"
-zcode tui
-```
+**Position:** undisclosed, unauthorized background repository collection is not
+acceptable; encryption alone does not give users control. This criticizes the
+audited historical artifacts and does not claim that every user uploaded data or
+that a legal violation occurred.
 
-## SSH and Headless Use
+![Satirical comic: the cloud robot encrypts the user's Git history but keeps the key.](output/imagegen/privacy-comic.png)
 
-This is the primary use case. The TUI itself is a pure terminal application and
-works over SSH and tmux. The only tricky part is bootstrapping the official
-ZCode kernel.
+*An original adaptation of [ferstar's public commentary](https://blog.ferstar.org/posts/zcode-silent-workspace-snapshot-upload/);
+the dialogue is fictional and is not evidence of current server behavior.*
 
-1. Get the kernel without installing system-wide:
+## Compatibility
 
-   ```bash
-   dpkg-deb -x ZCode-<version>.deb ~/.local/opt/zcode/<version>/
-   ```
+| Component | Status |
+|---|---|
+| Official Desktop packages | 3.12.3-7463 and 3.11.2-6792 audited |
+| 3.12.3 | Classic CLI create/resume; no app-server/V4/in-session model picker yet |
+| 3.11.2 | app-server streaming, V4 controls, cancellation, and resume verified |
+| Browser Use | Classic official CLI route on 3.11.2/3.12.3; no in-turn steer/interactive approval |
+| Release | `zcode-tui 0.7.0` |
 
-2. Run the kernel. The wrapper probes `$ZCODE_APP`, `/opt/ZCode`, and
-   `~/.local/opt/zcode/*/opt/ZCode`. Multiple rootless versions are compared
-   numerically (`3.10` is newer than `3.9`), and the selected directory is
-   exported to the fallback TUI as `ZCODE_APP`. It prefers Electron's embedded
-   Node when possible, then falls back to system Node. The kernel requires
-   Node >= 22.5 because it uses `node:sqlite`.
+Equal CLI version strings do not imply equal protocols. Release assets include
+Linux, Windows, macOS Intel, Apple Silicon binaries, and `SHA256SUMS`.
 
-3. Log in. In headless environments, use one of:
+## Features
 
-   ```bash
-   zcode login bigmodel-coding-plan-api-key <key>
-   zcode login zai-coding-plan-api-key <key>
-   zcode login --no-browser
-   ```
+- Multi-turn sessions, `/new`, `/resume`, `/sessions`, permission modes, and
+  context/token status.
+- App-server streaming, tool approval, and automatic fallback to classic CLI.
+- MCP at project/user scope (stdio/http/sse), `@file` attachments, shell escape,
+  and syntax-highlighted git diff.
+- Read-only `/agents` inspector, background-task cancellation, and `/rewind`.
+- Markdown/code rendering, CJK-aware layout, themes/custom themes, OSC52 copy,
+  and persistent input history.
+- Headless Browser Use with a matching official Playwright runtime bridge; see
+  [Browser Use docs](docs/browser-use.md).
 
-   Or copy both files from a logged-in machine:
+## Common commands
 
-   ```text
-   ~/.zcode/cli/config.json
-   ~/.zcode/v2/credentials.json
-   ```
+| Command | Purpose |
+|---|---|
+| `text` | Send a prompt; stream first, then fall back if needed |
+| `@path` | Attach a workspace file; traversal and symlink escapes are rejected |
+| `! <cmd>` | Run a local shell command |
+| `/login`, `/logout`, `/auth` | Authentication actions/status |
+| `/status` | Session, auth, and MCP summary |
+| `/mcp ...` | Manage MCP servers |
+| `/mode [build\|edit\|plan\|yolo]` | View/change permission mode |
+| `/model`, `/think`, `/compact` | Live session controls (not on 3.12.3 classic route) |
+| `/usage [7d\|30d]` | Token usage |
+| `/agents` | Read-only Agent/Background inspector |
+| `/rewind` | Preview and apply a checkpoint rewind |
+| `/diff [args]` | Highlight `git diff` |
+| `/theme [name]` | List or switch themes |
+| `/update` | SHA-512-verified official kernel update |
+| `/check-zhipu-upload` | Local upload-evidence check |
+| `/copy`, `/editor`, `/clear`, `/new`, `/exit` | Copy, edit, clear, reset, quit |
 
-## Common Commands
-
-```text
-text                         send through app-server (fallback: --prompt)
-@<path>                      mention a file and auto-attach it
-! <cmd>                      run a local shell command
-/goal <text>                 forward goal handling to ZCode
-/skill <name> <task>         force a ZCode skill
-/skills [list]               run zcode skills list
-/login                       interactive login
-/logout                      logout
-/auth                        show local auth status
-/status                      show session, auth, and MCP overview
-/sessions                    open recent session picker
-/theme [list|dark|light|tsinghua|pku|solarized-dark|solarized-light|dracula|nord|gruvbox-dark|tokyo-night|accessible]
-                             list or persistently switch built-in/custom themes
-/agents                      inspect parent, Subagents, and Background work
-                             (auto-refresh; Tab/Enter/r; x cancels eligible work)
-/mcp list                    list project and user MCP servers
-/mcp add <name> <cmd> [args] add stdio MCP server
-/mcp add --transport http|sse <name> <url>
-/mcp add-json <name> <json>
-/mcp get <name>
-/mcp enable|disable <name>
-/mcp remove <name>
-/mode [build|edit|plan|yolo]
-/model
-/think
-/compact
-/usage [7d|30d]
-/update
-/copy
-/resume [sess_id]
-/new
-/diff [args]
-/ide [path]
-/editor
-/clear
-/exit
-```
+Run `zcode-tui --help` for the complete command and shortcut list.
 
 ## Configuration
 
-Config file:
+File: `~/.config/zcode-tui/config` (`key = value`):
 
 ```text
-~/.config/zcode-tui/config
-```
-
-Line format:
-
-```text
-# Built-in palette and optional token overrides.
 theme = dark
-# Tokens: accent accent_dim text dim good bad frame code_bg band_bg selection_fg
-accent = #6088ff
-
-# Disable the >30s turn-complete terminal bell.
 notify = off
+accent = #6088ff
 ```
 
-`NO_COLOR` and `--no-color` take precedence over theme colors.
-You can also run `/theme <name>` for any registered theme; the command updates
-only the top-level `theme` line and preserves the rest of the file.
+| Variable | Purpose |
+|---|---|
+| `ZCODE_TUI_ZCODE_BIN` | Official `zcode` path |
+| `ZCODE_APP` | Official Desktop package directory |
+| `ZCODE_FALLBACK_TUI` | Fallback TUI binary |
+| `ZCODE_TUI_APP_SERVER=0` | Force classic `--prompt` mode |
+| `ZCODE_FORCE_SYSTEM_NODE=1` | Skip Electron's embedded Node |
+| `ZCODE_TUI_NO_UPDATE_CHECK=1` | Disable startup update check |
+| `ZCODE_TUI_CONFIG` | TUI config path |
+| `ZCODE_TUI_LOG` | Structural protocol log; request params/credentials are omitted |
 
-### Custom themes
-
-Define one or more named themes with `[[custom_themes]]`. `base` must name one
-of the eleven built-ins and defaults to `dark`; omitted tokens inherit from it:
-
-```text
-theme = my-theme
-
-[[custom_themes]]
-name = "my-theme"
-base = "dark"
-accent = "#ff8800"
-selection_fg = "#ffffff"
-
-[[custom_themes]]
-name = "paper"
-base = "light"
-text = "#202020"
-code_bg = "#f4f1e8"
-```
-
-Every custom theme accepts `accent`, `accent_dim`, `text`, `dim`, `good`, `bad`,
-`frame`, `code_bg`, `band_bg`, and `selection_fg`. Names are 1–32 lowercase
-letter/digit segments separated by single hyphens (for example `my-theme`) and
-must not conflict with a built-in or another custom theme. An invalid name,
-base, or color disables only that entry and produces a clear TUI diagnostic;
-the config file is not rewritten. Use `/theme list` to see `(custom)` entries
-and `/theme my-theme` to switch, persist, and restore it on restart.
-
-Useful environment variables:
-
-```text
-ZCODE_TUI_ZCODE_BIN
-ZCODE_TUI_LOGIN_CMD
-ZCODE_TUI_LOGOUT_CMD
-ZCODE_TUI_IDE_CMD
-ZCODE_TUI_NO_UPDATE_CHECK
-ZCODE_TUI_UPDATE_FEED       (explicit latest-linux.yml URL or base; explicit
-                             loopback URLs are supported for smoke tests)
-ZCODE_TUI_APP_SERVER        (set 0/off/false to force the classic --prompt path)
-ZCODE_TUI_LOG               (file path: append-only protocol debug log;
-                             outbound entries are method names only — request
-                             params, runtimeModel, and apiKey never touch disk)
-ZCODE_TUI_SKYLINE           (ASCII ZCODE logo; off/none/0 disables it; hidden
-                             automatically when the terminal is too small)
-ZCODE_TUI_CONFIG
-ZCODE_APP
-ZCODE_FALLBACK_TUI
-ZCODE_FORCE_SYSTEM_NODE
-```
-
-## Design and References
-
-- [Design document](docs/2026-07-04-design.md)
-- [TUI research notes](docs/references/tui-research-2026-07.md)
-- [Agent TUI habits](docs/references/agent-tui-habits.md)
-- [GitHub Releases](https://github.com/xhls008/zcode-tui/releases)
+For theme syntax, wrapper behavior, and build/release gates see
+[BUILDING.md](BUILDING.md) and the [design document](docs/2026-07-04-design.md).
 
 ## Limitations
 
-This fallback does not recreate the missing official `@zcode/tui` package, and
-it does not have access to any private desktop-app runtime model. It does one
-plain useful job: read terminal input, route local slash commands, call the
-official CLI path, and render output.
-
-## Background
-
-The official Linux package currently makes terminal users do extra work: the CLI
-help lists `tui`, but `zcode tui` can fail because the package does not include
-`@zcode/tui`.
-
-That gap is the reason this project exists.
-
-The Chinese README keeps the sharper roast images and wording:
-[README.md](README.md#背景与吐槽).
+This project is a terminal shell and compatibility layer, not a recreation of
+the Desktop app or the missing official `@zcode/tui`. Tool approval is not an OS
+sandbox; restrict workspace, network egress, MCP, and plugin access for sensitive projects.
 
 ## Development
 
 ```bash
-cargo fmt
-cargo test
-cargo clippy --all-targets --all-features
+cargo fmt --check
+cargo test --locked
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo build --release --locked
 ```
 
-Pull requests and pushes to `main` run the full Ubuntu quality gates plus
-native Rust tests on `windows-latest` (x64), `macos-latest` (Apple Silicon),
-and `macos-15-intel` (Intel). Tag releases also build on all four target
-platforms, execute each binary with `--version`, and require an exact tag match
-before uploading the assets.
-
-Hosted CI never receives ZCode credentials or real API keys. Deterministic
-fake-app-server and fixture tests cover app-server, auth, model, and session
-protocol behavior. Desktop installers, real accounts, and provider-network
-checks belong on a maintainer-owned Mac/Windows machine or a private
-self-hosted runner that never accepts untrusted pull requests.
-
-Thanks to [@tastypear](https://github.com/tastypear) for the resumed-session
-model-config compatibility fix
-([PR #1](https://github.com/xhls008/zcode-tui/pull/1)) and slash-command Enter
-completion behavior ([PR #2](https://github.com/xhls008/zcode-tui/pull/2)); and
-to [@auenger](https://github.com/auenger) for dynamic model discovery and
-pre-session model selection
-([PR #3](https://github.com/xhls008/zcode-tui/pull/3)), plus the native
-scrollback, phased output, and layout refactor
-([PR #4](https://github.com/xhls008/zcode-tui/pull/4)), and for continuing as
-a project collaborator in v0.6.1 with the Agent Inspector, background-task
-cancellation, GLM-5.3-Flash support, context status, and startup-layout work.
-Thank you for the continued support of the project.
+Real-kernel and Browser Use checks use temporary homes, synthetic data, and
+loopback services; see `BUILDING.md`.
 
 ## License
 
