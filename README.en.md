@@ -72,6 +72,40 @@ does not claim to reproduce every Desktop capability.
 - No local evidence does **not** mean nothing was ever uploaded; a client success
   state is not an independent server receipt.
 
+### Privacy criticism of the official design
+
+For the audited historical Desktop packages, the host triggered a repository
+snapshot flow after accepted session input: it enumerated workspace files and
+some `.git` metadata, archived and encrypted them, then uploaded the result to
+a server-provided object-storage target. The data key was wrapped with a
+server-held public-key workflow; the user did not hold the corresponding private
+key. Therefore, “encrypted” did not mean “user-controlled” or “decryptable only
+by the user.” The audited flow also did not present clear per-upload consent,
+and similarly named indexing/experience settings were not reliable opt-out gates.
+
+This criticism concerns transparency, defaults, and user control in those fixed
+artifacts. It does not claim that every user uploaded data or make a legal
+determination. The official team later apologized publicly and said it had fixed
+the issue, would open-source the component, and add third-party review; the
+scope of those changes and current server behavior still require version-specific
+verification ([audit](docs/privacy-audit-2026-09-18.md)).
+
+### New privacy-monitoring feature
+
+This project adds `check-zhipu-upload` to inspect upload-related evidence left in
+the official local data directories:
+
+- Read-only and offline: it does not start the kernel, read workspace contents,
+  obtain credentials, decrypt, or delete files.
+- Checks accepted manifests, attempt/failure counters, staged or encrypted
+  remnants, including the 3.12.3 upload-state fields.
+- Emits five stable statuses—`client_reported_accepted`, `attempt_evidence`,
+  `staged_evidence`, `no_local_evidence`, and `inconclusive`—with `--json` for
+  automation.
+- Reports read errors, limits, and incomplete coverage. `no_local_evidence` only
+  means no evidence was found locally; it is not proof that no upload occurred or
+  a server receipt. Stop the official Desktop app before checking when possible.
+
 ```bash
 zcode check-zhipu-upload
 zcode-tui check-zhipu-upload --json
