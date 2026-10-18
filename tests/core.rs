@@ -3459,3 +3459,28 @@ fn v4_snapshot_and_subagent_lifecycle_event_are_decoded() {
         Some("mapped the parser call chain")
     );
 }
+
+#[test]
+fn native_catalog_keeps_reasoning_default_and_all_configured_providers() {
+    let result = serde_json::json!({"settings":{"model":{
+        "current":{"providerId":"a","modelId":"same"},
+        "available":[
+            {"ref":{"providerId":"a","modelId":"same"},"label":"First","reasoning":{"defaultLevel":"max"}},
+            {"ref":{"providerId":"b","modelId":"same"},"label":"Second","reasoning":{"defaultLevel":"low"}}
+        ]
+    }}});
+    let controls = zcode_tui::app_session_controls(&result).unwrap();
+    assert_eq!(controls.models.len(), 2);
+    assert_eq!(
+        controls.models[0].reference["options"]["reasoningLevel"],
+        "max"
+    );
+    assert_eq!(
+        controls.models[1].reference["options"]["reasoningLevel"],
+        "low"
+    );
+    let params = zcode_tui::app_model_catalog_params("/tmp/synthetic");
+    assert_eq!(params["persistence"], "deferred");
+    assert_eq!(params["titleGenerationEnabled"], false);
+    assert!(params.get("runtimeModel").is_none());
+}

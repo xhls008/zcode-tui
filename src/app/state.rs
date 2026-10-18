@@ -23,6 +23,7 @@ pub(crate) enum ConnectStage {
     Resume,
     Subscribe,
     V4Subscribe,
+    Model,
 }
 
 /// Availability of the kernel database used by optional live progress.

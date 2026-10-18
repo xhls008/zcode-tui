@@ -129,6 +129,7 @@ the dialogue is fictional and is not evidence of current server behavior.*
 
 | Component | Status |
 |---|---|
+| Official desktop 3.15.3 | macOS ARM64: native-provider app-server, V4, create/resume and pre-prompt/in-session `/model` switching verified with an isolated mock provider; other platforms/versions unverified |
 | Official desktop 3.14.0 | Linux x86_64 static audit complete; classic CLI create/resume verified; standalone Browser Use remains blocked by the official `ZCode Built-in missing` error |
 | Official Desktop packages | 3.12.3-7463 and 3.11.2-6792 audited |
 | 3.12.3 | Classic CLI create/resume; no app-server/V4/in-session model picker yet |

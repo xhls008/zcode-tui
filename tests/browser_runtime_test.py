@@ -117,13 +117,17 @@ class RuntimeTests(unittest.TestCase):
             'console.log(JSON.stringify({builtin:process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE, '
             'appServer:process.env.ZCODE_TUI_APP_SERVER}));')
         result = self.run_kernel("version")
-        self.assertEqual(json.loads(result.stdout), {"builtin": str(config), "appServer": "0"})
+        self.assertEqual(json.loads(result.stdout), {"builtin": str(config)})
         self.env["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"] = "/explicit/config.json"
         self.assertEqual(json.loads(self.run_kernel("version").stdout)["builtin"], "/explicit/config.json")
         self.env["ZCODE_TUI_CLIENT"] = "1"
         result = self.run_kernel("app-server")
         self.assertEqual(result.returncode, 64)
         self.assertIn("classic CLI", result.stderr)
+        self.env["ZCODE_TUI_NATIVE_PROVIDER"] = "1"
+        result = self.run_kernel("app-server")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["builtin"], "/explicit/config.json")
 
     def test_new_headless_kernel_gets_terminal_surface_and_app_root(self):
         """3.14.x needs an explicit terminal surface for CLI Browser Use.

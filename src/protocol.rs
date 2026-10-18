@@ -115,6 +115,15 @@ pub fn app_create_params(workspace_path: &str) -> serde_json::Value {
     })
 }
 
+/// Temporary native-provider catalog session; never sends model traffic.
+pub fn app_model_catalog_params(workspace_path: &str) -> serde_json::Value {
+    let mut params = app_create_params(workspace_path);
+    params["persistence"] = serde_json::json!("deferred");
+    params["titleGenerationEnabled"] = serde_json::json!(false);
+    params["mode"] = serde_json::json!("build");
+    params
+}
+
 pub fn app_subscribe_params(session_id: &str) -> serde_json::Value {
     serde_json::json!({
         "sessionId": session_id,
@@ -1861,7 +1870,19 @@ fn controls_from_settings(settings: &serde_json::Value) -> Option<SessionControl
                             context_window: m
                                 .get("contextWindow")
                                 .and_then(serde_json::Value::as_u64),
-                            reference: m.get("ref")?.clone(),
+                            reference: {
+                                let mut reference = m.get("ref")?.clone();
+                                if reference.pointer("/options/reasoningLevel").is_none() {
+                                    if let Some(level) = m
+                                        .pointer("/reasoning/defaultLevel")
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        reference["options"]["reasoningLevel"] =
+                                            serde_json::json!(level);
+                                    }
+                                }
+                                reference
+                            },
                         })
                     })
                     .collect()
@@ -3089,6 +3110,7 @@ impl AppServerConn {
         let mut process = Command::new(zcode_bin);
         process
             .env("ZCODE_TUI_CLIENT", "1")
+            .env("ZCODE_TUI_NATIVE_PROVIDER", "1")
             .arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -3212,6 +3234,19 @@ impl AppServerConn {
                         Some(message) => Err(AppServerUnavailable::Protocol(message)),
                         None => Ok(result.unwrap_or(serde_json::Value::Null)),
                     };
+                }
+                Ok(AppServerMessage::ServerRequest { id, method, params }) => {
+                    if let Some(reply) = encode_runtime_preferences_reply(&id, &method)
+                        .or_else(|| encode_official_mcp_auth_headers_reply(&id, &method))
+                    {
+                        self.reply(&reply)?;
+                    } else {
+                        self.pending.push_back(AppServerMessage::ServerRequest {
+                            id,
+                            method,
+                            params,
+                        });
+                    }
                 }
                 Ok(other) => self.pending.push_back(other),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {

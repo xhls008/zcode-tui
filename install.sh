@@ -305,10 +305,12 @@ fi
 # 3.12.3 replaced host-injected runtimeModel/provider registry with native
 # provider config. Its standalone CLI owns migration + account authentication;
 # do not inject legacy credentials into the incompatible Desktop protocol.
-if grep -Fq '"workspace/readPresentation"' "$ZCODE_CJS" &&
+if [ "${ZCODE_TUI_NATIVE_PROVIDER:-}" != 1 ] && grep -Fq '"workspace/readPresentation"' "$ZCODE_CJS" &&
    ! grep -Fq '"workspace/updateProviderRegistry"' "$ZCODE_CJS"; then
     export ZCODE_TUI_CLASSIC_REASON="Official 3.12.x provider-config protocol: classic CLI compatibility mode (no V4/model picker)."
-    export ZCODE_TUI_APP_SERVER=0
+    if [ "${ZCODE_TUI_CLIENT:-}" = 1 ]; then
+        export ZCODE_TUI_APP_SERVER=0
+    fi
     if [ "${ZCODE_TUI_CLIENT:-}" = 1 ] && [ "${1:-}" = app-server ]; then
         echo "zcode-tui: $ZCODE_TUI_CLASSIC_REASON" >&2
         exit 64
@@ -391,10 +393,10 @@ if $browser_requested && ! $surface_requested && grep -Fq -- '--surface' "$ZCODE
     set -- --surface terminal "$@"
 fi
 if electron_usable; then
-    ELECTRON_RUN_AS_NODE=1 exec "$ELECTRON_BIN" "${BROWSER_ARGS[@]}" "$ZCODE_CJS" "$@"
+    ELECTRON_RUN_AS_NODE=1 exec "$ELECTRON_BIN" ${BROWSER_ARGS[@]+"${BROWSER_ARGS[@]}"} "$ZCODE_CJS" "$@"
 fi
 if node_is_recent; then
-    exec node "${BROWSER_ARGS[@]}" "$ZCODE_CJS" "$@"
+    exec node ${BROWSER_ARGS[@]+"${BROWSER_ARGS[@]}"} "$ZCODE_CJS" "$@"
 fi
 echo "zcode: cannot run the CLI kernel: Electron at ${ELECTRON_BIN} failed to start" >&2
 echo "       (missing desktop libraries on a headless box?) and no system node >= 22.5" >&2

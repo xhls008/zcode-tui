@@ -79,6 +79,8 @@ fn official_kernel_session_lifecycle() {
     listener.set_nonblocking(true).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let server_stop = stop.clone();
+    let switched_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_switch = switched_requests.clone();
     let server = thread::spawn(move || {
         'requests: while !server_stop.load(Ordering::Relaxed) {
             let (mut socket, _) = match listener.accept() {
@@ -116,7 +118,13 @@ fn official_kernel_session_lifecycle() {
                 continue 'requests;
             }
             let body: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(body["model"], "compat-model");
+            assert!(matches!(
+                body["model"].as_str(),
+                Some("compat-model" | "compat-model-2")
+            ));
+            if body["model"] == "compat-model-2" {
+                observed_switch.fetch_add(1, Ordering::Relaxed);
+            }
             let streaming = body["stream"] == true;
             let message = json!({"id":"msg_compat", "type":"message", "role":"assistant",
                 "model":"compat-model", "content":[], "stop_reason":null,
@@ -159,7 +167,7 @@ fn official_kernel_session_lifecycle() {
     let config = json!({
         "provider": {"compat": {"kind": "anthropic", "name": "Offline compatibility check",
             "options": {"baseURL": base_url, "apiKey": "not-a-real-key"},
-            "models": {"compat-model": {"name": "Offline model"}}}},
+            "models": {"compat-model": {"name": "Offline model"}, "compat-model-2": {"name": "Second offline model"}}}},
         "model": {"main": "compat/compat-model", "lite": "compat/compat-model"}
     })
     .to_string();
@@ -231,6 +239,93 @@ fn official_kernel_session_lifecycle() {
             session = Some(id);
             println!("3.12.x classic create/resume turn {turn}: passed");
         }
+        // Native provider protocol: catalog + acknowledged switch + real
+        // streaming request + resume, all against the loopback fake provider.
+        let mut conn = AppServerConn::spawn(wrapper.to_str().unwrap()).unwrap();
+        let catalog = conn
+            .request_blocking(
+                "session/create",
+                zcode_tui::app_model_catalog_params(home),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        let sid = app_session_id_from_result(&catalog).unwrap();
+        let controls = zcode_tui::app_session_controls(&catalog).unwrap();
+        assert!(controls
+            .models
+            .iter()
+            .any(|m| m.reference["modelId"] == "compat-model-2"));
+        let mut preferences = 0;
+        let changed = request(
+            &mut conn,
+            "session/setModel",
+            zcode_tui::app_set_model_params(
+                &sid,
+                &controls
+                    .models
+                    .iter()
+                    .find(|m| m.reference["modelId"] == "compat-model-2")
+                    .unwrap()
+                    .reference,
+            ),
+            &mut preferences,
+        );
+        assert_eq!(
+            changed["settings"]["model"]["current"]["modelId"],
+            "compat-model-2"
+        );
+        request(
+            &mut conn,
+            "session/subscribe",
+            app_subscribe_params(&sid),
+            &mut preferences,
+        );
+        request(
+            &mut conn,
+            "v4/conversation/subscribe",
+            v4_conversation_subscribe_params(&sid, "native-test"),
+            &mut preferences,
+        );
+        run_turn(&mut conn, &sid, &mut preferences);
+        // Closing a probe must never delete a now-persisted conversation.
+        let closed = request(
+            &mut conn,
+            "session/close",
+            json!({"sessionId":sid, "expectedPersistence":"deferred"}),
+            &mut preferences,
+        );
+        assert_eq!(closed["closed"], false);
+        drop(conn);
+        let mut conn = AppServerConn::spawn(wrapper.to_str().unwrap()).unwrap();
+        let resumed = request(
+            &mut conn,
+            "session/resume",
+            app_resume_params(&sid, None),
+            &mut preferences,
+        );
+        assert_eq!(
+            resumed["settings"]["model"]["current"]["modelId"],
+            "compat-model-2"
+        );
+        request(
+            &mut conn,
+            "session/subscribe",
+            app_subscribe_params(&sid),
+            &mut preferences,
+        );
+        request(
+            &mut conn,
+            "v4/conversation/subscribe",
+            v4_conversation_subscribe_params(&sid, "native-resume"),
+            &mut preferences,
+        );
+        run_turn(&mut conn, &sid, &mut preferences);
+        drop(conn);
+        assert!(
+            switched_requests.load(Ordering::Relaxed) >= 2,
+            "selected model was not used by both turns"
+        );
+        println!("native catalog, model switch, stream and resume: passed");
         stop.store(true, Ordering::Relaxed);
         server.join().unwrap();
         return;

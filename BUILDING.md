@@ -174,3 +174,20 @@ unshare -Urn sh -c 'ip link set lo up && ZCODE_TEST_CJS=/path/to/resources/glm/z
 跨平台 CI 不下载、执行未知官方包；真实内核和真实 Browser Use 是显式 opt-in 门禁。
 `tests/pty_smoke.py` 是需要真实账号的人工检查，不要把它当作离线回归；离线 Agent
 PTY 回归为 `tests/agents_pty_smoke.py`。
+
+### Native-provider model picker regression
+
+On macOS ARM64, the following checks were verified against ZCode Desktop 3.15.3.
+Both use a temporary HOME and a loopback mock model; no real account is needed.
+Set `ZCODE_TEST_CJS` to the official kernel's `zcode.cjs` path.
+
+```sh
+cargo test --locked --test official_kernel -- --ignored --nocapture
+cargo build --locked
+ZCODE_TEST_BIN="$PWD/target/debug/zcode-tui" python3 tests/native_model_pty.py
+```
+
+The PTY check opens `/model` before the first prompt, selects a second model, then
+switches back during the session and checks the models received by the mock server.
+Protocol detection inspects the discovered desktop installation; custom CLI wrappers
+pointing to a different kernel are not covered by this validation.

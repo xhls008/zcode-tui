@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- 修复 native-provider 内核的 `/model` 目录加载：使用 deferred session 的官方
+  settings，保留各 provider 模型及默认 reasoning level，不注入旧 runtimeModel。
+- 等待模型切换确认后再发送首轮 prompt、保存偏好；切换失败保留已确认的选择。
+- 模型目录加载期间输入 `/model` 会等待并自动打开；Esc 可取消。
+- wrapper 允许支持 native-provider 协议的 TUI 使用 app-server，并兼容 macOS Bash 3.2。
+- macOS ARM64 / ZCode Desktop 3.15.3 上通过隔离模拟 provider 验证创建、恢复、
+  V4 和真实 PTY 模型选择；未使用真实账号或付费模型验证请求。
+
 每个版本都会发布对应的 GitHub Release：打 `v*` tag 后 CI 跑全部质量门禁，
 构建 Linux x86_64-musl、Windows x86_64、macOS Intel/Apple Silicon 二进制，
 连同 SHA256SUMS 和 install.sh 一起挂到 Release，notes 取自本文件对应版本段。
