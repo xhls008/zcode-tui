@@ -111,6 +111,7 @@ zcode-tui check-zhipu-upload --json       # 机器可读结果
 | 组件 | 状态 |
 |---|---|
 | 官方桌面包 | 3.12.3-7463、3.11.2-6792 已审计 |
+| 官方桌面包 3.15.3 | macOS ARM64 隔离验证 native-provider app-server、V4、创建/恢复和 `/model` 首轮选择/会话内切换；其他平台和版本未验证 |
 | 官方桌面包 3.14.0 | Linux x86_64 静态审计完成；经典 CLI 创建/连续恢复已验证；standalone Browser Use 仍受官方 `ZCode Built-in missing` 阻塞 |
 | 3.12.3 | 经典 CLI 创建/连续恢复；暂不支持 app-server/V4/会话内模型切换 |
 | 3.11.2 | app-server 流式、V4 控制、取消和恢复已验证 |

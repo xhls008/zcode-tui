@@ -174,8 +174,24 @@ fn run_tui(config: AppConfig, zcode_bin: &str) -> Result<()> {
 
     loop {
         state.tick = state.tick.wrapping_add(1);
-        if let Ok(report) = probe.try_recv() {
-            state.apply_startup_report(report);
+        while let Ok(event) = probe.try_recv() {
+            match event {
+                StartupEvent::Catalog(catalog) => {
+                    state.model_catalog_loaded = true;
+                    if let Some(catalog) = catalog {
+                        state.apply_model_catalog(catalog);
+                    }
+                    if state.model_picker_pending {
+                        state.model_picker_pending = false;
+                        if state.controls.models.is_empty() {
+                            state.push_error("Could not load the model catalog; check ZCode provider configuration and restart the TUI.");
+                        } else {
+                            state.open_model_picker();
+                        }
+                    }
+                }
+                StartupEvent::Ready(report) => state.apply_startup_report(report),
+            }
         }
         state.pump_job();
         state.pump_app_connect();
@@ -272,6 +288,11 @@ enum DbProbe {
     Supported(PathBuf),
 }
 
+enum StartupEvent {
+    Catalog(Option<ModelCatalogReport>),
+    Ready(StartupReport),
+}
+
 struct StartupReport {
     kernel: Option<String>,
     installed: Option<String>,
@@ -294,6 +315,19 @@ fn active_zcode_app_dir() -> Option<PathBuf> {
         Some(Path::new("/opt/ZCode")),
         home.as_deref(),
     )
+}
+
+// Protocol capability, not the CLI version (several incompatible kernels share it).
+fn native_provider_protocol() -> bool {
+    static NATIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NATIVE.get_or_init(|| {
+        active_zcode_app_dir()
+            .and_then(|dir| fs::read_to_string(dir.join("resources/glm/zcode.cjs")).ok())
+            .is_some_and(|source| {
+                source.contains("\"workspace/readPresentation\"")
+                    && !source.contains("\"workspace/updateProviderRegistry\"")
+            })
+    })
 }
 
 fn installed_zcode_version(app_dir: Option<&Path>) -> Option<String> {
@@ -521,6 +555,35 @@ fn cache_model_catalog(report: &ModelCatalogReport) -> Result<()> {
 }
 
 fn refresh_model_catalog(zcode_bin: &str, workspace: &str) -> Option<ModelCatalogReport> {
+    if native_provider_protocol() {
+        // Modern kernels own their provider configuration. A deferred, empty
+        // session exposes the catalog without sending a prompt or persisting a task.
+        let mut conn = AppServerConn::spawn(zcode_bin).ok()?;
+        let result = conn
+            .request_blocking(
+                "session/create",
+                zcode_tui::app_model_catalog_params(workspace),
+                Duration::from_secs(25),
+            )
+            .ok()?;
+        let id = app_session_id_from_result(&result)?;
+        let controls = app_session_controls(&result);
+        let _ = conn.request_blocking(
+            "session/close",
+            serde_json::json!({
+                "sessionId": id, "expectedPersistence": "deferred"
+            }),
+            Duration::from_secs(5),
+        );
+        let controls = controls?;
+        if controls.models.is_empty() {
+            return None;
+        }
+        return Some(ModelCatalogReport {
+            provider_id: controls.model_provider.clone().unwrap_or_default(),
+            controls,
+        });
+    }
     let runtime = load_runtime_model();
     let mut live = AppServerConn::spawn(zcode_bin).ok().and_then(|mut conn| {
         if let Some(params) = runtime
@@ -587,7 +650,7 @@ fn spawn_startup_probe(
     zcode_bin: String,
     workspace: String,
     browser_use: bool,
-) -> std::sync::mpsc::Receiver<StartupReport> {
+) -> std::sync::mpsc::Receiver<StartupEvent> {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let model_catalog = if browser_use {
@@ -595,6 +658,7 @@ fn spawn_startup_probe(
         } else {
             refresh_model_catalog(&zcode_bin, &workspace)
         };
+        let _ = sender.send(StartupEvent::Catalog(model_catalog));
         let kernel = run_command(&[zcode_bin, "version".to_string()])
             .ok()
             .and_then(|output| {
@@ -623,14 +687,14 @@ fn spawn_startup_probe(
                 .and_then(|body| parse_update_feed(&body));
             }
         }
-        let _ = sender.send(StartupReport {
+        let _ = sender.send(StartupEvent::Ready(StartupReport {
             kernel,
             installed,
             feed,
             feed_base,
             db: probe_kernel_db(),
-            model_catalog,
-        });
+            model_catalog: None,
+        }));
     });
     receiver
 }
@@ -764,6 +828,7 @@ enum ConnectPhase {
     Resume(u64),
     Subscribe(u64),
     V4Subscribe(u64),
+    Model(u64),
 }
 
 struct UiState {
@@ -803,6 +868,8 @@ struct UiState {
     agents: AgentInspectorState,
     /// /model picker overlay: selected index into `controls.models`.
     model_picker: Option<usize>,
+    model_picker_pending: bool,
+    model_catalog_loaded: bool,
     /// Model selected before the first app-server session exists. Applied
     /// after create/resume and before the queued first prompt is sent.
     pending_model: Option<ModelChoice>,
@@ -899,6 +966,7 @@ struct PendingInteraction {
 /// carries its input so a failure can requeue it instead of losing it.
 enum ControlReq {
     Command(&'static str),
+    SetModel(ModelChoice),
     /// Optional authoritative child-agent/background-work refresh.
     SubagentsRefresh,
     /// Official background-work cancellation, correlated by exact taskId.
@@ -1022,6 +1090,8 @@ impl UiState {
             session_picker: None,
             agents: AgentInspectorState::default(),
             model_picker: None,
+            model_picker_pending: false,
+            model_catalog_loaded: false,
             pending_model: None,
             model_provider: None,
             history_query: None,
@@ -1363,6 +1433,9 @@ impl UiState {
     // ---- key handling --------------------------------------------------
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<UiEffect> {
+        if key.code == KeyCode::Esc {
+            self.model_picker_pending = false;
+        }
         if self.leader_pending {
             self.leader_pending = false;
             return self.handle_leader_key(key);
@@ -1829,6 +1902,13 @@ impl UiState {
     }
 
     fn start_prompt_job_via_cli(&mut self, prompt: &str) {
+        if native_provider_protocol()
+            && self.config.browser_use.is_none()
+            && (self.pending_model.is_some() || load_model_preference().is_some())
+        {
+            self.push_error("Cannot preserve the selected model through classic CLI fallback; prompt was not sent. Restart the TUI to reconnect.");
+            return;
+        }
         match prompt_command_for(&self.zcode_bin, &self.config, prompt) {
             Ok(command) => {
                 let live = self.prepare_live_progress();
@@ -1983,7 +2063,7 @@ impl UiState {
         let workspace = self.app_workspace();
         let runtime = load_runtime_model();
         let mcp_servers = self.mcp_servers_for_session();
-        let params = match self.config.resume.as_deref() {
+        let mut params = match self.config.resume.as_deref() {
             Some(session_id) => self.session_handshake_params(
                 app_resume_params(session_id, runtime.as_ref()),
                 mcp_servers,
@@ -1993,6 +2073,12 @@ impl UiState {
                 mcp_servers,
             ),
         };
+        if native_provider_protocol() && self.config.resume.is_none() {
+            params["mode"] = serde_json::json!(self.config.mode.as_deref().unwrap_or("build"));
+            if let Some(choice) = &self.pending_model {
+                params["model"] = choice.reference.clone();
+            }
+        }
         let conn = self
             .app_conn
             .as_mut()
@@ -2013,7 +2099,11 @@ impl UiState {
     fn close_app_session(&mut self) {
         if let (Some(conn), Some(session_id)) = (self.app_conn.as_mut(), self.app_session.clone()) {
             if conn.is_alive() {
-                let _ = conn.send("session/close", app_close_params(&session_id));
+                let mut params = app_close_params(&session_id);
+                if native_provider_protocol() {
+                    params["expectedPersistence"] = serde_json::json!("deferred");
+                }
+                let _ = conn.send("session/close", params);
                 self.log_debug("session/close sent (discarding live session)");
             }
         }
@@ -2099,6 +2189,7 @@ impl UiState {
             // Copy the awaited stage+id out so the match arms can mutate `self`.
             let waiting = match &self.app_connect {
                 Some(connect) => match &connect.phase {
+                    ConnectPhase::Model(want) => (ConnectStage::Model, *want),
                     ConnectPhase::ProviderRegistry(want) => (ConnectStage::ProviderRegistry, *want),
                     ConnectPhase::Create(want) => (ConnectStage::Create, *want),
                     ConnectPhase::Resume(want) => (ConnectStage::Resume, *want),
@@ -2148,6 +2239,10 @@ impl UiState {
                 // A failed resume (session gone/foreign) is not fatal: note it
                 // and redo the handshake with a fresh session. Anything else
                 // downgrades as before.
+                if native_provider_protocol() {
+                    self.app_connect_failed(AppServerUnavailable::Protocol(why));
+                    return;
+                }
                 if matches!(stage, ConnectStage::Resume) {
                     self.config.resume = None;
                     self.push_system(&format!("resume failed ({why}); starting a fresh session"));
@@ -2177,6 +2272,18 @@ impl UiState {
                 return;
             }
             match stage {
+                ConnectStage::Model => {
+                    if let Some(result) = result.as_ref() {
+                        self.absorb_session_result(result);
+                    }
+                    if let Some(choice) = self.pending_model.take() {
+                        if let Err(error) = save_model_preference(&choice.reference) {
+                            self.log_debug(&format!("model preference save failed: {error}"));
+                        }
+                    }
+                    self.finish_app_connect();
+                    return;
+                }
                 ConnectStage::ProviderRegistry => match self.begin_session_open() {
                     Ok(phase) => {
                         if let Some(connect) = &mut self.app_connect {
@@ -2288,6 +2395,25 @@ impl UiState {
     /// initial frame is emitted immediately after the subscribe response and
     /// will be consumed by `pump_app_turn` on the next tick.
     fn finish_app_connect(&mut self) {
+        if let (Some(choice), Some(session_id)) =
+            (self.pending_model.as_ref(), self.app_session.as_ref())
+        {
+            let params = app_set_model_params(session_id, &choice.reference);
+            match self
+                .app_conn
+                .as_mut()
+                .expect("connected")
+                .send("session/setModel", params)
+            {
+                Ok(id) => {
+                    if let Some(connect) = &mut self.app_connect {
+                        connect.phase = ConnectPhase::Model(id);
+                    }
+                }
+                Err(error) => self.app_connect_failed(error),
+            }
+            return;
+        }
         let Some(connect) = self.app_connect.take() else {
             return;
         };
@@ -2303,13 +2429,6 @@ impl UiState {
                 "session/setMode",
                 app_set_mode_params(&session_id, &mode),
                 ControlReq::Command("/mode"),
-            );
-        }
-        if let Some(choice) = self.pending_model.take() {
-            self.send_control(
-                "session/setModel",
-                app_set_model_params(&session_id, &choice.reference),
-                ControlReq::Command("/model"),
             );
         }
         let attachments = self.app_attachments_for(&connect.prompt);
@@ -2339,6 +2458,15 @@ impl UiState {
     /// Handshake failed before any turn started: downgrade and retry the
     /// prompt once via the classic --prompt path (nothing was shown yet).
     fn app_connect_failed(&mut self, reason: AppServerUnavailable) {
+        if native_provider_protocol() || self.pending_model.is_some() {
+            // Never silently retry using the CLI default instead of the selected model.
+            self.app_connect = None;
+            self.app_conn = None;
+            self.app_session = None;
+            self.push_error(&format!("session setup failed: {reason}; prompt was not sent; retry after correcting the error"));
+            self.status = "session setup failed".to_string();
+            return;
+        }
         let prompt = self.app_connect.take().map(|c| c.prompt);
         self.downgrade_app_server(reason);
         if let Some(prompt) = prompt {
@@ -3067,20 +3195,23 @@ fi"#
             self.controls.mode = Some(mode);
         }
         if let Some(provider) = update.model_provider {
-            if self.model_provider.as_deref() != Some(provider.as_str()) {
+            if !native_provider_protocol()
+                && self.model_provider.as_deref() != Some(provider.as_str())
+            {
                 self.controls.models.clear();
             }
             self.model_provider = Some(provider);
         }
         let model_provider = self.model_provider.clone();
         for model in update.models.into_iter().filter(|model| {
-            model_provider.as_deref().is_none_or(|provider_id| {
-                model
-                    .reference
-                    .get("providerId")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(provider_id)
-            })
+            native_provider_protocol()
+                || model_provider.as_deref().is_none_or(|provider_id| {
+                    model
+                        .reference
+                        .get("providerId")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(provider_id)
+                })
         }) {
             if let Some(index) = self
                 .controls
@@ -3112,6 +3243,8 @@ fi"#
                         .get("modelId")
                         .and_then(serde_json::Value::as_str)
                         == Some(current)
+                        && model.reference.get("providerId").and_then(|v| v.as_str())
+                            == self.model_provider.as_deref()
                 })
             })
             .and_then(|model| model.context_window)
@@ -3221,6 +3354,12 @@ fi"#
     /// swallow it (never fatal to the turn/session). True when `id` was ours.
     fn on_control_error(&mut self, id: u64, message: &str) -> bool {
         match self.control_requests.remove(&id) {
+            Some(ControlReq::SetModel(_)) => {
+                self.push_error(&format!(
+                    "/model failed: {message}; model preference unchanged"
+                ));
+                true
+            }
             Some(ControlReq::Command(name)) => {
                 self.push_error(&format!("{name} failed: {message}"));
                 true
@@ -3323,6 +3462,15 @@ fi"#
     /// enter the turn and must be requeued, not silently lost.
     fn on_control_ok(&mut self, id: u64, result: Option<&serde_json::Value>) {
         match self.control_requests.remove(&id) {
+            Some(ControlReq::SetModel(choice)) => {
+                if let Some(result) = result {
+                    self.absorb_session_result(result);
+                }
+                if let Err(error) = save_model_preference(&choice.reference) {
+                    self.log_debug(&format!("model preference save failed: {error}"));
+                }
+                self.push_system(&format!("model → {} ({})", choice.label, choice.provider));
+            }
             Some(ControlReq::Command("/compact")) => {
                 self.status = "compacted".to_string();
             }
@@ -3847,19 +3995,28 @@ fi"#
             return;
         }
         if self.controls.models.is_empty() {
-            self.push_system("model catalog is not available from the ZCode app-server yet");
+            if self.model_catalog_loaded {
+                self.push_error("Model catalog unavailable; check ZCode provider configuration and restart the TUI.");
+                return;
+            }
+            self.model_picker_pending = true;
+            self.push_system(
+                "Loading model catalog… the picker will open when ready (Esc cancels).",
+            );
             return;
         }
-        let current =
-            self.controls
-                .model_current
-                .as_deref()
-                .and_then(|id| {
-                    self.controls.models.iter().position(|m| {
-                        m.reference.get("modelId").and_then(|v| v.as_str()) == Some(id)
-                    })
+        let current = self
+            .controls
+            .model_current
+            .as_deref()
+            .and_then(|id| {
+                self.controls.models.iter().position(|m| {
+                    m.reference.get("modelId").and_then(|v| v.as_str()) == Some(id)
+                        && m.reference.get("providerId").and_then(|v| v.as_str())
+                            == self.model_provider.as_deref()
                 })
-                .unwrap_or(0);
+            })
+            .unwrap_or(0);
         self.model_picker = Some(current);
     }
 
@@ -3868,21 +4025,12 @@ fi"#
             return;
         };
         if let Some(choice) = self.controls.models.get(index).cloned() {
-            if let Err(error) = save_model_preference(&choice.reference) {
-                self.log_debug(&format!("model preference save failed: {error}"));
-            }
-            self.controls.model_current = choice
-                .reference
-                .get("modelId")
-                .and_then(|value| value.as_str())
-                .map(str::to_string);
             match self.app_session.clone() {
                 Some(session_id) => {
-                    self.push_system(&format!("model → {} ({})", choice.label, choice.provider));
                     self.send_control(
                         "session/setModel",
                         app_set_model_params(&session_id, &choice.reference),
-                        ControlReq::Command("/model"),
+                        ControlReq::SetModel(choice.clone()),
                     );
                 }
                 None => {
@@ -3890,6 +4038,16 @@ fi"#
                         "model → {} ({}) for the next session",
                         choice.label, choice.provider
                     ));
+                    self.controls.model_current = choice
+                        .reference
+                        .get("modelId")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    self.model_provider = choice
+                        .reference
+                        .get("providerId")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
                     self.pending_model = Some(choice);
                 }
             }
@@ -5146,6 +5304,10 @@ fi"#
                         .get("modelId")
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_string);
+                    catalog.controls.model_provider = preferred
+                        .get("providerId")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
                     self.pending_model = Some(choice);
                 }
             }
@@ -5670,6 +5832,9 @@ fn live_panel_lines(state: &UiState) -> Vec<Line<'static>> {
 /// registry metadata enriches the selectable models without mutating either
 /// file. Missing or malformed Desktop state falls back to CLI-only behavior.
 fn load_runtime_model() -> Option<serde_json::Value> {
+    if native_provider_protocol() {
+        return None;
+    }
     let home = user_home_dir()?;
     let config = fs::read_to_string(kernel_config_path_from(&home)).ok()?;
     let desktop = fs::read_to_string(home.join(".zcode/v2/config.json")).ok();
@@ -6501,7 +6666,11 @@ fn render_model_picker(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
         .iter()
         .map(|choice| {
             let id = choice.reference.get("modelId").and_then(|v| v.as_str());
-            let marker = if id.is_some() && id == current {
+            let marker = if id.is_some()
+                && id == current
+                && choice.reference.get("providerId").and_then(|v| v.as_str())
+                    == state.model_provider.as_deref()
+            {
                 "● "
             } else {
                 "  "
@@ -6845,6 +7014,53 @@ fn display_cwd(config: &AppConfig) -> String {
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    #[test]
+    fn failed_model_switch_keeps_confirmed_selection() {
+        let mut state = UiState::new(AppConfig::default(), "must-not-execute".into());
+        state.controls.model_current = Some("old".into());
+        let choice = ModelChoice {
+            label: "New".into(),
+            provider: "Test".into(),
+            context_window: None,
+            reference: serde_json::json!({"providerId":"p","modelId":"new"}),
+        };
+        state
+            .control_requests
+            .insert(123, ControlReq::SetModel(choice));
+        assert!(state.on_control_error(123, "rejected"));
+        assert_eq!(state.controls.model_current.as_deref(), Some("old"));
+        assert!(state
+            .log
+            .last()
+            .unwrap()
+            .text
+            .contains("preference unchanged"));
+    }
+
+    #[test]
+    fn model_choice_before_session_is_pending_not_a_false_server_success() {
+        let mut state = UiState::new(AppConfig::default(), "must-not-execute".into());
+        state.controls.models = vec![ModelChoice {
+            label: "Second".into(),
+            provider: "Test".into(),
+            context_window: None,
+            reference: serde_json::json!({"providerId":"p","modelId":"second","options":{"reasoningLevel":"low"}}),
+        }];
+        state.model_picker = Some(0);
+        state.pick_model();
+        assert_eq!(
+            state.pending_model.as_ref().unwrap().reference["options"]["reasoningLevel"],
+            "low"
+        );
+        assert!(state
+            .log
+            .last()
+            .unwrap()
+            .text
+            .contains("for the next session"));
+        assert!(state.app_conn.is_none());
+    }
 
     #[test]
     fn browser_mode_rejects_missing_executable_without_starting_a_job() {
